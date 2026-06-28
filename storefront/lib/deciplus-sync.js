@@ -6,11 +6,18 @@ const path = require('path');
 const { ROOT, ensureDir, loadJson } = require('../../lib/utils');
 const { logInfo, logWarn } = require('../../lib/logger');
 const { normalizeText, inferSaleType, buildDeciplusProductSearch } = require('../../bot/catalog');
-const { getBadgeFeeNotice } = require('./storefront-copy');
 
 const SYNC_FILE = path.join(ROOT, 'data', 'storefront', 'catalog-live.json');
 const OVERRIDES_FILE = path.join(ROOT, 'storefront', 'products-overrides.json');
 const STATIC_FILE = path.join(ROOT, 'storefront', 'products.json');
+
+function loadStaticProducts() {
+  try {
+    return require('../products.json');
+  } catch {
+    return loadJson('storefront/products.json', { optional: true }) || [];
+  }
+}
 
 /** Produits Deciplus visibles sur capture coach — contrôle sync */
 const REQUIRED_DECIPLUS_TITLES = [
@@ -19,7 +26,6 @@ const REQUIRED_DECIPLUS_TITLES = [
   'OFFRE PROMO 12 MOIS',
   'OFFRE ETE 2026 - 3 MOIS ILLIMITÉS',
   'COMPTANT 3 MOIS',
-  'Badge',
 ];
 
 function slugify(title) {
@@ -56,34 +62,20 @@ function mapDeciplusItem(item) {
   const comptant = /comptant/i.test(item.title);
   const saleType = inferSaleType(item);
   const requiresIban = saleType !== 'none' && stripeEuros > 0 && !comptant && !/coach staff/i.test(item.title);
-
-  let deciplusTotalNote = null;
-  if (stripeEuros > 0 && apiPriceDiffers(item, stripeEuros)) {
-    deciplusTotalNote = `Total contrat Deciplus : ${formatEuros(Number(item.price))}`;
-  }
+  const deciplusDisplayEuros = Number(item.price || 0);
 
   return {
     id: `dp-${item.id}`,
     deciplus_id: item.id,
     category: item.categoryTitle || item.categoryId,
     name: item.title,
-    tagline: item.title,
-    description: item.categoryTitle
-      ? `${item.categoryTitle} — synchronisé Deciplus (#${item.id})`
-      : `Produit Deciplus #${item.id}`,
     price_cents: Math.round(stripeEuros * 100),
-    price_label: stripeEuros === 0 ? 'Gratuit' : formatEuros(stripeEuros),
-    deciplus_price: Number(item.price || 0),
-    deciplus_total_note: deciplusTotalNote,
+    price_label: deciplusDisplayEuros > 0 ? formatEuros(deciplusDisplayEuros) : 'Gratuit',
+    stripe_price_label: stripeEuros === 0 ? 'Gratuit' : formatEuros(stripeEuros),
+    deciplus_price: deciplusDisplayEuros,
     sale_type: saleType,
     requires_iban: requiresIban,
     requires_payment: stripeEuros > 0,
-    installments_note: comptant
-      ? 'Paiement comptant Deciplus'
-      : stripeEuros > 0 && Number(item.price) > stripeEuros + 1
-        ? 'CB : 1ère échéance · suite par prélèvement IBAN'
-        : null,
-    badge_fee_notice: getBadgeFeeNotice({ sale_type: saleType, category: item.categoryTitle, name: item.title }),
     deciplus_product_search: buildDeciplusProductSearch(item.title, item.id),
     synced: true,
     reference: item.reference,
@@ -125,20 +117,20 @@ function attachLegacyIds(products) {
 }
 
 function applyOverrides(products, overrides) {
+  const allowedKeys = new Set(['deciplus_product_search', 'legacy_id', 'deciplus_id']);
   const byName = new Map(products.map((p) => [normalizeText(p.name), p]));
   for (const ov of overrides) {
     const key = normalizeText(ov.name || ov.match);
     const existing = byName.get(key);
-    if (existing) {
-      Object.assign(existing, ov, { name: existing.name, deciplus_id: existing.deciplus_id });
-    } else if (ov.name) {
-      products.push({ ...ov, synced: false, manual: true });
+    if (!existing) continue;
+    for (const [k, v] of Object.entries(ov)) {
+      if (allowedKeys.has(k)) existing[k] = v;
     }
   }
   return products;
 }
 
-function deciplusToStorefront(deciplusProducts, { includeCategories = ['abo', 'decipass'] } = {}) {
+function deciplusToStorefront(deciplusProducts, { includeCategories = ['abo'] } = {}) {
   const filtered = deciplusProducts.filter((p) => {
     if (/coach staff/i.test(p.title)) return false;
     const cat = p.categoryId || p.type;
@@ -150,23 +142,6 @@ function deciplusToStorefront(deciplusProducts, { includeCategories = ['abo', 'd
   let products = filtered.map(mapDeciplusItem);
   products = applyOverrides(products, loadOverrides());
   products = attachLegacyIds(products);
-
-  // Essai gratuit (pas dans abonnements Deciplus)
-  if (!products.some((p) => normalizeText(p.name).includes('essai'))) {
-    products.push({
-      id: 'seance-essai',
-      name: 'Séance d\'essai gratuite',
-      tagline: 'Séance d\'essai',
-      category: 'Essai',
-      description: 'Fiche membre Deciplus sans vente.',
-      price_cents: 0,
-      price_label: 'Gratuit',
-      requires_iban: false,
-      requires_payment: false,
-      synced: false,
-      manual: true,
-    });
-  }
 
   products.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
   return products;
@@ -187,7 +162,12 @@ function saveSyncedCatalog(products, meta = {}) {
 
 function loadSyncedCatalog() {
   if (!fs.existsSync(SYNC_FILE)) return null;
-  return JSON.parse(fs.readFileSync(SYNC_FILE, 'utf8'));
+  try {
+    return JSON.parse(fs.readFileSync(SYNC_FILE, 'utf8'));
+  } catch (err) {
+    logWarn('Catalogue live illisible', { error: err.message, file: SYNC_FILE });
+    return null;
+  }
 }
 
 let runtimeCatalog = null;
@@ -228,9 +208,13 @@ function getStoreProducts({ preferLive = true } = {}) {
     const live = loadSyncedCatalog();
     if (live?.products?.length) return live;
   }
+  const staticProducts = loadStaticProducts();
+  if (!staticProducts.length && process.env.VERCEL) {
+    logWarn('Catalogue statique indisponible sur Vercel — ingest bot requis');
+  }
   return {
     synced_at: null,
-    products: loadJson('storefront/products.json'),
+    products: staticProducts,
     source: 'static',
   };
 }
