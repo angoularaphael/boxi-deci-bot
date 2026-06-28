@@ -10,7 +10,43 @@ const { getBadgeFeeNotice, isStorefrontProduct } = require('./storefront-copy');
 
 const SYNC_FILE = path.join(ROOT, 'data', 'storefront', 'catalog-live.json');
 const OVERRIDES_FILE = path.join(ROOT, 'storefront', 'products-overrides.json');
+const VISIBLE_PRODUCTS_FILE = path.join(ROOT, 'config', 'storefront-visible-products.json');
 const STATIC_FILE = path.join(ROOT, 'storefront', 'products.json');
+
+function loadVisibleDeciplusTitles() {
+  try {
+    const data = loadJson('config/storefront-visible-products.json', { optional: true });
+    if (!data?.titles?.length) return null;
+    return data.titles.map((t) => normalizeText(t));
+  } catch {
+    return null;
+  }
+}
+
+/** Correspondance titre API ↔ liste visible Deciplus (grille coach) */
+function isVisibleInDeciplusGrid(title) {
+  const allowed = loadVisibleDeciplusTitles();
+  if (!allowed) return true;
+  const norm = normalizeText(title);
+  return allowed.some(
+    (entry) =>
+      norm === entry ||
+      norm.includes(entry) ||
+      entry.includes(norm) ||
+      (entry.length >= 12 && norm.startsWith(entry.slice(0, 12)))
+  );
+}
+
+/** Produits Deciplus visibles sur capture coach — contrôle sync */
+const REQUIRED_DECIPLUS_TITLES = loadVisibleDeciplusTitles()
+  ? loadJson('config/storefront-visible-products.json').titles.slice(0, 5)
+  : [
+      'OFFRE A 29€',
+      'OFFRE PROMO 9€',
+      'OFFRE PROMO 12 MOIS',
+      'OFFRE ETE 2026 - 3 MOIS ILLIMITÉS',
+      'COMPTANT 3 MOIS',
+    ];
 
 function loadStaticProducts() {
   try {
@@ -19,15 +55,6 @@ function loadStaticProducts() {
     return loadJson('storefront/products.json', { optional: true }) || [];
   }
 }
-
-/** Produits Deciplus visibles sur capture coach — contrôle sync */
-const REQUIRED_DECIPLUS_TITLES = [
-  'OFFRE A 29€',
-  'OFFRE PROMO 9€',
-  'OFFRE PROMO 12 MOIS',
-  'OFFRE ETE 2026 - 3 MOIS ILLIMITÉS',
-  'COMPTANT 3 MOIS',
-];
 
 function slugify(title) {
   return normalizeText(title).replace(/\s+/g, '-').slice(0, 48) || 'produit';
@@ -152,11 +179,15 @@ function deciplusToStorefront(deciplusProducts, { includeCategories = ['abo'] } 
     return includeCategories.length === 0;
   });
 
-  let products = filtered.map(mapDeciplusItem).filter(isStorefrontProduct);
+  let products = filtered
+    .filter((p) => isVisibleInDeciplusGrid(p.title))
+    .map(mapDeciplusItem)
+    .filter(isStorefrontProduct);
   products = applyOverrides(products, loadOverrides());
   products = attachLegacyIds(products);
 
   products.sort((a, b) => a.category.localeCompare(b.category) || a.name.localeCompare(b.name));
+  logInfo('Catalogue filtré grille Deciplus visible', { count: products.length });
   return products;
 }
 
@@ -216,6 +247,7 @@ function ingestCatalogPayload(payload) {
 function enrichStorefrontProducts(products) {
   return products
     .filter(isStorefrontProduct)
+    .filter((p) => isVisibleInDeciplusGrid(p.name))
     .map((product) => {
       const badgeNotice = getBadgeFeeNotice(product);
       if (!badgeNotice) return product;
@@ -249,8 +281,11 @@ function getStoreProducts({ preferLive = true } = {}) {
 }
 
 function validateSync(products) {
+  const requiredList =
+    loadJson('config/storefront-visible-products.json', { optional: true })?.titles ||
+    REQUIRED_DECIPLUS_TITLES;
   const titles = new Set(products.map((p) => normalizeText(p.name)));
-  const missing = REQUIRED_DECIPLUS_TITLES.filter(
+  const missing = requiredList.filter(
     (t) => !titles.has(normalizeText(t)) && !products.some((p) => normalizeText(p.name).includes(normalizeText(t)))
   );
   return { ok: missing.length === 0, missing, count: products.length };
@@ -277,5 +312,7 @@ module.exports = {
   inferStripeEuros,
   mapDeciplusItem,
   REQUIRED_DECIPLUS_TITLES,
+  isVisibleInDeciplusGrid,
+  loadVisibleDeciplusTitles,
   SYNC_FILE,
 };
