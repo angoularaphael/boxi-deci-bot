@@ -7,7 +7,7 @@ const { logInfo, logWarn } = require('../lib/logger');
 const { buildInternalNote } = require('../lib/normalize');
 const { openMemberCheck, clickFirst, fillFirst, sel, closeGreyboxIfOpen } = require('./wallet');
 const { ensureDeciplusSaleZone } = require('./deciplus-zone');
-const { buildDeciplusProductSearch } = require('./catalog');
+const { buildDeciplusProductSearch, normalizeText } = require('./catalog');
 
 function buildSearchCandidates(productConfig) {
   const name = productConfig.deciplus_product_name || productConfig.label || '';
@@ -43,49 +43,67 @@ function buildSearchCandidates(productConfig) {
   return [...candidates].filter(Boolean);
 }
 
+async function scoreProductTile(text, productConfig) {
+  const name = productConfig.deciplus_product_name || productConfig.label || '';
+  const normalized = normalizeText(text);
+  const targetName = normalizeText(name);
+  let score = 0;
+
+  if (normalized === targetName) score += 200;
+  else if (normalized.includes(targetName) || targetName.includes(normalized)) score += 120;
+
+  const amount = Number(productConfig.amount);
+  if (Number.isFinite(amount) && amount > 0) {
+    const priceVariants = [
+      String(amount),
+      String(amount).replace('.', ','),
+      amount.toFixed(2),
+      amount.toFixed(2).replace('.', ','),
+    ];
+    for (const pv of priceVariants) {
+      if (text.includes(pv)) score += 80;
+    }
+  }
+
+  if (/training camp/i.test(name) && /training camp/i.test(text)) score += 40;
+  if (/badge/i.test(name) && /badge/i.test(text)) score += 100;
+
+  return score;
+}
+
 async function clickProductResult(page, productConfig) {
   const name = productConfig.deciplus_product_name || productConfig.label || '';
   const tiles = page.locator('.product-wrapper-title');
+  const count = await tiles.count();
+
+  let bestTile = null;
+  let bestScore = 0;
+
+  for (let i = 0; i < count; i += 1) {
+    const tile = tiles.nth(i);
+    if (!(await tile.isVisible().catch(() => false))) continue;
+    const text = (await tile.innerText().catch(() => '')).trim();
+    if (!text) continue;
+    const score = await scoreProductTile(text, productConfig);
+    if (score > bestScore) {
+      bestScore = score;
+      bestTile = tile;
+    }
+  }
+
+  if (bestTile && bestScore >= 40) {
+    await bestTile.click();
+    logInfo('Produit Deciplus sélectionné', {
+      name,
+      score: bestScore,
+      search: productConfig.deciplus_product_search,
+    });
+    return true;
+  }
 
   const exact = tiles.filter({ hasText: name }).first();
   if ((await exact.count()) > 0 && (await exact.isVisible().catch(() => false))) {
     await exact.click();
-    return true;
-  }
-
-  for (const segment of name.split(/\s*-\s*/).map((s) => s.trim()).filter((s) => s.length >= 6)) {
-    const partial = tiles.filter({ hasText: segment }).first();
-    if ((await partial.count()) > 0 && (await partial.isVisible().catch(() => false))) {
-      await partial.click();
-      logInfo('Produit Deciplus sélectionné (segment)', { segment, name });
-      return true;
-    }
-  }
-
-  if (/training camp/i.test(name)) {
-    const camp = tiles.filter({ hasText: /training camp/i }).first();
-    if ((await camp.count()) > 0 && (await camp.isVisible().catch(() => false))) {
-      await camp.click();
-      logInfo('Produit Deciplus sélectionné (Training camp)', { name });
-      return true;
-    }
-  }
-
-  const price = name.match(/(\d+[,.]\d{2})/);
-  if (price) {
-    for (const variant of [price[1], price[1].replace('.', ',')]) {
-      const byPrice = tiles.filter({ hasText: variant }).first();
-      if ((await byPrice.count()) > 0 && (await byPrice.isVisible().catch(() => false))) {
-        await byPrice.click();
-        logInfo('Produit Deciplus sélectionné (prix)', { variant, name });
-        return true;
-      }
-    }
-  }
-
-  const byText = page.getByText(name, { exact: true }).first();
-  if ((await byText.count()) > 0 && (await byText.isVisible().catch(() => false))) {
-    await byText.click();
     return true;
   }
 
@@ -119,19 +137,71 @@ async function selectProductInCatalog(page, productConfig) {
   throw new Error(`Produit Deciplus introuvable: "${name}"`);
 }
 
-async function togglePaiementComptantOff(page) {
-  const toggle = page.locator('text=Paiement Comptant').locator('..').locator('input, button, [role="switch"]').first();
-  if ((await toggle.count()) > 0) {
-    const checked = await toggle.isChecked?.().catch(() => null);
-    if (checked !== false) {
-      await toggle.click().catch(async () => {
-        await page.locator('text=Paiement Comptant').click();
-      });
-      await randomDelay();
+async function ensurePaiementComptantOff(page) {
+  await page.getByText('Paiement Comptant', { exact: false }).first()
+    .waitFor({ state: 'visible', timeout: 12000 })
+    .catch(() => {});
+
+  const attempts = [
+    async () => {
+      const checkbox = page.locator('label:has-text("Paiement Comptant")')
+        .locator('..')
+        .locator('input[type="checkbox"]')
+        .first();
+      if ((await checkbox.count()) === 0) return false;
+      if (await checkbox.isChecked().catch(() => false)) {
+        await checkbox.uncheck({ force: true });
+        return true;
+      }
+      return true;
+    },
+    async () => {
+      const row = page.getByText('Paiement Comptant', { exact: false }).first();
+      const cb = row.locator('xpath=ancestor-or-self::*[1]/following::input[@type="checkbox"][1]').first();
+      if ((await cb.count()) === 0) return false;
+      if (await cb.isChecked().catch(() => false)) {
+        await cb.uncheck({ force: true });
+        return true;
+      }
+      return true;
+    },
+    async () => {
+      const toggle = page.locator('text=Paiement Comptant').locator('..').locator('input, button, [role="switch"]').first();
+      if ((await toggle.count()) === 0) return false;
+      const checked = await toggle.isChecked?.().catch(() => null);
+      if (checked !== false) {
+        await toggle.click({ force: true });
+        return true;
+      }
+      return true;
+    },
+    async () => {
+      const label = page.getByText('Paiement Comptant', { exact: false }).first();
+      if (!(await label.isVisible().catch(() => false))) return false;
+      await label.click();
+      await randomDelay(400, 700);
+      return true;
+    },
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      if (await attempt()) {
+        logInfo('Paiement Comptant — vérification OK');
+        await randomDelay(400, 700);
+        return true;
+      }
+    } catch {
+      /* essai suivant */
     }
-    return true;
   }
+
+  logWarn('Paiement Comptant — toggle non trouvé (peut-être déjà désactivé)');
   return false;
+}
+
+async function togglePaiementComptantOff(page) {
+  return ensurePaiementComptantOff(page);
 }
 
 async function openSaleFlow(page, productConfig, gymConfig, saleKind) {
@@ -146,23 +216,30 @@ async function openSaleFlow(page, productConfig, gymConfig, saleKind) {
 }
 
 async function applyConfigModal(page, productConfig) {
-  if (productConfig.paiement_comptant === false) {
-    await togglePaiementComptantOff(page);
+  const isBadge =
+    productConfig.sale_type === 'carte' || /badge/i.test(productConfig.label || productConfig.deciplus_product_name || '');
+
+  if (productConfig.paiement_comptant === false || isBadge) {
+    await ensurePaiementComptantOff(page);
+    await ensurePaiementComptantOff(page);
   }
 
-  if (productConfig.requires_iban) {
+  if (productConfig.requires_iban && !productConfig.skip_rib_prompt) {
     await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
   }
 
   await clickFirst(page, sel('sale_config_modal.appliquer'));
+  await randomDelay(600, 1000);
 
   const modDateFin = page.locator('button:has-text("Modifier la date de fin")').first();
   if ((await modDateFin.count()) > 0 && (await modDateFin.isVisible().catch(() => false))) {
     await modDateFin.click();
     await randomDelay();
-  } else {
-    await clickFirst(page, sel('sale_config_modal.ignorer_continuer'));
+    logInfo('Badge / carte — date de fin ajustée');
+    return;
   }
+
+  await clickFirst(page, sel('sale_config_modal.ignorer_continuer'));
 }
 
 async function finalizePayment(page, productConfig) {
@@ -235,6 +312,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       logInfo('Création badge après abonnement', { member_id: memberId, order_id: order.order_id });
       await closeGreyboxIfOpen(page);
       await openMemberCheck(page, memberId);
+      await randomDelay(800, 1200);
       const badgeResult = await buyCarteBadge(page, badgeProductConfig, gymConfig);
       result.badge_action = badgeResult.action;
     }

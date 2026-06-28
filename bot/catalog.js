@@ -242,8 +242,19 @@ function buildDeciplusProductSearch(title, productId = null) {
   const name = String(title || '').replace(/\s+/g, ' ').trim();
   if (!name) return productId ? String(productId) : '';
 
-  if (/training camp/i.test(name)) return 'Training camp';
-  if (/cours illimit/i.test(name)) return 'Cours illimités';
+  if (/training camp/i.test(name)) {
+    const price =
+      name.match(/(\d+[,.]\d{2})\s*€/i)?.[1] ||
+      name.match(/^(\d+[,.]?\d*)\s*€?\s*\/?/i)?.[1];
+    if (price) return price.replace(',', '.');
+    return 'Training camp';
+  }
+
+  if (/cours illimit/i.test(name)) {
+    const price = name.match(/(\d+[,.]\d{2})/);
+    if (price) return price[1].replace(',', '.');
+    return 'Cours illimités';
+  }
 
   const price = name.match(/(\d+[,.]\d{2})/);
   if (price) return price[1].replace(',', '.');
@@ -327,6 +338,8 @@ function resolveBadgeProductConfig(catalog) {
     ...defaults,
     sale_type: 'carte',
     paiement_comptant: false,
+    requires_iban: false,
+    skip_rib_prompt: true,
     auto_badge: false,
   };
 }
