@@ -238,6 +238,25 @@ function isTrialOrder(order) {
   return order.payment.amount === 0 || name.includes('essai');
 }
 
+function buildDeciplusProductSearch(title, productId = null) {
+  const name = String(title || '').replace(/\s+/g, ' ').trim();
+  if (!name) return productId ? String(productId) : '';
+
+  if (/training camp/i.test(name)) return 'Training camp';
+  if (/cours illimit/i.test(name)) return 'Cours illimités';
+
+  const price = name.match(/(\d+[,.]\d{2})/);
+  if (price) return price[1].replace(',', '.');
+
+  const segments = name.split(/\s*-\s*/).map((s) => s.trim()).filter(Boolean);
+  const shortestUseful = segments.find((s) => s.length >= 4 && s.length <= 35 && !/^offre/i.test(s));
+  if (shortestUseful) return shortestUseful.replace(/\s*€.*$/i, '').trim();
+
+  const stripped = name.replace(/\s*€.*$/i, '').trim();
+  if (stripped.length <= 35) return stripped;
+  return stripped.slice(0, 30);
+}
+
 function buildProductConfig(order, matchedProduct = null) {
   const defaults = loadJson('config/sale-defaults.json');
 
@@ -264,7 +283,9 @@ function buildProductConfig(order, matchedProduct = null) {
     key: String(matchedProduct.id),
     label: matchedProduct.title,
     deciplus_product_name: matchedProduct.title,
-    deciplus_product_search: matchedProduct.title.replace(/\s+/g, ' ').trim(),
+    deciplus_product_search:
+      order.deciplus_product_search ||
+      buildDeciplusProductSearch(matchedProduct.title, matchedProduct.id),
     deciplus_product_id: matchedProduct.id,
     amount: order.payment.amount || matchedProduct.price,
     ...typeDefaults,
@@ -312,6 +333,10 @@ function resolveBadgeProductConfig(catalog) {
 
 function resolveProductConfig(order, catalog) {
   if (isTrialOrder(order)) return buildProductConfig(order, null);
+  if (order.deciplus_id) {
+    const byId = catalog.find((p) => String(p.id) === String(order.deciplus_id));
+    if (byId) return buildProductConfig(order, byId);
+  }
   const matched = findProductInCatalog(catalog, order);
   return buildProductConfig(order, matched);
 }
@@ -326,4 +351,5 @@ module.exports = {
   normalizeText,
   inferSaleType,
   isTrialOrder,
+  buildDeciplusProductSearch,
 };

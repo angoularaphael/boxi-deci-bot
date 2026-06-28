@@ -12,5 +12,12 @@
     "price_cents": 25900,
     "price_label": "259,00 €",
     "badge": "4× sans frais"
+  },
+  {
+    "name": "Cours illimités - Training camp - 49.99€/4sem",
+    "tagline": "Training camp illimité — 49,99 € / 4 sem.",
+    "description": "Cours illimités Training camp — 1ère échéance CB, suite par IBAN.",
+    "deciplus_product_search": "Training camp",
+    "legacy_id": "training-camp-49-99"
   }
 ]
