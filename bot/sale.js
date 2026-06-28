@@ -344,23 +344,20 @@ function badgeEndDate(delayDays = 7) {
   return { endDate, endStr, iso };
 }
 
-function badgeEditorScopes(page) {
-  return [
+async function getBadgeEditorScopes(page) {
+  const locators = [
     page.locator('#GB_window').first(),
     page.locator('[role="dialog"]').first(),
     page.locator('.swal2-popup').first(),
     page.locator('.modal-content').first(),
-    page,
   ];
-}
-
-async function visibleScope(scopes) {
   const out = [];
-  for (const scope of scopes) {
+  for (const scope of locators) {
     if ((await scope.count()) > 0 && (await scope.isVisible().catch(() => false))) {
       out.push(scope);
     }
   }
+  out.push(page);
   return out;
 }
 
@@ -470,7 +467,7 @@ async function fillBadgeContractDates(page, delayDays = 7) {
   const { startStr, endStr } = badgeContractDates(delayDays);
   await focusBadgeContractInSale(page);
 
-  for (const scope of await visibleScope(badgeEditorScopes(page))) {
+  for (const scope of await getBadgeEditorScopes(page)) {
     await ensureContractModifyAction(scope);
     await uncheckKeepDuration(scope);
 
@@ -525,7 +522,7 @@ async function findModifierDateFinControl(page) {
 async function fillBadgeEndDateFields(page, delayDays = 7) {
   const { endStr } = badgeEndDate(delayDays);
 
-  for (const scope of await visibleScope(badgeEditorScopes(page))) {
+  for (const scope of await getBadgeEditorScopes(page)) {
     await uncheckKeepDuration(scope);
     const filled = await fillDateFieldByLabel(scope, /Date de fin/i, endStr);
     if (filled) {
