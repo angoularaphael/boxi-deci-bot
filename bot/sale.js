@@ -22,16 +22,34 @@ function formatFrDate(date) {
 }
 
 async function findPaiementComptantCheckbox(page) {
-  const selectors = [
-    'label:has-text("Paiement Comptant") >> .. >> input[type="checkbox"]',
-    'text=Paiement Comptant >> xpath=ancestor::*[1]/following::input[@type="checkbox"][1]',
-    '[role="dialog"] label:has-text("Paiement Comptant") >> .. >> input[type="checkbox"]',
-  ];
-  for (const selector of selectors) {
-    const cb = page.locator(selector).first();
-    if ((await cb.count()) > 0) return cb;
+  const dialog = page.locator('[role="dialog"]').first();
+  const scopes = [];
+  if ((await dialog.count()) > 0) scopes.push(dialog);
+  scopes.push(page);
+
+  for (const scope of scopes) {
+    const selectors = [
+      'label:has-text("Paiement Comptant") >> .. >> input[type="checkbox"]',
+      'label:has-text("Paiement Comptant") >> xpath=following::input[@type="checkbox"][1]',
+      ':text("Paiement Comptant") >> xpath=ancestor::*[1]/following::input[@type="checkbox"][1]',
+    ];
+    for (const selector of selectors) {
+      const cb = scope.locator(selector).first();
+      if ((await cb.count()) > 0) return cb;
+    }
+    const dialogCb = scope.locator('input[type="checkbox"]').first();
+    if ((await dialogCb.count()) > 0 && scope !== page) return dialogCb;
   }
   return null;
+}
+
+async function uncheckPaiementComptantInput(cb) {
+  await cb.evaluate((el) => {
+    if (!el.checked) return;
+    el.checked = false;
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  });
 }
 
 async function isPaiementComptantChecked(page) {
@@ -244,10 +262,10 @@ async function selectProductInCatalog(page, productConfig) {
 
 async function ensurePaiementComptantOff(page, { strict = false } = {}) {
   await page.getByText('Paiement Comptant', { exact: false }).first()
-    .waitFor({ state: 'visible', timeout: 12000 })
+    .waitFor({ state: 'attached', timeout: 12000 })
     .catch(() => {});
 
-  for (let pass = 0; pass < 3; pass += 1) {
+  for (let pass = 0; pass < 4; pass += 1) {
     const cb = await findPaiementComptantCheckbox(page);
     if (!cb) break;
 
@@ -257,9 +275,16 @@ async function ensurePaiementComptantOff(page, { strict = false } = {}) {
       return true;
     }
     if (checked === true) {
-      await cb.uncheck({ force: true }).catch(async () => {
-        await cb.click({ force: true });
-      });
+      try {
+        await uncheckPaiementComptantInput(cb);
+      } catch (err) {
+        logWarn('Paiement Comptant — uncheck JS échoué', { error: err.message });
+        await cb.uncheck({ force: true, timeout: 5000 }).catch(() => {});
+      }
+      const label = page.locator('[role="dialog"]').getByText(/Paiement Comptant/i).first();
+      if ((await label.count()) > 0) {
+        await label.click({ force: true, timeout: 3000 }).catch(() => {});
+      }
       await randomDelay(400, 700);
     }
   }
@@ -349,6 +374,10 @@ async function adjustBadgeEndDate(page, delayDays = 7) {
 }
 
 async function applyBadgeConfigModal(page, productConfig) {
+  await page.locator('[role="dialog"]').first()
+    .waitFor({ state: 'visible', timeout: 15000 })
+    .catch(() => {});
+
   await ensurePaiementComptantOff(page, { strict: true });
 
   await clickFirst(page, sel('sale_config_modal.appliquer'));
@@ -387,6 +416,10 @@ async function applyConfigModal(page, productConfig) {
   if (isBadgeSale(productConfig)) {
     return applyBadgeConfigModal(page, productConfig);
   }
+
+  await page.locator('[role="dialog"]').first()
+    .waitFor({ state: 'visible', timeout: 15000 })
+    .catch(() => {});
 
   if (productConfig.paiement_comptant === false) {
     await ensurePaiementComptantOff(page);
