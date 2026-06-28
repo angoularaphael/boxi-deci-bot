@@ -1,0 +1,80 @@
+{
+  "source_session": "coach-screenshots-2026-06-28",
+  "urls": {
+    "login": "/index.php",
+    "choose_zone": "/nextgen/choose-zone",
+    "members_search": "/select.php",
+    "member_detail": "/joueurs.php",
+    "member_check": "/check.php",
+    "sale_abo": "/nextgen/vente",
+    "rib_page": "RIB membre"
+  },
+  "quick_search_selectors": {
+    "nom": "#i_nom, input[name=\"nom\"]",
+    "prenom": "#i_prenom, input[name=\"prenom\"]",
+    "email": "#i_email, input[name=\"email\"]",
+    "tel": "#i_tel, input[name=\"tel\"]",
+    "new_button": "#buttonNew, input#buttonNew"
+  },
+  "member_form_selectors": {
+    "nom": "input[name=\"nom\"]",
+    "prenom": "input[name=\"prenom\"]",
+    "email": "input[name=\"email\"]",
+    "date_naissance": "input[name=\"date_naissance\"]",
+    "sexe": "select[name=\"sexe\"]",
+    "telsms": "input[name=\"telsms\"]",
+    "tel": "input[name=\"tel\"]",
+    "adr1": "input[name=\"adr1\"]",
+    "codepostal": "input[name=\"codepostal\"]",
+    "ville": "input[name=\"ville\"]",
+    "pays": "input[name=\"pays\"], select[name=\"pays\"]",
+    "utm_source": "input[name=\"utm_source\"]",
+    "utm_medium": "input[name=\"utm_medium\"]",
+    "utm_campaign": "input[name=\"utm_campaign\"]",
+    "info_compta": "input[name=\"info_compta\"]",
+    "info_admin": "textarea[name=\"info_admin\"]",
+    "idz": "select[name=\"idz\"]",
+    "submit": "input[type=\"submit\"].albut_dw, input[type=\"submit\"].albut, input[type=\"submit\"][value=\"Valider\"], form[name=\"db1_form\"] input[type=\"submit\"]"
+  },
+  "member_detail": {
+    "fiche_detaillee_link": "a:has-text(\"Fiche détaillée\"), text=Fiche détaillée",
+    "update_button": "input[type=\"submit\"].albut_dw:has-text(\"Mettre à jour\"), button:has-text(\"Mettre à jour\"), input.albut_dw[value=\"Mettre à jour\"]",
+    "validate_button": "input[type=\"submit\"].albut_dw:has-text(\"Valider\"), button:has-text(\"Valider\")",
+    "saisir_rib_button": "button:has-text(\"Saisir RIB\"), a:has-text(\"Saisir RIB\"), text=Saisir RIB"
+  },
+  "rib_form": {
+    "iban": "input[name=\"iban\"]",
+    "bic": "input[name=\"bic\"]",
+    "account_holder": "input[name=\"nom\"]",
+    "address": "input[name=\"adr_line1\"]",
+    "address2": "input[name=\"adr_line2\"]",
+    "city": "input[name=\"adr_town\"]",
+    "zip": "input[name=\"adr_postcode\"]",
+    "country": "input[name=\"adr_country\"]",
+    "save": "input[type=\"submit\"][value=\"Valider\"]"
+  },
+  "member_check": {
+    "achat_abonnement": "button:has-text(\"Achat Abonnement\"), a:has-text(\"Achat Abonnement\"), text=Achat Abonnement",
+    "achat_carte": "button:has-text(\"Achat Carte\"), a:has-text(\"Achat Carte\"), text=Achat Carte",
+    "saisir_mandat_sepa": "button:has-text(\"Saisir mandat SEPA\"), text=Saisir mandat SEPA",
+    "consulter_abo": "button:has-text(\"Consulter\")",
+    "product_search": "input[placeholder*=\"Rechercher un produit\"], input[placeholder*=\"produit\"]"
+  },
+  "sale_config_modal": {
+    "paiement_comptant_toggle": "text=Paiement Comptant",
+    "saisir_rib": "button:has-text(\"Saisir le RIB\"), text=Saisir le RIB",
+    "appliquer": "button:has-text(\"Appliquer\")",
+    "modifier_date_fin": "button:has-text(\"Modifier la date de fin\")",
+    "ignorer_continuer": "button:has-text(\"Ignorer et continuer\")"
+  },
+  "payment_finalize": {
+    "virement": "button:has-text(\"Virement\"), text=Virement",
+    "carte_bancaire": "button:has-text(\"Carte Bancaire\"), text=Carte Bancaire",
+    "terminer": "button:has-text(\"Terminer\"), text=Terminer",
+    "cloturer": "button:has-text(\"Clôturer\"), text=Clôturer"
+  },
+  "contract_actions": {
+    "annuler_vente": "text=Annuler la vente",
+    "appliquer_quitter": "button:has-text(\"Appliquer et Quitter\"), text=Appliquer et Quitter"
+  }
+}
