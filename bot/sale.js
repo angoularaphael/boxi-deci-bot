@@ -7,6 +7,117 @@ const { logInfo, logWarn } = require('../lib/logger');
 const { buildInternalNote } = require('../lib/normalize');
 const { openMemberCheck, clickFirst, fillFirst, sel, closeGreyboxIfOpen } = require('./wallet');
 const { ensureDeciplusSaleZone } = require('./deciplus-zone');
+const { buildDeciplusProductSearch } = require('./catalog');
+
+function buildSearchCandidates(productConfig) {
+  const name = productConfig.deciplus_product_name || productConfig.label || '';
+  const candidates = new Set();
+
+  if (productConfig.deciplus_product_search) {
+    candidates.add(productConfig.deciplus_product_search);
+  }
+  candidates.add(buildDeciplusProductSearch(name, productConfig.deciplus_product_id));
+
+  for (const value of [
+    name,
+    name.replace(/\s*€.*$/i, '').trim(),
+    name.replace(/.*-\s*/, '').trim(),
+  ]) {
+    if (value) candidates.add(value);
+  }
+
+  const price = name.match(/(\d+[,.]\d{2})/);
+  if (price) {
+    candidates.add(price[1]);
+    candidates.add(price[1].replace('.', ','));
+  }
+  if (/training camp/i.test(name)) candidates.add('Training camp');
+  if (/cours illimit/i.test(name)) candidates.add('Cours illimités');
+
+  for (const segment of name.split(/\s*-\s*/).map((s) => s.trim()).filter(Boolean)) {
+    if (segment.length >= 4 && segment.length <= 40) {
+      candidates.add(segment.replace(/\s*€.*$/i, '').trim());
+    }
+  }
+
+  return [...candidates].filter(Boolean);
+}
+
+async function clickProductResult(page, productConfig) {
+  const name = productConfig.deciplus_product_name || productConfig.label || '';
+  const tiles = page.locator('.product-wrapper-title');
+
+  const exact = tiles.filter({ hasText: name }).first();
+  if ((await exact.count()) > 0 && (await exact.isVisible().catch(() => false))) {
+    await exact.click();
+    return true;
+  }
+
+  for (const segment of name.split(/\s*-\s*/).map((s) => s.trim()).filter((s) => s.length >= 6)) {
+    const partial = tiles.filter({ hasText: segment }).first();
+    if ((await partial.count()) > 0 && (await partial.isVisible().catch(() => false))) {
+      await partial.click();
+      logInfo('Produit Deciplus sélectionné (segment)', { segment, name });
+      return true;
+    }
+  }
+
+  if (/training camp/i.test(name)) {
+    const camp = tiles.filter({ hasText: /training camp/i }).first();
+    if ((await camp.count()) > 0 && (await camp.isVisible().catch(() => false))) {
+      await camp.click();
+      logInfo('Produit Deciplus sélectionné (Training camp)', { name });
+      return true;
+    }
+  }
+
+  const price = name.match(/(\d+[,.]\d{2})/);
+  if (price) {
+    for (const variant of [price[1], price[1].replace('.', ',')]) {
+      const byPrice = tiles.filter({ hasText: variant }).first();
+      if ((await byPrice.count()) > 0 && (await byPrice.isVisible().catch(() => false))) {
+        await byPrice.click();
+        logInfo('Produit Deciplus sélectionné (prix)', { variant, name });
+        return true;
+      }
+    }
+  }
+
+  const byText = page.getByText(name, { exact: true }).first();
+  if ((await byText.count()) > 0 && (await byText.isVisible().catch(() => false))) {
+    await byText.click();
+    return true;
+  }
+
+  return false;
+}
+
+async function selectProductInCatalog(page, productConfig) {
+  const name = productConfig.deciplus_product_name || productConfig.label;
+  const searchCandidates = buildSearchCandidates(productConfig);
+
+  const searchInput = page
+    .locator('input[placeholder*="Rechercher un produit"], input[placeholder*="Rechercher"]')
+    .first();
+  await searchInput.waitFor({ state: 'visible', timeout: 20000 });
+
+  for (const search of searchCandidates) {
+    await searchInput.fill('');
+    await randomDelay(200, 400);
+    await searchInput.fill(search);
+    await randomDelay(1200, 2000);
+
+    if (await clickProductResult(page, productConfig)) {
+      await randomDelay();
+      logInfo('Produit Deciplus trouvé dans le catalogue UI', { search, name });
+      return true;
+    }
+
+    logWarn('Recherche produit Deciplus sans résultat', { search, name });
+  }
+
+  throw new Error(`Produit Deciplus introuvable: "${name}"`);
+}
 
 async function togglePaiementComptantOff(page) {
   const toggle = page.locator('text=Paiement Comptant').locator('..').locator('input, button, [role="switch"]').first();
@@ -21,46 +132,6 @@ async function togglePaiementComptantOff(page) {
     return true;
   }
   return false;
-}
-
-async function selectProductInCatalog(page, productConfig) {
-  const name = productConfig.deciplus_product_name || productConfig.label;
-  const search =
-    productConfig.deciplus_product_search ||
-    name.replace(/\s*€.*$/i, '').trim() ||
-    name;
-
-  const searchInput = page
-    .locator('input[placeholder*="Rechercher un produit"], input[placeholder*="Rechercher"]')
-    .first();
-  await searchInput.waitFor({ state: 'visible', timeout: 20000 });
-  await searchInput.fill(search);
-  await randomDelay(1200, 2000);
-
-  const tile = page.locator('.product-wrapper-title').filter({ hasText: name }).first();
-  if ((await tile.count()) > 0 && (await tile.isVisible().catch(() => false))) {
-    await tile.click();
-    await randomDelay();
-    return true;
-  }
-
-  const byText = page.getByText(name, { exact: true }).first();
-  if ((await byText.count()) > 0 && (await byText.isVisible().catch(() => false))) {
-    await byText.click();
-    await randomDelay();
-    return true;
-  }
-
-  const partial = page
-    .getByText(new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 18), 'i'))
-    .first();
-  if ((await partial.count()) > 0 && (await partial.isVisible().catch(() => false))) {
-    await partial.click();
-    await randomDelay();
-    return true;
-  }
-
-  throw new Error(`Produit Deciplus introuvable: "${name}"`);
 }
 
 async function openSaleFlow(page, productConfig, gymConfig, saleKind) {
@@ -79,14 +150,12 @@ async function applyConfigModal(page, productConfig) {
     await togglePaiementComptantOff(page);
   }
 
-  // Si RIB requis et bouton visible dans la modale
   if (productConfig.requires_iban) {
     await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
   }
 
   await clickFirst(page, sel('sale_config_modal.appliquer'));
 
-  // Popup "Dernière échéance après la date de fin" (badge)
   const modDateFin = page.locator('button:has-text("Modifier la date de fin")').first();
   if ((await modDateFin.count()) > 0 && (await modDateFin.isVisible().catch(() => false))) {
     await modDateFin.click();
@@ -105,7 +174,6 @@ async function finalizePayment(page, productConfig) {
     await clickFirst(page, sel('payment_finalize.carte_bancaire'));
   }
 
-  // Note / clôturer si présent
   await clickFirst(page, sel('payment_finalize.cloturer'));
   await clickFirst(page, sel('payment_finalize.terminer'));
   logInfo('Paiement finalisé Deciplus', { mode });
@@ -184,7 +252,6 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
   return { sale_id: null, ...result, member_id: memberId };
 }
 
-/** Conservé pour usage manuel — non appelé par le bot (annulation manuelle dans Deciplus). */
 async function cancelSale(page, memberId) {
   if (!memberId) throw new Error('member_id requis pour annuler la vente');
 
