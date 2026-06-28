@@ -361,7 +361,40 @@ async function getBadgeEditorScopes(page) {
   return out;
 }
 
+async function fillDateFieldByDom(page, labelText, value) {
+  return page.evaluate(
+    ({ label, val }) => {
+      const norm = (s) => String(s || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const target = norm(label);
+      const candidates = [...document.querySelectorAll('label, span, td, th, div, p, b, strong')].filter(
+        (el) => norm(el.textContent) === target || norm(el.textContent).startsWith(`${target} `)
+      );
+      for (const node of candidates) {
+        let root = node.parentElement;
+        for (let depth = 0; depth < 6 && root; depth += 1) {
+          const inputs = [...root.querySelectorAll('input:not([type="hidden"])')].filter(
+            (input) => input.offsetParent !== null
+          );
+          if (inputs.length > 0) {
+            const input = inputs.length > 1 && /fin/i.test(label) ? inputs[inputs.length - 1] : inputs[0];
+            input.focus();
+            input.value = val;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          }
+          root = root.parentElement;
+        }
+      }
+      return false;
+    },
+    { label: labelText, val: value }
+  );
+}
+
 async function fillDateFieldByLabel(scope, labelPattern, value) {
+  const labelText = labelPattern.source.replace(/\\b.*$/i, '').replace(/^\//, '').replace(/\\i$/i, '');
+
   const locators = [
     scope.getByLabel(labelPattern).first(),
     scope.getByText(labelPattern).locator('xpath=following::input[1]').first(),
@@ -377,6 +410,19 @@ async function fillDateFieldByLabel(scope, labelPattern, value) {
     await el.press('Tab').catch(() => {});
     const current = (await el.inputValue().catch(() => '')).trim();
     if (current.includes(value.slice(0, 5)) || current === value) return true;
+  }
+
+  if (/fin/i.test(labelText)) {
+    const filled = await fillFirst(
+      scope,
+      'input[name="dfin"], input[name="date_fin"], input[name="datefin"], input[name="dateFin"], input[id*="dfin"], input[id*="date_fin"]',
+      value
+    );
+    if (filled) return true;
+  }
+
+  if (typeof scope.evaluate === 'function') {
+    return fillDateFieldByDom(scope, labelText, value);
   }
   return false;
 }
@@ -404,6 +450,11 @@ async function uncheckKeepDuration(scope) {
 }
 
 async function ensureContractModifyAction(scope) {
+  const finVisible = scope.getByText(/Date de fin/i).first();
+  if ((await finVisible.count()) > 0 && (await finVisible.isVisible().catch(() => false))) {
+    return true;
+  }
+
   const actionHeader = scope.getByText(/Action souhaitée/i).first();
   if ((await actionHeader.count()) === 0 || !(await actionHeader.isVisible().catch(() => false))) {
     return false;
@@ -434,9 +485,10 @@ async function ensureContractModifyAction(scope) {
 
 async function focusBadgeContractInSale(page) {
   const selectors = [
-    'text=/Prestation.*Badge/i',
-    'text=/Badge/i',
+    'text=/Prestation\\s*:\\s*Badge/i',
+    ':text("Prestation") >> xpath=ancestor::*[1] >> text=Badge',
     '[class*="contract"]:has-text("Badge")',
+    'text=/Contrat n°.*Badge/i',
   ];
   for (const selector of selectors) {
     const el = page.locator(selector).first();
@@ -446,7 +498,27 @@ async function focusBadgeContractInSale(page) {
       return true;
     }
   }
+
+  const badgeTile = page.getByText(/^Badge$/i).last();
+  if ((await badgeTile.count()) > 0 && (await badgeTile.isVisible().catch(() => false))) {
+    await badgeTile.click();
+    await randomDelay(500, 800);
+    return true;
+  }
   return false;
+}
+
+async function ensureMemberCheckForBadgeEdit(page, memberId) {
+  if (!memberId) return false;
+
+  if (!page.url().includes('check.php')) {
+    await openMemberCheck(page, memberId);
+    await randomDelay(1500, 2200);
+  } else {
+    await randomDelay(800, 1200);
+  }
+  await focusBadgeContractInSale(page);
+  return page.url().includes('check.php');
 }
 
 async function applyContractDateChange(scope) {
@@ -589,7 +661,7 @@ async function dismissPostApplyDialogs(page) {
   await randomDelay(400, 700);
 }
 
-async function configureBadgeDeferredDates(page, delayDays) {
+async function configureBadgeDeferredDates(page, delayDays, memberId = null) {
   let configured = await fillBadgeContractDates(page, delayDays);
   if (configured) return true;
 
@@ -602,18 +674,33 @@ async function configureBadgeDeferredDates(page, delayDays) {
     logWarn('Badge — popup date de fin', { error: err.message });
   }
 
+  if (memberId) {
+    logInfo('Badge — repli check.php pour panneau Modifier', { member_id: memberId });
+    await ensureMemberCheckForBadgeEdit(page, memberId);
+    configured = await fillBadgeContractDates(page, delayDays);
+    if (configured) return true;
+  }
+
   for (let i = 0; i < 8; i += 1) {
     if (await fillBadgeContractDates(page, delayDays)) return true;
     if (await fillBadgeEndDateFields(page, delayDays) && (await applyContractDateChange(page))) {
       return true;
     }
+    if (memberId && i === 2) {
+      await ensureMemberCheckForBadgeEdit(page, memberId);
+    }
     await page.waitForTimeout(800);
   }
 
+  logWarn('Badge — panneau date introuvable', {
+    url: page.url(),
+    has_action: (await page.getByText(/Action souhaitée/i).count()) > 0,
+    has_date_fin: (await page.getByText(/Date de fin/i).count()) > 0,
+  });
   return false;
 }
 
-async function applyBadgeConfigModal(page, productConfig) {
+async function applyBadgeConfigModal(page, productConfig, memberId = null) {
   await page.locator('[role="dialog"]').first()
     .waitFor({ state: 'visible', timeout: 15000 })
     .catch(() => {});
@@ -622,12 +709,14 @@ async function applyBadgeConfigModal(page, productConfig) {
 
   const delayDays = resolveBadgePrelevementDelayDays(productConfig);
 
+  await fillBadgeEndDateFields(page, delayDays);
+
   await clickFirst(page, sel('sale_config_modal.appliquer'));
   await randomDelay(1000, 1500);
   await dismissPostApplyDialogs(page);
   await randomDelay(800, 1200);
 
-  const configured = await configureBadgeDeferredDates(page, delayDays);
+  const configured = await configureBadgeDeferredDates(page, delayDays, memberId);
   if (!configured) {
     throw new Error(
       `Badge — contrat J+${delayDays} requis (prélèvement IBAN 5-7 jours, pas encaissement immédiat 34,99 €)`
@@ -650,9 +739,9 @@ async function openSaleFlow(page, productConfig, gymConfig, saleKind) {
   await selectProductInCatalog(page, productConfig);
 }
 
-async function applyConfigModal(page, productConfig) {
+async function applyConfigModal(page, productConfig, memberId = null) {
   if (isBadgeSale(productConfig)) {
-    return applyBadgeConfigModal(page, productConfig);
+    return applyBadgeConfigModal(page, productConfig, memberId);
   }
 
   await page.locator('[role="dialog"]').first()
@@ -695,9 +784,9 @@ async function buyAbonnement(page, productConfig, gymConfig) {
   return { action: 'abonnement_created', sale_type: 'abonnement' };
 }
 
-async function buyCarteBadge(page, productConfig, gymConfig) {
+async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
   await openSaleFlow(page, productConfig, gymConfig, 'carte');
-  await applyConfigModal(page, productConfig);
+  await applyConfigModal(page, productConfig, memberId);
   await finalizePayment(page, productConfig);
 
   return { action: 'carte_badge_created', sale_type: 'carte' };
@@ -735,7 +824,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
   const { badgeProductConfig } = options;
 
   if (productConfig.sale_type === 'carte') {
-    result = await buyCarteBadge(page, productConfig, gymConfig);
+    result = await buyCarteBadge(page, productConfig, gymConfig, memberId);
   } else if (productConfig.sale_type === 'abonnement') {
     result = await buyAbonnement(page, productConfig, gymConfig);
 
@@ -745,7 +834,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       await openMemberCheck(page, memberId);
       await randomDelay(800, 1200);
       try {
-        const badgeResult = await buyCarteBadge(page, badgeProductConfig, gymConfig);
+        const badgeResult = await buyCarteBadge(page, badgeProductConfig, gymConfig, memberId);
         result.badge_action = badgeResult.action;
       } catch (err) {
         logWarn('Badge non créé — prélèvement différé requis', {
