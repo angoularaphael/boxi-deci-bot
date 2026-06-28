@@ -8,10 +8,11 @@ const { installChromiumSystemDeps } = require('../lib/playwright-host-deps');
 const path = require('path');
 
 function isHostedBot() {
+  if (process.platform !== 'linux') return false;
   return Boolean(
-    process.env.BOT_HTTP_PORT ||
-      process.env.PLAYWRIGHT_BROWSERS_PATH ||
-      process.env.BOT_DATA_DIR
+    process.env.PLAYWRIGHT_BROWSERS_PATH ||
+      process.env.BOXPLUS_HOSTED === '1' ||
+      process.cwd().startsWith('/home/container')
   );
 }
 
@@ -21,17 +22,19 @@ function getChromiumLaunchOptions() {
     String(process.env.DECIPLUS_HEADLESS ?? (hosted ? 'true' : 'false')).toLowerCase() !== 'false';
   const slowMo = headless ? 0 : Number(process.env.DECIPLUS_SLOW_MO || 100);
 
-  const args = [
-    '--no-sandbox',
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-gpu',
-    '--disable-software-rasterizer',
-    '--no-first-run',
-    '--disable-extensions',
-    '--disable-background-networking',
-    '--mute-audio',
-  ];
+  const args = hosted
+    ? [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--no-first-run',
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--mute-audio',
+      ]
+    : [];
 
   if (String(process.env.PLAYWRIGHT_SINGLE_PROCESS || 'false').toLowerCase() === 'true') {
     args.push('--single-process', '--no-zygote');
