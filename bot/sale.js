@@ -655,20 +655,75 @@ async function adjustBadgeEndDateWithRetry(page, delayDays = 7, { attempts = 12,
   return false;
 }
 
+async function fillBadgeAuDate(scope, endStr) {
+  const selectors = [
+    sel('sale_config_modal.valide_au_input'),
+    ':text("Valide du") >> xpath=following::input[2]',
+    ':text-is("au") >> xpath=following::input[1]',
+    'text=au >> xpath=following::input[1]',
+  ];
+
+  for (const selector of selectors) {
+    const el = scope.locator(selector).first();
+    if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
+    await el.click({ force: true }).catch(() => {});
+    await el.fill('').catch(() => {});
+    await el.fill(endStr).catch(() => {});
+    await el.press('Tab').catch(() => {});
+    const current = (await el.inputValue().catch(() => '')).trim();
+    if (current.includes(endStr.slice(0, 5)) || current === endStr) return true;
+  }
+  return false;
+}
+
+async function fillBadgeValideDuDate(scope, startStr) {
+  const el = scope.locator(sel('sale_config_modal.valide_du_input')).first();
+  if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) {
+    return fillDateFieldByLabel(scope, /Valide du/i, startStr);
+  }
+  await el.click({ force: true }).catch(() => {});
+  await el.fill(startStr).catch(() => {});
+  await el.press('Tab').catch(() => {});
+  return true;
+}
+
+async function readBadgeConfigModalText(page) {
+  for (const scope of await getBadgeEditorScopes(page)) {
+    if (typeof scope.innerText !== 'function') continue;
+    const text = (await scope.innerText().catch(() => '')).replace(/\s+/g, ' ');
+    if (/Configuration de Badge|Valide du|Prélèvement Automatique/i.test(text)) return text;
+  }
+  return (await page.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ');
+}
+
+async function verifyBadgeConfigModalReady(page, delayDays = 7) {
+  const { endStr } = badgeContractDates(delayDays);
+  const text = await readBadgeConfigModalText(page);
+
+  if (/en dehors de la dur[ée]e de validit[ée]/i.test(text)) return false;
+
+  if (/Prélèvement Automatique/i.test(text) && /Date de paiement/i.test(text)) {
+    return true;
+  }
+
+  if (text.includes(endStr)) return true;
+
+  return false;
+}
+
 async function verifyBadgeDeferredSetup(page, delayDays = 7) {
+  if (await verifyBadgeConfigModalReady(page, delayDays)) return true;
+
   const { endStr } = badgeContractDates(delayDays);
   const text = (await page.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ');
 
   if (text.includes(endStr)) return true;
 
-  const endAlt = endStr.replace(/\//g, '-');
-  if (text.includes(endAlt)) return true;
-
-  if (/Restant d[uû].*34[,.]99/i.test(text) && !/Total encaiss[ée].*34[,.]99/i.test(text)) {
-    return true;
+  if (/Prélèvement Automatique/i.test(text) && /Date de paiement/i.test(text)) {
+    return !/en dehors de la dur[ée]e de validit[ée]/i.test(text);
   }
 
-  if (/34[,.]99/.test(text) && /pr[ée]l[èe]vement|[ée]ch[ée]ance/i.test(text)) {
+  if (/Restant d[uû].*34[,.]99/i.test(text) && !/Total encaiss[ée].*34[,.]99/i.test(text)) {
     return true;
   }
 
@@ -676,25 +731,37 @@ async function verifyBadgeDeferredSetup(page, delayDays = 7) {
 }
 
 async function fillBadgeDatesInConfigModal(page, delayDays = 7) {
+  await page.getByText(/Configuration de Badge/i).first()
+    .waitFor({ state: 'visible', timeout: 15000 })
+    .catch(() => {});
+
   const { startStr, endStr } = badgeContractDates(delayDays);
-  let filledFin = false;
+  let filledAu = false;
 
   for (const scope of await getBadgeEditorScopes(page)) {
     await uncheckKeepDuration(scope);
-    await fillDateFieldByLabel(scope, /Date de début/i, startStr);
-    if (await fillDateFieldByLabel(scope, /Date de fin/i, endStr)) {
-      filledFin = true;
+    await fillBadgeValideDuDate(scope, startStr);
+    if (await fillBadgeAuDate(scope, endStr)) {
+      filledAu = true;
+    }
+    if (!filledAu) {
+      filledAu = await fillDateFieldByLabel(scope, /Date de fin/i, endStr);
     }
   }
 
-  if (filledFin) {
-    logInfo('Badge — dates saisies dans modale produit', {
-      date_debut: startStr,
-      date_fin: endStr,
+  await randomDelay(800, 1200);
+
+  const ready = filledAu && (await verifyBadgeConfigModalReady(page, delayDays));
+
+  if (filledAu) {
+    logInfo('Badge — validité étendue dans modale Configuration', {
+      valide_du: startStr,
+      valide_au: endStr,
       delay_days: delayDays,
+      prelevement_ok: ready,
     });
   }
-  return filledFin;
+  return ready;
 }
 
 async function waitForModifierDateFinPopup(page, delayDays = 7, { attempts = 15, intervalMs = 1000 } = {}) {
@@ -743,15 +810,28 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   const delayDays = resolveBadgePrelevementDelayDays(productConfig);
   const { endStr } = badgeContractDates(delayDays);
 
-  const modalDatesFilled = await fillBadgeDatesInConfigModal(page, delayDays);
+  const modalReady = await fillBadgeDatesInConfigModal(page, delayDays);
+
+  if (!modalReady) {
+    logWarn('Badge — modale Configuration : validité « au » non confirmée, nouvelle tentative', {
+      date_fin: endStr,
+    });
+    await fillBadgeDatesInConfigModal(page, delayDays);
+  }
+
+  if (!(await verifyBadgeConfigModalReady(page, delayDays))) {
+    throw new Error(
+      `Badge — champ « au » J+${delayDays} requis dans Configuration de Badge (échéance prélèvement hors validité)`
+    );
+  }
 
   await clickFirst(page, sel('sale_config_modal.appliquer'));
   await randomDelay(1500, 2500);
   await dismissPostApplyDialogs(page);
   await randomDelay(1000, 1500);
 
-  if (modalDatesFilled && (await verifyBadgeDeferredSetup(page, delayDays))) {
-    logInfo('Badge — prélèvement IBAN différé (modale produit validée)', {
+  if (await verifyBadgeDeferredSetup(page, delayDays)) {
+    logInfo('Badge — prélèvement IBAN différé (Configuration de Badge)', {
       date_fin: endStr,
       delay_days: delayDays,
       window: '5-7 jours',
@@ -761,20 +841,6 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
 
   const configured = await configureBadgeDeferredDates(page, delayDays);
   if (configured) return;
-
-  if (modalDatesFilled) {
-    const onVente = /vente|nextgen/i.test(page.url());
-    const hasVirement =
-      (await page.getByText(/Virement/i).count()) > 0 &&
-      (await page.getByText(/Virement/i).first().isVisible().catch(() => false));
-    if (onVente && hasVirement) {
-      logWarn('Badge — dates modale produit, validation UI partielle — finalize sur vente', {
-        date_fin: endStr,
-        url: page.url(),
-      });
-      return;
-    }
-  }
 
   throw new Error(
     `Badge — contrat J+${delayDays} requis (prélèvement IBAN 5-7 jours, pas encaissement immédiat 34,99 €)`
