@@ -312,6 +312,151 @@ function badgeEndDate(delayDays = 7) {
   return { endDate, endStr: formatFrDate(endDate), iso: endDate.toISOString().slice(0, 10) };
 }
 
+function badgeEditorScopes(page) {
+  return [
+    page.locator('#GB_window').first(),
+    page.locator('[role="dialog"]').first(),
+    page.locator('.swal2-popup').first(),
+    page.locator('.modal-content').first(),
+    page,
+  ];
+}
+
+async function visibleScope(scopes) {
+  const out = [];
+  for (const scope of scopes) {
+    if ((await scope.count()) > 0 && (await scope.isVisible().catch(() => false))) {
+      out.push(scope);
+    }
+  }
+  return out;
+}
+
+async function fillDateFieldByLabel(scope, labelPattern, value) {
+  const locators = [
+    scope.getByLabel(labelPattern).first(),
+    scope.getByText(labelPattern).locator('xpath=following::input[1]').first(),
+    scope.locator('tr').filter({ hasText: labelPattern }).locator('input').first(),
+    scope.locator('div').filter({ has: scope.getByText(labelPattern) }).locator('input').first(),
+  ];
+
+  for (const el of locators) {
+    if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
+    await el.click({ force: true }).catch(() => {});
+    await el.fill('').catch(() => {});
+    await el.fill(value).catch(() => {});
+    await el.press('Tab').catch(() => {});
+    const current = (await el.inputValue().catch(() => '')).trim();
+    if (current.includes(value.slice(0, 5)) || current === value) return true;
+  }
+  return false;
+}
+
+async function uncheckKeepDuration(scope) {
+  const selectors = [
+    sel('sale_config_modal.conserver_duree'),
+    'label:has-text("Conserver la durée") input[type="checkbox"]',
+  ];
+  for (const selector of selectors) {
+    const cb = scope.locator(selector).first();
+    if ((await cb.count()) === 0) continue;
+    const checked = await cb.isChecked().catch(() => null);
+    if (checked === true) {
+      await cb.uncheck({ force: true }).catch(async () => {
+        await cb.evaluate((el) => {
+          el.checked = false;
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+      });
+    }
+    return true;
+  }
+  return false;
+}
+
+async function ensureContractModifyAction(scope) {
+  const actionHeader = scope.getByText(/Action souhaitée/i).first();
+  if ((await actionHeader.count()) === 0 || !(await actionHeader.isVisible().catch(() => false))) {
+    return false;
+  }
+
+  const selects = scope.locator('select');
+  const count = await selects.count();
+  for (let i = 0; i < count; i += 1) {
+    const select = selects.nth(i);
+    if (!(await select.isVisible().catch(() => false))) continue;
+    const options = await select.locator('option').allTextContents();
+    const modIndex = options.findIndex((o) => /modifier/i.test(o));
+    if (modIndex >= 0) {
+      await select.selectOption({ index: modIndex }).catch(() => {});
+      await randomDelay(400, 700);
+      return true;
+    }
+  }
+
+  const modBtn = scope.getByRole('button', { name: /^Modifier$/i }).first();
+  if ((await modBtn.count()) > 0 && (await modBtn.isVisible().catch(() => false))) {
+    await modBtn.click();
+    await randomDelay(400, 700);
+    return true;
+  }
+  return false;
+}
+
+async function focusBadgeContractInSale(page) {
+  const selectors = [
+    'text=/Prestation.*Badge/i',
+    'text=/Badge/i',
+    '[class*="contract"]:has-text("Badge")',
+  ];
+  for (const selector of selectors) {
+    const el = page.locator(selector).first();
+    if ((await el.count()) > 0 && (await el.isVisible().catch(() => false))) {
+      await el.click();
+      await randomDelay(500, 800);
+      return true;
+    }
+  }
+  return false;
+}
+
+async function applyContractDateChange(scope) {
+  const applied = await clickFirst(
+    scope,
+    [
+      'button:has-text("Appliquer"):not(:has-text("Quitter"))',
+      sel('sale_config_modal.appliquer'),
+      sel('contract_actions.appliquer_quitter'),
+      'button:has-text("Appliquer")',
+    ].join(', ')
+  );
+  if (applied) await randomDelay(600, 1000);
+  return applied;
+}
+
+async function fillBadgeContractDates(page, delayDays = 7) {
+  const { endStr } = badgeEndDate(delayDays);
+  await focusBadgeContractInSale(page);
+
+  for (const scope of await visibleScope(badgeEditorScopes(page))) {
+    await ensureContractModifyAction(scope);
+    await uncheckKeepDuration(scope);
+
+    const finFilled = await fillDateFieldByLabel(scope, /Date de fin/i, endStr);
+    if (!finFilled) continue;
+
+    if (await applyContractDateChange(scope)) {
+      logInfo('Badge — date de fin configurée (panneau Modifier)', {
+        date_fin: endStr,
+        delay_days: delayDays,
+      });
+      return true;
+    }
+  }
+
+  return false;
+}
+
 async function findModifierDateFinControl(page) {
   const patterns = [
     sel('sale_config_modal.modifier_date_fin'),
@@ -343,51 +488,11 @@ async function findModifierDateFinControl(page) {
 }
 
 async function fillBadgeEndDateFields(page, delayDays = 7) {
-  const { endStr, iso } = badgeEndDate(delayDays);
-  const scopes = [];
-  const dialog = page.locator('[role="dialog"]').first();
-  if ((await dialog.count()) > 0 && (await dialog.isVisible().catch(() => false))) {
-    scopes.push(dialog);
-  }
-  scopes.push(page);
+  const { endStr } = badgeEndDate(delayDays);
 
-  for (const scope of scopes) {
-    let filled = await fillFirst(
-      scope,
-      'input[name="date_fin"], input[name="dfin"], input[name="datefin"], input[name="dateFin"], input[name="date_fin_carte"]',
-      endStr
-    );
-
-    if (!filled) {
-      const byLabel = scope.locator('text=/Date de fin/i').locator('xpath=following::input[1]').first();
-      if ((await byLabel.count()) > 0 && (await byLabel.isVisible().catch(() => false))) {
-        await byLabel.fill(endStr);
-        filled = true;
-      }
-    }
-
-    if (!filled) {
-      const dateInputs = scope.locator('input[type="date"], input[name*="date"], input[placeholder*="jj/mm"]');
-      const count = await dateInputs.count();
-      if (count >= 2) {
-        const endInput = dateInputs.nth(count - 1);
-        if (await endInput.isVisible().catch(() => false)) {
-          await endInput.fill(iso).catch(async () => {
-            await endInput.fill(endStr);
-          });
-          filled = true;
-        }
-      } else if (count === 1) {
-        const only = dateInputs.first();
-        if (await only.isVisible().catch(() => false)) {
-          await only.fill(iso).catch(async () => {
-            await only.fill(endStr);
-          });
-          filled = true;
-        }
-      }
-    }
-
+  for (const scope of await visibleScope(badgeEditorScopes(page))) {
+    await uncheckKeepDuration(scope);
+    const filled = await fillDateFieldByLabel(scope, /Date de fin/i, endStr);
     if (filled) {
       logInfo('Badge — date de fin saisie', { date_fin: endStr, delay_days: delayDays });
       return true;
@@ -452,13 +557,36 @@ async function dismissPostApplyDialogs(page) {
   await randomDelay(400, 700);
 }
 
+async function configureBadgeDeferredDates(page, delayDays) {
+  let configured = await fillBadgeContractDates(page, delayDays);
+  if (configured) return true;
+
+  configured = await fillBadgeEndDateFields(page, delayDays);
+  if (configured && (await applyContractDateChange(page))) return true;
+
+  try {
+    if (await adjustBadgeEndDate(page, delayDays)) return true;
+  } catch (err) {
+    logWarn('Badge — popup date de fin', { error: err.message });
+  }
+
+  for (let i = 0; i < 8; i += 1) {
+    if (await fillBadgeContractDates(page, delayDays)) return true;
+    if (await fillBadgeEndDateFields(page, delayDays) && (await applyContractDateChange(page))) {
+      return true;
+    }
+    await page.waitForTimeout(800);
+  }
+
+  return false;
+}
+
 async function applyBadgeConfigModal(page, productConfig) {
   await page.locator('[role="dialog"]').first()
     .waitFor({ state: 'visible', timeout: 15000 })
     .catch(() => {});
 
   await ensurePaiementComptantOff(page, { strict: true });
-  const comptantConfirmedOff = (await isPaiementComptantChecked(page)) === false;
 
   const delayDays = Number(
     productConfig.prelevement_delay_days ||
@@ -466,28 +594,15 @@ async function applyBadgeConfigModal(page, productConfig) {
       7
   );
 
-  let adjusted = await adjustBadgeEndDate(page, delayDays);
-  if (!adjusted) {
-    adjusted = await fillBadgeEndDateFields(page, delayDays);
-  }
-
   await clickFirst(page, sel('sale_config_modal.appliquer'));
   await randomDelay(1000, 1500);
   await dismissPostApplyDialogs(page);
+  await randomDelay(800, 1200);
 
-  if (!adjusted) {
-    adjusted = await adjustBadgeEndDateWithRetry(page, delayDays, { attempts: 8, intervalMs: 800 });
-  }
-
-  if (!adjusted) {
-    if (comptantConfirmedOff) {
-      logInfo('Badge — pas de popup « Modifier la date de fin » (Paiement Comptant off, prélèvement différé attendu)', {
-        delay_days: delayDays,
-      });
-      return;
-    }
+  const configured = await configureBadgeDeferredDates(page, delayDays);
+  if (!configured) {
     throw new Error(
-      'Badge — prélèvement différé impossible (Paiement Comptant actif et date de fin non modifiable)'
+      `Badge — date de fin J+${delayDays} requise (sinon débit immédiat 34,99 € sur le contrat Badge)`
     );
   }
 }
@@ -532,15 +647,6 @@ async function applyConfigModal(page, productConfig) {
 async function finalizePayment(page, productConfig) {
   const mode = productConfig.payment_mode || 'virement';
   const badge = isBadgeSale(productConfig);
-
-  if (badge) {
-    const delayDays = Number(
-      productConfig.prelevement_delay_days ||
-        process.env.BADGE_PRELEVEMENT_DELAY_DAYS ||
-        7
-    );
-    await adjustBadgeEndDateWithRetry(page, delayDays, { attempts: 3, intervalMs: 600 }).catch(() => {});
-  }
 
   if (mode === 'virement') {
     await clickFirst(page, sel('payment_finalize.virement'));
