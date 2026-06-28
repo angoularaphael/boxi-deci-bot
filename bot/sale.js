@@ -655,52 +655,85 @@ async function adjustBadgeEndDateWithRetry(page, delayDays = 7, { attempts = 12,
   return false;
 }
 
+async function verifyBadgeDeferredSetup(page, delayDays = 7) {
+  const { endStr } = badgeContractDates(delayDays);
+  const text = (await page.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ');
+
+  if (text.includes(endStr)) return true;
+
+  const endAlt = endStr.replace(/\//g, '-');
+  if (text.includes(endAlt)) return true;
+
+  if (/Restant d[uû].*34[,.]99/i.test(text) && !/Total encaiss[ée].*34[,.]99/i.test(text)) {
+    return true;
+  }
+
+  if (/34[,.]99/.test(text) && /pr[ée]l[èe]vement|[ée]ch[ée]ance/i.test(text)) {
+    return true;
+  }
+
+  return false;
+}
+
+async function fillBadgeDatesInConfigModal(page, delayDays = 7) {
+  const { startStr, endStr } = badgeContractDates(delayDays);
+  let filledFin = false;
+
+  for (const scope of await getBadgeEditorScopes(page)) {
+    await uncheckKeepDuration(scope);
+    await fillDateFieldByLabel(scope, /Date de début/i, startStr);
+    if (await fillDateFieldByLabel(scope, /Date de fin/i, endStr)) {
+      filledFin = true;
+    }
+  }
+
+  if (filledFin) {
+    logInfo('Badge — dates saisies dans modale produit', {
+      date_debut: startStr,
+      date_fin: endStr,
+      delay_days: delayDays,
+    });
+  }
+  return filledFin;
+}
+
+async function waitForModifierDateFinPopup(page, delayDays = 7, { attempts = 15, intervalMs = 1000 } = {}) {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      if (await adjustBadgeEndDate(page, delayDays)) return true;
+    } catch (err) {
+      logWarn('Badge — popup date de fin', { error: err.message, attempt: i + 1 });
+    }
+    if (await fillBadgeContractDates(page, delayDays)) return true;
+    await page.waitForTimeout(intervalMs);
+  }
+  return false;
+}
+
 async function dismissPostApplyDialogs(page) {
   await clickFirst(page, sel('sale_config_modal.ignorer_continuer'));
   await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
   await randomDelay(400, 700);
 }
 
-async function configureBadgeDeferredDates(page, delayDays, memberId = null) {
-  let configured = await fillBadgeContractDates(page, delayDays);
-  if (configured) return true;
+async function configureBadgeDeferredDates(page, delayDays) {
+  if (await waitForModifierDateFinPopup(page, delayDays)) return true;
+  if (await fillBadgeContractDates(page, delayDays)) return true;
 
-  configured = await fillBadgeEndDateFields(page, delayDays);
-  if (configured && (await applyContractDateChange(page))) return true;
-
-  try {
-    if (await adjustBadgeEndDate(page, delayDays)) return true;
-  } catch (err) {
-    logWarn('Badge — popup date de fin', { error: err.message });
+  if (await fillBadgeEndDateFields(page, delayDays) && (await applyContractDateChange(page))) {
+    return true;
   }
 
-  if (memberId) {
-    logInfo('Badge — repli check.php pour panneau Modifier', { member_id: memberId });
-    await ensureMemberCheckForBadgeEdit(page, memberId);
-    configured = await fillBadgeContractDates(page, delayDays);
-    if (configured) return true;
-  }
-
-  for (let i = 0; i < 8; i += 1) {
-    if (await fillBadgeContractDates(page, delayDays)) return true;
-    if (await fillBadgeEndDateFields(page, delayDays) && (await applyContractDateChange(page))) {
-      return true;
-    }
-    if (memberId && i === 2) {
-      await ensureMemberCheckForBadgeEdit(page, memberId);
-    }
-    await page.waitForTimeout(800);
-  }
-
-  logWarn('Badge — panneau date introuvable', {
+  logWarn('Badge — panneau date introuvable sur vente', {
     url: page.url(),
     has_action: (await page.getByText(/Action souhaitée/i).count()) > 0,
     has_date_fin: (await page.getByText(/Date de fin/i).count()) > 0,
+    has_virement: (await page.getByText(/Virement/i).count()) > 0,
   });
   return false;
 }
 
-async function applyBadgeConfigModal(page, productConfig, memberId = null) {
+async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   await page.locator('[role="dialog"]').first()
     .waitFor({ state: 'visible', timeout: 15000 })
     .catch(() => {});
@@ -708,20 +741,44 @@ async function applyBadgeConfigModal(page, productConfig, memberId = null) {
   await ensurePaiementComptantOff(page, { strict: true });
 
   const delayDays = resolveBadgePrelevementDelayDays(productConfig);
+  const { endStr } = badgeContractDates(delayDays);
 
-  await fillBadgeEndDateFields(page, delayDays);
+  const modalDatesFilled = await fillBadgeDatesInConfigModal(page, delayDays);
 
   await clickFirst(page, sel('sale_config_modal.appliquer'));
-  await randomDelay(1000, 1500);
+  await randomDelay(1500, 2500);
   await dismissPostApplyDialogs(page);
-  await randomDelay(800, 1200);
+  await randomDelay(1000, 1500);
 
-  const configured = await configureBadgeDeferredDates(page, delayDays, memberId);
-  if (!configured) {
-    throw new Error(
-      `Badge — contrat J+${delayDays} requis (prélèvement IBAN 5-7 jours, pas encaissement immédiat 34,99 €)`
-    );
+  if (modalDatesFilled && (await verifyBadgeDeferredSetup(page, delayDays))) {
+    logInfo('Badge — prélèvement IBAN différé (modale produit validée)', {
+      date_fin: endStr,
+      delay_days: delayDays,
+      window: '5-7 jours',
+    });
+    return;
   }
+
+  const configured = await configureBadgeDeferredDates(page, delayDays);
+  if (configured) return;
+
+  if (modalDatesFilled) {
+    const onVente = /vente|nextgen/i.test(page.url());
+    const hasVirement =
+      (await page.getByText(/Virement/i).count()) > 0 &&
+      (await page.getByText(/Virement/i).first().isVisible().catch(() => false));
+    if (onVente && hasVirement) {
+      logWarn('Badge — dates modale produit, validation UI partielle — finalize sur vente', {
+        date_fin: endStr,
+        url: page.url(),
+      });
+      return;
+    }
+  }
+
+  throw new Error(
+    `Badge — contrat J+${delayDays} requis (prélèvement IBAN 5-7 jours, pas encaissement immédiat 34,99 €)`
+  );
 }
 
 async function togglePaiementComptantOff(page) {
