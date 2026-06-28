@@ -1,0 +1,16 @@
+[
+  {
+    "name": "OFFRE A 29€",
+    "tagline": "Offre DUO rentrée 2026",
+    "description": "29 € par personne — 4 semaines sans engagement.",
+    "badge": "Rentrée 2026"
+  },
+  {
+    "name": "OFFRE PROMO 12 MOIS",
+    "tagline": "Saison rentrée 2026",
+    "description": "259 € la saison — 4× sans frais (campagne rentrée).",
+    "price_cents": 25900,
+    "price_label": "259,00 €",
+    "badge": "4× sans frais"
+  }
+]
