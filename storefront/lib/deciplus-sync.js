@@ -64,6 +64,7 @@ function mapDeciplusItem(item) {
   const saleType = inferSaleType(item);
   const requiresIban = saleType !== 'none' && stripeEuros > 0 && !comptant && !/coach staff/i.test(item.title);
   const deciplusDisplayEuros = Number(item.price || 0);
+  const hasContractTotal = deciplusDisplayEuros > stripeEuros + 0.5;
 
   const product = {
     id: `dp-${item.id}`,
@@ -71,9 +72,17 @@ function mapDeciplusItem(item) {
     category: item.categoryTitle || item.categoryId,
     name: item.title,
     price_cents: Math.round(stripeEuros * 100),
+    /** Prix affiché grille — identique Deciplus (total contrat ou prix unique) */
     price_label: deciplusDisplayEuros > 0 ? formatEuros(deciplusDisplayEuros) : 'Gratuit',
+    /** Montant débité aujourd'hui sur Stripe */
     stripe_price_label: stripeEuros === 0 ? 'Gratuit' : formatEuros(stripeEuros),
+    pay_today_label: stripeEuros === 0 ? 'Gratuit' : formatEuros(stripeEuros),
     deciplus_price: deciplusDisplayEuros,
+    price_subtitle: hasContractTotal ? `${formatEuros(stripeEuros)} — 1ère échéance CB` : null,
+    deciplus_total_note: hasContractTotal
+      ? `Total contrat Deciplus : ${formatEuros(deciplusDisplayEuros)}`
+      : null,
+    installments_note: hasContractTotal ? 'CB : 1ère échéance · suite par prélèvement IBAN' : null,
     sale_type: saleType,
     requires_iban: requiresIban,
     requires_payment: stripeEuros > 0,
