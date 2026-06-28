@@ -1,6 +1,11 @@
 const { randomDelay, loadJson } = require('../lib/utils');
-const { logInfo } = require('../lib/logger');
+const { logInfo, logWarn } = require('../lib/logger');
 const { buildInternalNote } = require('../lib/normalize');
+const { gotoDeciplus } = require('./auth');
+
+function navTimeout() {
+  return Number(process.env.DECIPLUS_NAV_TIMEOUT || 90000);
+}
 
 function getSelectors() {
   try {
@@ -85,17 +90,14 @@ async function fillFirst(ctx, selectors, value) {
 }
 
 async function navigateToMembers(page) {
-  const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
-  const selectUrl = new URL('select.php', base).href;
+  if (page.url().includes('select.php')) return;
 
-  if (!page.url().includes('select.php')) {
-    await page.goto(selectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(async () => {
-      const icon = page.locator('i.icon.fa-solid').first();
-      if ((await icon.count()) > 0) await icon.click();
-    });
-    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-    await randomDelay();
-  }
+  await gotoDeciplus(page, 'select.php').catch(async () => {
+    const icon = page.locator('i.icon.fa-solid').first();
+    if ((await icon.count()) > 0) await icon.click();
+  });
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+  await randomDelay();
 }
 
 async function searchMember(page, query) {
@@ -118,35 +120,15 @@ async function searchMember(page, query) {
   const url = page.url();
   const idMatch = url.match(/idj=(\d+)/);
   if (idMatch && idMatch[1] !== 'new') {
+    logInfo('Membre Deciplus trouvé', { member_id: idMatch[1] });
     return { found: true, member_id: idMatch[1] };
   }
 
+  logInfo('Membre Deciplus introuvable', { via: query.includes('@') ? 'email' : 'phone' });
   return { found: false };
 }
 
-async function openNewMemberForm(page, customer) {
-  const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
-  const params = new URLSearchParams({
-    idj: 'new',
-    idn: '',
-    returntoselect: '',
-    jnom: customer.last_name || '',
-    jprenom: customer.first_name || '',
-  });
-  if (customer.email) params.set('jemail', customer.email);
-
-  await page.goto(new URL(`joueurs.php?${params}`, base).href, {
-    waitUntil: 'domcontentloaded',
-    timeout: 30000,
-  });
-  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-  await randomDelay();
-
-  const ctx = await getMemberFormContext(page);
-  if ((await ctx.locator('form[name="db1_form"], input[name="nom"]').count()) > 0) {
-    return ctx;
-  }
-
+async function openNewMemberFormViaSelect(page, customer) {
   const sel = getSelectors();
   await navigateToMembers(page);
   await fillFirst(page, sel.quick_search_selectors?.nom || '#i_nom', customer.last_name);
@@ -156,12 +138,59 @@ async function openNewMemberForm(page, customer) {
   }
 
   const newBtn = page.locator(sel.quick_search_selectors?.new_button || '#buttonNew').first();
-  if ((await newBtn.count()) > 0) {
-    await newBtn.click();
-    await page.waitForURL(/joueurs\.php.*idj=new/, { timeout: 20000 }).catch(() => {});
-    await randomDelay();
-    return getMemberFormContext(page);
+  if ((await newBtn.count()) === 0) return null;
+
+  await newBtn.click();
+  await page.waitForURL(/joueurs\.php.*idj=new/, { timeout: navTimeout() }).catch(() => {});
+  await randomDelay();
+
+  const ctx = await getMemberFormContext(page);
+  if ((await ctx.locator('form[name="db1_form"], input[name="nom"]').count()) > 0) {
+    return ctx;
   }
+  return null;
+}
+
+async function openNewMemberFormViaUrl(page, customer) {
+  const params = new URLSearchParams({
+    idj: 'new',
+    idn: '',
+    returntoselect: '',
+    jnom: customer.last_name || '',
+    jprenom: customer.first_name || '',
+  });
+  if (customer.email) params.set('jemail', customer.email);
+
+  await gotoDeciplus(page, `joueurs.php?${params}`);
+  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+  await randomDelay();
+
+  const ctx = await getMemberFormContext(page);
+  if ((await ctx.locator('form[name="db1_form"], input[name="nom"]').count()) > 0) {
+    return ctx;
+  }
+  return null;
+}
+
+async function openNewMemberForm(page, customer) {
+  logInfo('Ouverture formulaire nouveau membre Deciplus', {
+    last_name: customer.last_name,
+    email: customer.email || null,
+  });
+
+  let ctx = await openNewMemberFormViaSelect(page, customer);
+  if (ctx) return ctx;
+
+  logInfo('Repli création membre — URL directe joueurs.php');
+  try {
+    ctx = await openNewMemberFormViaUrl(page, customer);
+    if (ctx) return ctx;
+  } catch (err) {
+    logWarn('URL directe joueurs.php en échec', { error: err.message });
+  }
+
+  ctx = await openNewMemberFormViaSelect(page, customer);
+  if (ctx) return ctx;
 
   throw new Error('Impossible d\'ouvrir joueurs.php pour création membre');
 }
@@ -236,7 +265,7 @@ async function submitMemberForm(page) {
   }
 
   await page.waitForURL(/check\.php\?idj=\d+|select\.php\?idjnew=\d+|joueurs\.php\?idj=\d+/, {
-    timeout: 30000,
+    timeout: navTimeout(),
   }).catch(() => {});
   await randomDelay();
 }

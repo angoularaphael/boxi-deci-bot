@@ -7,7 +7,7 @@ const { logInfo, logWarn } = require('../lib/logger');
 const { buildInternalNote } = require('../lib/normalize');
 const { openMemberCheck, clickFirst, fillFirst, sel, closeGreyboxIfOpen } = require('./wallet');
 const { ensureDeciplusSaleZone } = require('./deciplus-zone');
-const { buildDeciplusProductSearch, normalizeText } = require('./catalog');
+const { buildDeciplusProductSearch, buildSearchTokens, normalizeText } = require('./catalog');
 
 function buildSearchCandidates(productConfig) {
   const name = productConfig.deciplus_product_name || productConfig.label || '';
@@ -18,10 +18,21 @@ function buildSearchCandidates(productConfig) {
   }
   candidates.add(buildDeciplusProductSearch(name, productConfig.deciplus_product_id));
 
+  for (const token of buildSearchTokens(name)) {
+    candidates.add(token);
+  }
+
+  if (productConfig.deciplus_reference) {
+    candidates.add(String(productConfig.deciplus_reference));
+    candidates.add(String(productConfig.deciplus_reference).replace(/^0+/, ''));
+  }
+  if (productConfig.deciplus_product_id) {
+    candidates.add(String(productConfig.deciplus_product_id));
+  }
+
   for (const value of [
     name,
     name.replace(/\s*€.*$/i, '').trim(),
-    name.replace(/.*-\s*/, '').trim(),
   ]) {
     if (value) candidates.add(value);
   }
@@ -31,16 +42,43 @@ function buildSearchCandidates(productConfig) {
     candidates.add(price[1]);
     candidates.add(price[1].replace('.', ','));
   }
-  if (/training camp/i.test(name)) candidates.add('Training camp');
-  if (/cours illimit/i.test(name)) candidates.add('Cours illimités');
-
-  for (const segment of name.split(/\s*-\s*/).map((s) => s.trim()).filter(Boolean)) {
-    if (segment.length >= 4 && segment.length <= 40) {
-      candidates.add(segment.replace(/\s*€.*$/i, '').trim());
-    }
-  }
 
   return [...candidates].filter(Boolean);
+}
+
+async function openProductCategory(page, productConfig) {
+  const isCarte =
+    productConfig.sale_type === 'carte' ||
+    /badge|decipass|carte/i.test(String(productConfig.label || productConfig.deciplus_product_name || ''));
+
+  const patterns = isCarte
+    ? [/Cartes/i, /prépay/i, /Decipass/i]
+    : [/^Abonnements$/i, /Abonnement/i];
+
+  for (const pat of patterns) {
+    const el = page.getByText(pat).first();
+    if ((await el.count()) > 0 && (await el.isVisible().catch(() => false))) {
+      await el.click();
+      await randomDelay(900, 1400);
+      logInfo('Catégorie catalogue Deciplus', { category: String(pat) });
+      return true;
+    }
+  }
+  return false;
+}
+
+async function getProductTileLocator(page) {
+  const selectors = [
+    '.product-wrapper-title',
+    '.product-wrapper .product-wrapper-title',
+    '[class*="product-wrapper-title"]',
+    '[class*="product-card"] [class*="title"]',
+  ];
+  for (const selector of selectors) {
+    const loc = page.locator(selector);
+    if ((await loc.count()) > 0) return loc;
+  }
+  return page.locator('.product-wrapper-title');
 }
 
 async function scoreProductTile(text, productConfig) {
@@ -67,13 +105,19 @@ async function scoreProductTile(text, productConfig) {
 
   if (/training camp/i.test(name) && /training camp/i.test(text)) score += 40;
   if (/badge/i.test(name) && /badge/i.test(text)) score += 100;
+  if (/association/i.test(name) && /association/i.test(text)) score += 60;
+
+  const targetTokens = normalizeText(name).split(' ').filter((t) => t.length > 3);
+  const textTokens = new Set(normalizeText(text).split(' '));
+  const overlap = targetTokens.filter((t) => textTokens.has(t)).length;
+  score += overlap * 15;
 
   return score;
 }
 
 async function clickProductResult(page, productConfig) {
   const name = productConfig.deciplus_product_name || productConfig.label || '';
-  const tiles = page.locator('.product-wrapper-title');
+  const tiles = await getProductTileLocator(page);
   const count = await tiles.count();
 
   let bestTile = null;
@@ -107,7 +151,28 @@ async function clickProductResult(page, productConfig) {
     return true;
   }
 
+  const partial = page.getByText(new RegExp(escapeRegExp(name.slice(0, 24)), 'i')).first();
+  if ((await partial.count()) > 0 && (await partial.isVisible().catch(() => false))) {
+    await partial.click();
+    return true;
+  }
+
   return false;
+}
+
+function escapeRegExp(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+async function listVisibleProducts(page) {
+  const tiles = await getProductTileLocator(page);
+  const count = Math.min(await tiles.count(), 8);
+  const out = [];
+  for (let i = 0; i < count; i += 1) {
+    const text = (await tiles.nth(i).innerText().catch(() => '')).trim();
+    if (text) out.push(text.slice(0, 60));
+  }
+  return out;
 }
 
 async function selectProductInCatalog(page, productConfig) {
@@ -115,15 +180,20 @@ async function selectProductInCatalog(page, productConfig) {
   const searchCandidates = buildSearchCandidates(productConfig);
 
   const searchInput = page
-    .locator('input[placeholder*="Rechercher un produit"], input[placeholder*="Rechercher"]')
+    .locator(
+      'input[placeholder*="Rechercher un produit"], input[placeholder*="Rechercher"], input[placeholder*="prestation"]'
+    )
     .first();
   await searchInput.waitFor({ state: 'visible', timeout: 20000 });
 
+  await openProductCategory(page, productConfig);
+
   for (const search of searchCandidates) {
     await searchInput.fill('');
-    await randomDelay(200, 400);
+    await randomDelay(250, 450);
     await searchInput.fill(search);
-    await randomDelay(1200, 2000);
+    await searchInput.press('Enter').catch(() => {});
+    await randomDelay(1500, 2500);
 
     if (await clickProductResult(page, productConfig)) {
       await randomDelay();
@@ -131,7 +201,11 @@ async function selectProductInCatalog(page, productConfig) {
       return true;
     }
 
-    logWarn('Recherche produit Deciplus sans résultat', { search, name });
+    logWarn('Recherche produit Deciplus sans résultat', {
+      search,
+      name,
+      visible: await listVisibleProducts(page),
+    });
   }
 
   throw new Error(`Produit Deciplus introuvable: "${name}"`);

@@ -8,7 +8,7 @@ const { enqueue, getQueueStats, STATUS } = require('../lib/queue');
 const { normalizeOrder, validateOrder } = require('../lib/normalize');
 const { logInfo, logError } = require('../lib/logger');
 
-const PORT = Number(process.env.BOT_HTTP_PORT || 3050);
+const PORT = Number(process.env.BOT_HTTP_PORT || process.env.PORT || 3050);
 const SECRET = process.env.SYNC_SECRET || process.env.BRIDGE_SECRET || '';
 
 function isAuthorized(req) {

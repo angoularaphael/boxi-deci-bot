@@ -6,6 +6,7 @@ const path = require('path');
 const { ROOT, ensureDir, loadJson } = require('../../lib/utils');
 const { logInfo, logWarn } = require('../../lib/logger');
 const { normalizeText, inferSaleType, buildDeciplusProductSearch } = require('../../bot/catalog');
+const { getBadgeFeeNotice, isStorefrontProduct } = require('./storefront-copy');
 
 const SYNC_FILE = path.join(ROOT, 'data', 'storefront', 'catalog-live.json');
 const OVERRIDES_FILE = path.join(ROOT, 'storefront', 'products-overrides.json');
@@ -64,7 +65,7 @@ function mapDeciplusItem(item) {
   const requiresIban = saleType !== 'none' && stripeEuros > 0 && !comptant && !/coach staff/i.test(item.title);
   const deciplusDisplayEuros = Number(item.price || 0);
 
-  return {
+  const product = {
     id: `dp-${item.id}`,
     deciplus_id: item.id,
     category: item.categoryTitle || item.categoryId,
@@ -81,6 +82,9 @@ function mapDeciplusItem(item) {
     reference: item.reference,
     type: item.type,
   };
+  const badgeNotice = getBadgeFeeNotice(product);
+  if (badgeNotice) product.badge_fee_notice = badgeNotice;
+  return product;
 }
 
 function apiPriceDiffers(item, stripeEuros) {
@@ -134,12 +138,12 @@ function deciplusToStorefront(deciplusProducts, { includeCategories = ['abo'] } 
   const filtered = deciplusProducts.filter((p) => {
     if (/coach staff/i.test(p.title)) return false;
     const cat = p.categoryId || p.type;
+    if (cat === 'decipass' || /^badge$/i.test(String(p.title || '').trim())) return false;
     if (includeCategories.includes('abo') && (cat === 'abo' || p.categoryId === 'abo')) return true;
-    if (includeCategories.includes('decipass') && (cat === 'decipass' || /badge/i.test(p.title))) return true;
     return includeCategories.length === 0;
   });
 
-  let products = filtered.map(mapDeciplusItem);
+  let products = filtered.map(mapDeciplusItem).filter(isStorefrontProduct);
   products = applyOverrides(products, loadOverrides());
   products = attachLegacyIds(products);
 
@@ -200,21 +204,37 @@ function ingestCatalogPayload(payload) {
   return normalized;
 }
 
+function enrichStorefrontProducts(products) {
+  return products
+    .filter(isStorefrontProduct)
+    .map((product) => {
+      const badgeNotice = getBadgeFeeNotice(product);
+      if (!badgeNotice) return product;
+      return { ...product, badge_fee_notice: badgeNotice };
+    });
+}
+
 function getStoreProducts({ preferLive = true } = {}) {
+  const wrap = (catalog) => {
+    const products = enrichStorefrontProducts(catalog.products || []);
+    return { ...catalog, products, count: products.length };
+  };
+
   if (preferLive && runtimeCatalog?.products?.length) {
-    return runtimeCatalog;
+    return wrap(runtimeCatalog);
   }
   if (preferLive) {
     const live = loadSyncedCatalog();
-    if (live?.products?.length) return live;
+    if (live?.products?.length) return wrap(live);
   }
-  const staticProducts = loadStaticProducts();
+  const staticProducts = enrichStorefrontProducts(loadStaticProducts());
   if (!staticProducts.length && process.env.VERCEL) {
     logWarn('Catalogue statique indisponible sur Vercel — ingest bot requis');
   }
   return {
     synced_at: null,
     products: staticProducts,
+    count: staticProducts.length,
     source: 'static',
   };
 }
