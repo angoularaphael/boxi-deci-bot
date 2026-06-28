@@ -306,61 +306,121 @@ async function ensurePaiementComptantOff(page, { strict = false } = {}) {
   return false;
 }
 
-async function adjustBadgeEndDate(page, delayDays = 7) {
-  const modBtn = page.locator(sel('sale_config_modal.modifier_date_fin')).first();
-  const visible =
-    (await modBtn.count()) > 0 && (await modBtn.isVisible().catch(() => false));
-
-  if (!visible) {
-    const alt = page.getByRole('button', { name: /Modifier la date de fin/i }).first();
-    if ((await alt.count()) === 0 || !(await alt.isVisible().catch(() => false))) {
-      return false;
-    }
-    await alt.click();
-  } else {
-    await modBtn.click();
-  }
-
-  await randomDelay(800, 1200);
-
+function badgeEndDate(delayDays = 7) {
   const endDate = new Date();
   endDate.setDate(endDate.getDate() + delayDays);
-  const endStr = formatFrDate(endDate);
+  return { endDate, endStr: formatFrDate(endDate), iso: endDate.toISOString().slice(0, 10) };
+}
 
-  let filled = await fillFirst(
-    page,
-    'input[name="date_fin"], input[name="dfin"], input[name="datefin"]',
-    endStr
-  );
+async function findModifierDateFinControl(page) {
+  const patterns = [
+    sel('sale_config_modal.modifier_date_fin'),
+    'button:has-text("Modifier la date de fin")',
+    'a:has-text("Modifier la date de fin")',
+    '[role="button"]:has-text("Modifier la date de fin")',
+    'text=/Modifier la date de fin/i',
+    'text=/Modifier.*date.*fin/i',
+  ];
 
-  if (!filled) {
-    const byLabel = page.locator('text=/Date de fin/i').locator('xpath=following::input[1]').first();
-    if ((await byLabel.count()) > 0 && (await byLabel.isVisible().catch(() => false))) {
-      await byLabel.fill(endStr);
-      filled = true;
+  for (const pattern of patterns) {
+    const el = page.locator(pattern).first();
+    if ((await el.count()) > 0 && (await el.isVisible().catch(() => false))) {
+      return el;
     }
   }
 
-  if (!filled) {
-    const anyDate = page.locator('input[type="date"], input[name*="date"]').last();
-    if ((await anyDate.count()) > 0) {
-      const iso = endDate.toISOString().slice(0, 10);
-      await anyDate.fill(iso).catch(async () => {
-        await anyDate.fill(endStr);
-      });
+  const roleBtn = page.getByRole('button', { name: /Modifier la date de fin/i }).first();
+  if ((await roleBtn.count()) > 0 && (await roleBtn.isVisible().catch(() => false))) {
+    return roleBtn;
+  }
+
+  const roleLink = page.getByRole('link', { name: /Modifier la date de fin/i }).first();
+  if ((await roleLink.count()) > 0 && (await roleLink.isVisible().catch(() => false))) {
+    return roleLink;
+  }
+
+  return null;
+}
+
+async function fillBadgeEndDateFields(page, delayDays = 7) {
+  const { endStr, iso } = badgeEndDate(delayDays);
+  const scopes = [];
+  const dialog = page.locator('[role="dialog"]').first();
+  if ((await dialog.count()) > 0 && (await dialog.isVisible().catch(() => false))) {
+    scopes.push(dialog);
+  }
+  scopes.push(page);
+
+  for (const scope of scopes) {
+    let filled = await fillFirst(
+      scope,
+      'input[name="date_fin"], input[name="dfin"], input[name="datefin"], input[name="dateFin"], input[name="date_fin_carte"]',
+      endStr
+    );
+
+    if (!filled) {
+      const byLabel = scope.locator('text=/Date de fin/i').locator('xpath=following::input[1]').first();
+      if ((await byLabel.count()) > 0 && (await byLabel.isVisible().catch(() => false))) {
+        await byLabel.fill(endStr);
+        filled = true;
+      }
+    }
+
+    if (!filled) {
+      const dateInputs = scope.locator('input[type="date"], input[name*="date"], input[placeholder*="jj/mm"]');
+      const count = await dateInputs.count();
+      if (count >= 2) {
+        const endInput = dateInputs.nth(count - 1);
+        if (await endInput.isVisible().catch(() => false)) {
+          await endInput.fill(iso).catch(async () => {
+            await endInput.fill(endStr);
+          });
+          filled = true;
+        }
+      } else if (count === 1) {
+        const only = dateInputs.first();
+        if (await only.isVisible().catch(() => false)) {
+          await only.fill(iso).catch(async () => {
+            await only.fill(endStr);
+          });
+          filled = true;
+        }
+      }
+    }
+
+    if (filled) {
+      logInfo('Badge — date de fin saisie', { date_fin: endStr, delay_days: delayDays });
+      return true;
     }
   }
 
-  const applied = await clickFirst(
+  return false;
+}
+
+async function confirmBadgeDateModal(page) {
+  return clickFirst(
     page,
     [
       sel('contract_actions.appliquer_quitter'),
       sel('sale_config_modal.appliquer'),
       'button:has-text("Appliquer et Quitter")',
       'button:has-text("Appliquer")',
+      'button:has-text("Valider")',
     ].join(', ')
   );
+}
 
+async function adjustBadgeEndDate(page, delayDays = 7) {
+  const modControl = await findModifierDateFinControl(page);
+  if (!modControl) return false;
+
+  await modControl.click();
+  await randomDelay(800, 1200);
+
+  const { endStr } = badgeEndDate(delayDays);
+  await fillBadgeEndDateFields(page, delayDays);
+
+  const applied = await confirmBadgeDateModal(page);
   if (!applied) {
     throw new Error('Badge — validation date de fin impossible (Appliquer introuvable)');
   }
@@ -373,15 +433,32 @@ async function adjustBadgeEndDate(page, delayDays = 7) {
   return true;
 }
 
+async function adjustBadgeEndDateWithRetry(page, delayDays = 7, { attempts = 12, intervalMs = 1000 } = {}) {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      if (await adjustBadgeEndDate(page, delayDays)) return true;
+    } catch (err) {
+      logWarn('Badge — ajustement date de fin interrompu', { error: err.message, attempt: i + 1 });
+    }
+    if (await fillBadgeEndDateFields(page, delayDays)) return true;
+    await page.waitForTimeout(intervalMs);
+  }
+  return false;
+}
+
+async function dismissPostApplyDialogs(page) {
+  await clickFirst(page, sel('sale_config_modal.ignorer_continuer'));
+  await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
+  await randomDelay(400, 700);
+}
+
 async function applyBadgeConfigModal(page, productConfig) {
   await page.locator('[role="dialog"]').first()
     .waitFor({ state: 'visible', timeout: 15000 })
     .catch(() => {});
 
   await ensurePaiementComptantOff(page, { strict: true });
-
-  await clickFirst(page, sel('sale_config_modal.appliquer'));
-  await randomDelay(1000, 1500);
+  const comptantConfirmedOff = (await isPaiementComptantChecked(page)) === false;
 
   const delayDays = Number(
     productConfig.prelevement_delay_days ||
@@ -389,10 +466,28 @@ async function applyBadgeConfigModal(page, productConfig) {
       7
   );
 
-  const adjusted = await adjustBadgeEndDate(page, delayDays);
+  let adjusted = await adjustBadgeEndDate(page, delayDays);
   if (!adjusted) {
+    adjusted = await fillBadgeEndDateFields(page, delayDays);
+  }
+
+  await clickFirst(page, sel('sale_config_modal.appliquer'));
+  await randomDelay(1000, 1500);
+  await dismissPostApplyDialogs(page);
+
+  if (!adjusted) {
+    adjusted = await adjustBadgeEndDateWithRetry(page, delayDays, { attempts: 8, intervalMs: 800 });
+  }
+
+  if (!adjusted) {
+    if (comptantConfirmedOff) {
+      logInfo('Badge — pas de popup « Modifier la date de fin » (Paiement Comptant off, prélèvement différé attendu)', {
+        delay_days: delayDays,
+      });
+      return;
+    }
     throw new Error(
-      'Badge — bouton « Modifier la date de fin » introuvable (prélèvement IBAN ~5–7 jours requis)'
+      'Badge — prélèvement différé impossible (Paiement Comptant actif et date de fin non modifiable)'
     );
   }
 }
@@ -437,6 +532,15 @@ async function applyConfigModal(page, productConfig) {
 async function finalizePayment(page, productConfig) {
   const mode = productConfig.payment_mode || 'virement';
   const badge = isBadgeSale(productConfig);
+
+  if (badge) {
+    const delayDays = Number(
+      productConfig.prelevement_delay_days ||
+        process.env.BADGE_PRELEVEMENT_DELAY_DAYS ||
+        7
+    );
+    await adjustBadgeEndDateWithRetry(page, delayDays, { attempts: 3, intervalMs: 600 }).catch(() => {});
+  }
 
   if (mode === 'virement') {
     await clickFirst(page, sel('payment_finalize.virement'));
