@@ -13,6 +13,8 @@
     "requires_iban": true,
     "paiement_comptant": false,
     "prelevement_delay_days": 7,
+    "prelevement_delay_days_min": 5,
+    "prelevement_delay_days_max": 7,
     "payment_mode": "virement",
     "currency": "EUR"
   },
