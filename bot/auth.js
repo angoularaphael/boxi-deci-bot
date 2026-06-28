@@ -1,8 +1,8 @@
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('playwright');
 const { ROOT, ensureDir, randomDelay } = require('../lib/utils');
 const { logInfo } = require('../lib/logger');
+const { launchChromiumWithRetry } = require('./playwright-launch');
 const { isChooseZoneScreen, selectSiteInPicker, clickSellOnSite } = require('./deciplus-zone');
 
 const SESSION_DIR = process.env.BOT_SESSION_DIR || path.join(ROOT, 'data', 'session');
@@ -10,12 +10,10 @@ const STORAGE_FILE = path.join(SESSION_DIR, 'storage-state.json');
 
 async function launchBrowser() {
   ensureDir(SESSION_DIR);
-  const headless = String(process.env.DECIPLUS_HEADLESS || 'false').toLowerCase() === 'true';
-  const slowMo = Number(process.env.DECIPLUS_SLOW_MO || 100);
 
-  const browser = await chromium.launch({ headless, slowMo });
+  const browser = await launchChromiumWithRetry();
   const contextOptions = {
-    viewport: { width: 1440, height: 900 },
+    viewport: { width: 1280, height: 720 },
     locale: 'fr-FR',
   };
   if (fs.existsSync(STORAGE_FILE)) {

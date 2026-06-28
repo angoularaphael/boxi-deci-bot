@@ -4,8 +4,8 @@
  */
 require('dotenv').config();
 
-const path = require('path');
-const { launchBrowser, login, saveSession } = require('./auth');
+const { login } = require('./auth');
+const { runWithSession, closeBrowser } = require('./browser-pool');
 const { findOrCreateMember } = require('./member');
 const { recordSale } = require('./sale');
 const { setMemberIban } = require('./wallet');
@@ -35,9 +35,16 @@ const CATALOG_PUSH_MS = Number(process.env.BOT_CATALOG_PUSH_MS || 6 * 60 * 60 * 
 
 async function maybePushCatalog() {
   if (String(process.env.BOT_CATALOG_PUSH_ENABLED || 'true').toLowerCase() === 'false') return;
+  if (listPending().length > 0) {
+    logWarn('Sync catalogue reportée — jobs en cours (une seule session Deciplus)');
+    return;
+  }
   try {
-    const { syncAndPushCatalog } = require('../lib/catalog-sync');
-    await syncAndPushCatalog();
+    await runWithSession('catalog-sync', async (page, context) => {
+      await login(page);
+      const { syncAndPushCatalog } = require('../lib/catalog-sync');
+      await syncAndPushCatalog({ page, context, force: true, saveFile: true });
+    });
   } catch (err) {
     logWarn('Sync/push catalogue en échec', { error: err.message });
   }
@@ -191,27 +198,23 @@ async function processOneJob(job) {
 
   updateJob(filePath, { status: STATUS.PROCESSING, attempts: (job.attempts || 0) + 1 });
 
-  let browser;
-  let context;
-  let page;
-
   try {
-    ({ browser, context, page } = await launchBrowser());
-    await login(page);
-    const result = await processJob(page, job);
-    await saveSession(context);
+    const outcome = await runWithSession('job', async (page) => {
+      await login(page);
+      return processJob(page, job);
+    });
 
-    markProcessed(jobId, result);
+    markProcessed(jobId, outcome);
     removeJob(filePath);
 
     logInfo('Job Deciplus traité', {
       job_id: jobId,
       order_id: job.order_id,
-      action: result.action || job.action || 'sale',
-      status: result.status,
+      action: outcome.action || job.action || 'sale',
+      status: outcome.status,
     });
 
-    return { ok: true, result };
+    return { ok: true, result: outcome };
   } catch (err) {
     if (err.message.startsWith('Validation:')) {
       rejectJob(job, filePath, err.message.replace(/^Validation:\s*/, ''));
@@ -239,9 +242,13 @@ async function processOneJob(job) {
     }
 
     logError('Erreur traitement job', { job_id: jobId, order_id: job.order_id, error: err.message });
+
+    if (/browser has been closed|Target page, context or browser/i.test(err.message)) {
+      logWarn('Navigateur fermé — session réinitialisée pour le prochain job');
+      await closeBrowser();
+    }
+
     return { ok: false, error: err.message };
-  } finally {
-    if (browser) await browser.close();
   }
 }
 
@@ -251,7 +258,11 @@ async function runLoop(once = false) {
 
   logInfo('Bot Deciplus démarré', getQueueStats());
 
-  maybePushCatalog().catch(() => {});
+  const catalogDelay = Number(process.env.BOT_CATALOG_PUSH_DELAY_MS || 120000);
+  setTimeout(() => {
+    maybePushCatalog().catch(() => {});
+  }, catalogDelay);
+
   const catalogTimer = setInterval(() => {
     maybePushCatalog().catch(() => {});
   }, CATALOG_PUSH_MS);
@@ -270,6 +281,7 @@ async function runLoop(once = false) {
     await processOneJob(job);
   } while (!once);
 
+  await closeBrowser();
   logInfo('Bot Deciplus arrêté', getQueueStats());
 }
 
