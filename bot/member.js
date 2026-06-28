@@ -281,7 +281,22 @@ async function findOrCreateMember(page, order, gymConfig) {
   await submitMemberForm(page);
 
   const duplicateMsg = await detectDuplicateError(page);
-  if (duplicateMsg) return { duplicate: true, message: duplicateMsg };
+  if (duplicateMsg) {
+    logWarn('Doublon à la création — recherche membre existant', { order_id: order.order_id });
+    if (customer.email) {
+      const retryEmail = await searchMember(page, customer.email);
+      if (retryEmail.found) {
+        return { member_id: retryEmail.member_id, action: 'found_after_duplicate' };
+      }
+    }
+    if (customer.phone) {
+      const retryPhone = await searchMember(page, customer.phone);
+      if (retryPhone.found) {
+        return { member_id: retryPhone.member_id, action: 'found_after_duplicate' };
+      }
+    }
+    return { duplicate: true, message: duplicateMsg };
+  }
 
   const memberId = extractMemberId(page);
   logInfo('Membre Deciplus créé', { member_id: memberId, order_id: order.order_id });
