@@ -146,6 +146,7 @@ async function processSaleJob(page, order) {
     member_action: memberResult.action,
     sale_action: saleResult.action,
     badge_action: saleResult.badge_action || null,
+    badge_error: saleResult.badge_error || null,
   };
 }
 

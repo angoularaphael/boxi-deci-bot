@@ -9,6 +9,37 @@ const { openMemberCheck, clickFirst, fillFirst, sel, closeGreyboxIfOpen } = requ
 const { ensureDeciplusSaleZone } = require('./deciplus-zone');
 const { buildDeciplusProductSearch, buildSearchTokens, normalizeText } = require('./catalog');
 
+function isBadgeSale(productConfig) {
+  return (
+    productConfig.sale_type === 'carte' ||
+    /badge/i.test(String(productConfig.label || productConfig.deciplus_product_name || ''))
+  );
+}
+
+function formatFrDate(date) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()}`;
+}
+
+async function findPaiementComptantCheckbox(page) {
+  const selectors = [
+    'label:has-text("Paiement Comptant") >> .. >> input[type="checkbox"]',
+    'text=Paiement Comptant >> xpath=ancestor::*[1]/following::input[@type="checkbox"][1]',
+    '[role="dialog"] label:has-text("Paiement Comptant") >> .. >> input[type="checkbox"]',
+  ];
+  for (const selector of selectors) {
+    const cb = page.locator(selector).first();
+    if ((await cb.count()) > 0) return cb;
+  }
+  return null;
+}
+
+async function isPaiementComptantChecked(page) {
+  const cb = await findPaiementComptantCheckbox(page);
+  if (!cb) return null;
+  return cb.isChecked().catch(() => null);
+}
+
 function buildSearchCandidates(productConfig) {
   const name = productConfig.deciplus_product_name || productConfig.label || '';
   const candidates = new Set();
@@ -211,67 +242,130 @@ async function selectProductInCatalog(page, productConfig) {
   throw new Error(`Produit Deciplus introuvable: "${name}"`);
 }
 
-async function ensurePaiementComptantOff(page) {
+async function ensurePaiementComptantOff(page, { strict = false } = {}) {
   await page.getByText('Paiement Comptant', { exact: false }).first()
     .waitFor({ state: 'visible', timeout: 12000 })
     .catch(() => {});
 
-  const attempts = [
-    async () => {
-      const checkbox = page.locator('label:has-text("Paiement Comptant")')
-        .locator('..')
-        .locator('input[type="checkbox"]')
-        .first();
-      if ((await checkbox.count()) === 0) return false;
-      if (await checkbox.isChecked().catch(() => false)) {
-        await checkbox.uncheck({ force: true });
-        return true;
-      }
-      return true;
-    },
-    async () => {
-      const row = page.getByText('Paiement Comptant', { exact: false }).first();
-      const cb = row.locator('xpath=ancestor-or-self::*[1]/following::input[@type="checkbox"][1]').first();
-      if ((await cb.count()) === 0) return false;
-      if (await cb.isChecked().catch(() => false)) {
-        await cb.uncheck({ force: true });
-        return true;
-      }
-      return true;
-    },
-    async () => {
-      const toggle = page.locator('text=Paiement Comptant').locator('..').locator('input, button, [role="switch"]').first();
-      if ((await toggle.count()) === 0) return false;
-      const checked = await toggle.isChecked?.().catch(() => null);
-      if (checked !== false) {
-        await toggle.click({ force: true });
-        return true;
-      }
-      return true;
-    },
-    async () => {
-      const label = page.getByText('Paiement Comptant', { exact: false }).first();
-      if (!(await label.isVisible().catch(() => false))) return false;
-      await label.click();
-      await randomDelay(400, 700);
-      return true;
-    },
-  ];
+  for (let pass = 0; pass < 3; pass += 1) {
+    const cb = await findPaiementComptantCheckbox(page);
+    if (!cb) break;
 
-  for (const attempt of attempts) {
-    try {
-      if (await attempt()) {
-        logInfo('Paiement Comptant — vérification OK');
-        await randomDelay(400, 700);
-        return true;
-      }
-    } catch {
-      /* essai suivant */
+    const checked = await cb.isChecked().catch(() => null);
+    if (checked === false) {
+      logInfo('Paiement Comptant — désactivé');
+      return true;
+    }
+    if (checked === true) {
+      await cb.uncheck({ force: true }).catch(async () => {
+        await cb.click({ force: true });
+      });
+      await randomDelay(400, 700);
     }
   }
 
-  logWarn('Paiement Comptant — toggle non trouvé (peut-être déjà désactivé)');
+  const stillChecked = await isPaiementComptantChecked(page);
+  if (stillChecked === false) {
+    logInfo('Paiement Comptant — désactivé');
+    return true;
+  }
+  if (stillChecked === true) {
+    const msg = 'Paiement Comptant toujours activé';
+    if (strict) throw new Error(msg);
+    logWarn(msg);
+    return false;
+  }
+
+  logWarn('Paiement Comptant — état indéterminé');
+  if (strict) throw new Error('Paiement Comptant — toggle introuvable');
   return false;
+}
+
+async function adjustBadgeEndDate(page, delayDays = 7) {
+  const modBtn = page.locator(sel('sale_config_modal.modifier_date_fin')).first();
+  const visible =
+    (await modBtn.count()) > 0 && (await modBtn.isVisible().catch(() => false));
+
+  if (!visible) {
+    const alt = page.getByRole('button', { name: /Modifier la date de fin/i }).first();
+    if ((await alt.count()) === 0 || !(await alt.isVisible().catch(() => false))) {
+      return false;
+    }
+    await alt.click();
+  } else {
+    await modBtn.click();
+  }
+
+  await randomDelay(800, 1200);
+
+  const endDate = new Date();
+  endDate.setDate(endDate.getDate() + delayDays);
+  const endStr = formatFrDate(endDate);
+
+  let filled = await fillFirst(
+    page,
+    'input[name="date_fin"], input[name="dfin"], input[name="datefin"]',
+    endStr
+  );
+
+  if (!filled) {
+    const byLabel = page.locator('text=/Date de fin/i').locator('xpath=following::input[1]').first();
+    if ((await byLabel.count()) > 0 && (await byLabel.isVisible().catch(() => false))) {
+      await byLabel.fill(endStr);
+      filled = true;
+    }
+  }
+
+  if (!filled) {
+    const anyDate = page.locator('input[type="date"], input[name*="date"]').last();
+    if ((await anyDate.count()) > 0) {
+      const iso = endDate.toISOString().slice(0, 10);
+      await anyDate.fill(iso).catch(async () => {
+        await anyDate.fill(endStr);
+      });
+    }
+  }
+
+  const applied = await clickFirst(
+    page,
+    [
+      sel('contract_actions.appliquer_quitter'),
+      sel('sale_config_modal.appliquer'),
+      'button:has-text("Appliquer et Quitter")',
+      'button:has-text("Appliquer")',
+    ].join(', ')
+  );
+
+  if (!applied) {
+    throw new Error('Badge — validation date de fin impossible (Appliquer introuvable)');
+  }
+
+  logInfo('Badge — date de fin repoussée pour prélèvement différé', {
+    date_fin: endStr,
+    delay_days: delayDays,
+  });
+  await randomDelay(600, 1000);
+  return true;
+}
+
+async function applyBadgeConfigModal(page, productConfig) {
+  await ensurePaiementComptantOff(page, { strict: true });
+
+  await clickFirst(page, sel('sale_config_modal.appliquer'));
+  await randomDelay(1000, 1500);
+
+  const delayDays = Number(
+    productConfig.prelevement_delay_days ||
+      process.env.BADGE_PRELEVEMENT_DELAY_DAYS ||
+      7
+  );
+
+  const adjusted = await adjustBadgeEndDate(page, delayDays);
+  if (!adjusted) {
+    throw new Error(
+      'Badge — bouton « Modifier la date de fin » introuvable (prélèvement IBAN ~5–7 jours requis)'
+    );
+  }
 }
 
 async function togglePaiementComptantOff(page) {
@@ -290,11 +384,11 @@ async function openSaleFlow(page, productConfig, gymConfig, saleKind) {
 }
 
 async function applyConfigModal(page, productConfig) {
-  const isBadge =
-    productConfig.sale_type === 'carte' || /badge/i.test(productConfig.label || productConfig.deciplus_product_name || '');
+  if (isBadgeSale(productConfig)) {
+    return applyBadgeConfigModal(page, productConfig);
+  }
 
-  if (productConfig.paiement_comptant === false || isBadge) {
-    await ensurePaiementComptantOff(page);
+  if (productConfig.paiement_comptant === false) {
     await ensurePaiementComptantOff(page);
   }
 
@@ -304,20 +398,12 @@ async function applyConfigModal(page, productConfig) {
 
   await clickFirst(page, sel('sale_config_modal.appliquer'));
   await randomDelay(600, 1000);
-
-  const modDateFin = page.locator('button:has-text("Modifier la date de fin")').first();
-  if ((await modDateFin.count()) > 0 && (await modDateFin.isVisible().catch(() => false))) {
-    await modDateFin.click();
-    await randomDelay();
-    logInfo('Badge / carte — date de fin ajustée');
-    return;
-  }
-
   await clickFirst(page, sel('sale_config_modal.ignorer_continuer'));
 }
 
 async function finalizePayment(page, productConfig) {
   const mode = productConfig.payment_mode || 'virement';
+  const badge = isBadgeSale(productConfig);
 
   if (mode === 'virement') {
     await clickFirst(page, sel('payment_finalize.virement'));
@@ -327,7 +413,7 @@ async function finalizePayment(page, productConfig) {
 
   await clickFirst(page, sel('payment_finalize.cloturer'));
   await clickFirst(page, sel('payment_finalize.terminer'));
-  logInfo('Paiement finalisé Deciplus', { mode });
+  logInfo('Paiement finalisé Deciplus', { mode, badge_differe: badge });
 }
 
 async function buyAbonnement(page, productConfig, gymConfig) {
@@ -387,8 +473,19 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       await closeGreyboxIfOpen(page);
       await openMemberCheck(page, memberId);
       await randomDelay(800, 1200);
-      const badgeResult = await buyCarteBadge(page, badgeProductConfig, gymConfig);
-      result.badge_action = badgeResult.action;
+      try {
+        const badgeResult = await buyCarteBadge(page, badgeProductConfig, gymConfig);
+        result.badge_action = badgeResult.action;
+      } catch (err) {
+        logWarn('Badge non créé — prélèvement différé requis', {
+          order_id: order.order_id,
+          member_id: memberId,
+          error: err.message,
+        });
+        result.badge_action = 'badge_failed';
+        result.badge_error = err.message;
+        result.manual_review = true;
+      }
     }
   } else {
     return { sale_id: null, action: 'unknown_sale_type', manual_review: true };
