@@ -665,30 +665,35 @@ async function fillBadgeAuDateViaDom(scope, endStr) {
       input.value = val;
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
+      input.dispatchEvent(new Event('blur', { bubbles: true }));
       return true;
     };
 
-    const valideNode = [...document.querySelectorAll('*')].find(
-      (el) => /^Valide du$/i.test(String(el.textContent || '').trim())
-    );
-    if (valideNode) {
-      let root = valideNode.parentElement;
-      for (let depth = 0; depth < 8 && root; depth += 1) {
-        const inputs = [...root.querySelectorAll('input:not([type="hidden"])')].filter(isVisible);
-        if (inputs.length >= 2 && setInput(inputs[1])) return true;
-        root = root.parentElement;
-      }
-    }
+    const modalRoot =
+      document.querySelector('[role="dialog"]') ||
+      [...document.querySelectorAll('*')].find((el) =>
+        /Configuration de Badge/i.test(String(el.textContent || '').slice(0, 80))
+      )?.closest('div');
 
-    const auNode = [...document.querySelectorAll('*')].find(
-      (el) => String(el.textContent || '').trim() === 'au'
-    );
-    if (auNode) {
-      let root = auNode.parentElement;
-      for (let depth = 0; depth < 6 && root; depth += 1) {
-        const input = [...root.querySelectorAll('input:not([type="hidden"])')].find(isVisible);
-        if (input && setInput(input)) return true;
-        root = root.parentElement;
+    const searchRoots = modalRoot ? [modalRoot, document.body] : [document.body];
+
+    for (const root of searchRoots) {
+      const inputs = [...root.querySelectorAll('input:not([type="hidden"])')].filter(isVisible);
+      const dateLike = inputs.filter((input) =>
+        /^\d{2}\/\d{2}\/\d{4}$/.test(String(input.value || '').trim())
+      );
+      if (dateLike.length >= 2 && setInput(dateLike[1])) return true;
+
+      const valideNode = [...root.querySelectorAll('*')].find(
+        (el) => /^Valide du$/i.test(String(el.textContent || '').trim())
+      );
+      if (valideNode) {
+        let parent = valideNode.parentElement;
+        for (let depth = 0; depth < 8 && parent; depth += 1) {
+          const near = [...parent.querySelectorAll('input:not([type="hidden"])')].filter(isVisible);
+          if (near.length >= 2 && setInput(near[1])) return true;
+          parent = parent.parentElement;
+        }
       }
     }
     return false;
@@ -778,31 +783,35 @@ async function fillBadgeDatesInConfigModal(page, delayDays = 7) {
     .catch(() => {});
 
   const { startStr, endStr } = badgeContractDates(delayDays);
-  let filledAu = false;
+  let filledAu = await fillBadgeAuDate(page, endStr);
 
   for (const scope of await getBadgeEditorScopes(page)) {
     await uncheckKeepDuration(scope);
     await fillBadgeValideDuDate(scope, startStr);
-    if (await fillBadgeAuDate(scope, endStr)) {
+    if (!filledAu && (await fillBadgeAuDate(scope, endStr))) {
       filledAu = true;
     }
-    if (!filledAu) {
-      filledAu = await fillDateFieldByLabel(scope, /Date de fin/i, endStr);
-    }
   }
 
-  await randomDelay(800, 1200);
-
-  const ready = filledAu && (await verifyBadgeConfigModalReady(page, delayDays));
-
-  if (filledAu) {
-    logInfo('Badge — validité étendue dans modale Configuration', {
-      valide_du: startStr,
-      valide_au: endStr,
-      delay_days: delayDays,
-      prelevement_ok: ready,
-    });
+  if (!filledAu) {
+    filledAu = await fillBadgeAuDateViaDom(page, endStr);
   }
+
+  await randomDelay(1200, 1800);
+
+  let ready = await verifyBadgeConfigModalReady(page, delayDays);
+  if (!ready && filledAu) {
+    await randomDelay(1000, 1500);
+    ready = await verifyBadgeConfigModalReady(page, delayDays);
+  }
+
+  logInfo('Badge — validité modale Configuration', {
+    valide_du: startStr,
+    valide_au: endStr,
+    delay_days: delayDays,
+    filled_au: filledAu,
+    prelevement_ok: ready,
+  });
   return ready;
 }
 
@@ -843,9 +852,11 @@ async function configureBadgeDeferredDates(page, delayDays) {
 }
 
 async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
-  await page.locator('[role="dialog"]').first()
+  await page.getByText(/Configuration de Badge/i).first()
     .waitFor({ state: 'visible', timeout: 15000 })
-    .catch(() => {});
+    .catch(() => {
+      return page.locator('[role="dialog"]').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
+    });
 
   await ensurePaiementComptantOff(page, { strict: true });
 
