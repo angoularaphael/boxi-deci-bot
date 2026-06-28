@@ -655,15 +655,56 @@ async function adjustBadgeEndDateWithRetry(page, delayDays = 7, { attempts = 12,
   return false;
 }
 
+async function fillBadgeAuDateViaDom(scope, endStr) {
+  if (typeof scope.evaluate !== 'function') return false;
+  return scope.evaluate((val) => {
+    const isVisible = (el) => el && el.offsetParent !== null;
+    const setInput = (input) => {
+      if (!input || !isVisible(input)) return false;
+      input.focus();
+      input.value = val;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+
+    const valideNode = [...document.querySelectorAll('*')].find(
+      (el) => /^Valide du$/i.test(String(el.textContent || '').trim())
+    );
+    if (valideNode) {
+      let root = valideNode.parentElement;
+      for (let depth = 0; depth < 8 && root; depth += 1) {
+        const inputs = [...root.querySelectorAll('input:not([type="hidden"])')].filter(isVisible);
+        if (inputs.length >= 2 && setInput(inputs[1])) return true;
+        root = root.parentElement;
+      }
+    }
+
+    const auNode = [...document.querySelectorAll('*')].find(
+      (el) => String(el.textContent || '').trim() === 'au'
+    );
+    if (auNode) {
+      let root = auNode.parentElement;
+      for (let depth = 0; depth < 6 && root; depth += 1) {
+        const input = [...root.querySelectorAll('input:not([type="hidden"])')].find(isVisible);
+        if (input && setInput(input)) return true;
+        root = root.parentElement;
+      }
+    }
+    return false;
+  }, endStr);
+}
+
 async function fillBadgeAuDate(scope, endStr) {
   const selectors = [
     sel('sale_config_modal.valide_au_input'),
+    sel('sale_config_modal.valide_au_alt'),
     ':text("Valide du") >> xpath=following::input[2]',
     ':text-is("au") >> xpath=following::input[1]',
-    'text=au >> xpath=following::input[1]',
   ];
 
   for (const selector of selectors) {
+    if (!selector || selector.includes(',')) continue;
     const el = scope.locator(selector).first();
     if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
     await el.click({ force: true }).catch(() => {});
@@ -673,7 +714,8 @@ async function fillBadgeAuDate(scope, endStr) {
     const current = (await el.inputValue().catch(() => '')).trim();
     if (current.includes(endStr.slice(0, 5)) || current === endStr) return true;
   }
-  return false;
+
+  return fillBadgeAuDateViaDom(scope, endStr);
 }
 
 async function fillBadgeValideDuDate(scope, startStr) {

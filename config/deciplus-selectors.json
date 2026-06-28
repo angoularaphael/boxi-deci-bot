@@ -71,7 +71,8 @@
     "ignorer_continuer": "button:has-text(\"Ignorer et continuer\")",
     "badge_config_title": "text=/Configuration de Badge/i",
     "valide_du_input": ":text(\"Valide du\") >> xpath=following::input[1]",
-    "valide_au_input": ":text(\"Valide du\") >> xpath=following::input[2], text=au >> xpath=following::input[1]"
+    "valide_au_input": ":text(\"Valide du\") >> xpath=following::input[2]",
+    "valide_au_alt": ":text-is(\"au\") >> xpath=following::input[1]"
   },
   "payment_finalize": {
     "virement": "button:has-text(\"Virement\"), text=Virement",
