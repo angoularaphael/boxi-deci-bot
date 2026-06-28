@@ -172,6 +172,23 @@ async function handleChooseZone(page, siteLabel) {
   return true;
 }
 
+async function gotoDeciplus(page, pathPart = '', options = {}) {
+  const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
+  const timeout = Number(process.env.DECIPLUS_NAV_TIMEOUT || 90000);
+  const target = pathPart ? new URL(pathPart, base).href : base;
+
+  try {
+    await page.goto(target, {
+      waitUntil: options.waitUntil || 'domcontentloaded',
+      timeout,
+    });
+  } catch (err) {
+    logWarn('Navigation Deciplus lente, retry commit', { url: target, error: err.message });
+    await page.goto(target, { waitUntil: 'commit', timeout: Math.min(timeout, 45000) });
+  }
+  await page.waitForTimeout(Number(process.env.DECIPLUS_NAV_SETTLE_MS || 1500));
+}
+
 async function submitLoginForm(page, user, pass) {
   const userSelectors = [
     'input[name="username"]',
@@ -220,13 +237,22 @@ async function login(page, options = {}) {
     throw new Error('DECIPLUS_URL, DECIPLUS_USER et DECIPLUS_PASSWORD requis');
   }
 
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await randomDelay(process.env.BOT_MIN_DELAY_MS, process.env.BOT_MAX_DELAY_MS);
+  const hasStoredSession = fs.existsSync(STORAGE_FILE);
+
+  if (hasStoredSession && !envToken) {
+    await gotoDeciplus(page, 'nextgen/home');
+    if (await getAccessToken(page)) {
+      logInfo('Déjà connecté via session persistée');
+      await handleChooseZone(page, options.siteLabel);
+      return;
+    }
+  }
+
+  await gotoDeciplus(page, '');
 
   if (envToken) {
     await injectAuthToken(page, envToken);
-    await page.goto(new URL('nextgen/home', url).href, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-    await randomDelay(800, 1500);
+    await gotoDeciplus(page, 'nextgen/home');
     if (await getAccessToken(page)) {
       logInfo('Connecté via DECIPLUS_AUTH_TOKEN');
       await handleChooseZone(page, options.siteLabel);
@@ -285,5 +311,7 @@ module.exports = {
   isLoggedIn,
   isVerificationScreen,
   handleChooseZone,
+  gotoDeciplus,
+  getAccessToken,
   login,
 };
