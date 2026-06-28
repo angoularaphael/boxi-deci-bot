@@ -13,7 +13,7 @@ function run(cmd) {
 }
 
 if (!fs.existsSync(path.join(__dirname, 'node_modules'))) {
-  run('npm install --omit=dev');
+  run('npm install --omit=dev --ignore-scripts');
 }
 
 try {
