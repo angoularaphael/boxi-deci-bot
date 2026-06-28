@@ -306,10 +306,42 @@ async function ensurePaiementComptantOff(page, { strict = false } = {}) {
   return false;
 }
 
-function badgeEndDate(delayDays = 7) {
-  const endDate = new Date();
+function resolveBadgePrelevementDelayDays(productConfig = {}) {
+  const min = Number(
+    productConfig.prelevement_delay_days_min ||
+      process.env.BADGE_PRELEVEMENT_DELAY_MIN ||
+      5
+  );
+  const max = Number(
+    productConfig.prelevement_delay_days_max ||
+      process.env.BADGE_PRELEVEMENT_DELAY_MAX ||
+      7
+  );
+  const raw = Number(
+    productConfig.prelevement_delay_days ||
+      process.env.BADGE_PRELEVEMENT_DELAY_DAYS ||
+      max
+  );
+  const delay = Number.isFinite(raw) ? raw : max;
+  return Math.min(max, Math.max(min, delay));
+}
+
+function badgeContractDates(delayDays = 7) {
+  const startDate = new Date();
+  const endDate = new Date(startDate);
   endDate.setDate(endDate.getDate() + delayDays);
-  return { endDate, endStr: formatFrDate(endDate), iso: endDate.toISOString().slice(0, 10) };
+  return {
+    startDate,
+    endDate,
+    startStr: formatFrDate(startDate),
+    endStr: formatFrDate(endDate),
+    isoEnd: endDate.toISOString().slice(0, 10),
+  };
+}
+
+function badgeEndDate(delayDays = 7) {
+  const { endDate, endStr, isoEnd: iso } = badgeContractDates(delayDays);
+  return { endDate, endStr, iso };
 }
 
 function badgeEditorScopes(page) {
@@ -435,20 +467,23 @@ async function applyContractDateChange(scope) {
 }
 
 async function fillBadgeContractDates(page, delayDays = 7) {
-  const { endStr } = badgeEndDate(delayDays);
+  const { startStr, endStr } = badgeContractDates(delayDays);
   await focusBadgeContractInSale(page);
 
   for (const scope of await visibleScope(badgeEditorScopes(page))) {
     await ensureContractModifyAction(scope);
     await uncheckKeepDuration(scope);
 
+    await fillDateFieldByLabel(scope, /Date de début/i, startStr);
     const finFilled = await fillDateFieldByLabel(scope, /Date de fin/i, endStr);
     if (!finFilled) continue;
 
     if (await applyContractDateChange(scope)) {
-      logInfo('Badge — date de fin configurée (panneau Modifier)', {
+      logInfo('Badge — prélèvement IBAN différé (contrat J → J+delai)', {
+        date_debut: startStr,
         date_fin: endStr,
         delay_days: delayDays,
+        window: '5-7 jours',
       });
       return true;
     }
@@ -588,11 +623,7 @@ async function applyBadgeConfigModal(page, productConfig) {
 
   await ensurePaiementComptantOff(page, { strict: true });
 
-  const delayDays = Number(
-    productConfig.prelevement_delay_days ||
-      process.env.BADGE_PRELEVEMENT_DELAY_DAYS ||
-      7
-  );
+  const delayDays = resolveBadgePrelevementDelayDays(productConfig);
 
   await clickFirst(page, sel('sale_config_modal.appliquer'));
   await randomDelay(1000, 1500);
@@ -602,7 +633,7 @@ async function applyBadgeConfigModal(page, productConfig) {
   const configured = await configureBadgeDeferredDates(page, delayDays);
   if (!configured) {
     throw new Error(
-      `Badge — date de fin J+${delayDays} requise (sinon débit immédiat 34,99 € sur le contrat Badge)`
+      `Badge — contrat J+${delayDays} requis (prélèvement IBAN 5-7 jours, pas encaissement immédiat 34,99 €)`
     );
   }
 }
