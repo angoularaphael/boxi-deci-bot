@@ -4,6 +4,8 @@
 const { chromium } = require('playwright');
 const { logWarn } = require('../lib/logger');
 const { sleep } = require('../lib/utils');
+const { installChromiumSystemDeps } = require('../lib/playwright-host-deps');
+const path = require('path');
 
 function isHostedBot() {
   return Boolean(
@@ -44,6 +46,14 @@ function getChromiumLaunchOptions() {
 }
 
 async function launchChromiumWithRetry(maxAttempts = 3) {
+  if (isHostedBot()) {
+    const dataRoot = process.env.BOT_DATA_DIR || path.join(process.cwd(), 'data');
+    installChromiumSystemDeps({
+      baseDir: path.join(dataRoot, 'system-libs'),
+      botDir: process.cwd(),
+    });
+  }
+
   const opts = getChromiumLaunchOptions();
   let lastError = null;
 
