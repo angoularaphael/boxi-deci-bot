@@ -375,10 +375,28 @@ async function captureBadgeDebugScreenshot(page, label) {
 async function getBadgeConfigModal(page) {
   const title = page.getByText(/Configuration de Badge/i).first();
   if ((await title.count()) > 0 && (await title.isVisible().catch(() => false))) {
+    const scoped = page
+      .locator('div, section, form, [role="dialog"], #GB_window')
+      .filter({ has: page.getByText(/Configuration de Badge/i) })
+      .filter({ has: page.getByRole('button', { name: /^Appliquer$/i }) })
+      .last();
+    if ((await scoped.count()) > 0 && (await scoped.isVisible().catch(() => false))) {
+      return scoped;
+    }
+
+    const ancestor = title.locator(
+      'xpath=ancestor::*[.//button[contains(normalize-space(.),"Appliquer")] or .//input[@value="Appliquer"]][1]'
+    );
+    if ((await ancestor.count()) > 0 && (await ancestor.isVisible().catch(() => false))) {
+      return ancestor.first();
+    }
+
     const gb = page.locator('#GB_window').first();
     if ((await gb.count()) > 0 && (await gb.isVisible().catch(() => false))) return gb;
     const dialog = page.locator('[role="dialog"]').first();
     if ((await dialog.count()) > 0 && (await dialog.isVisible().catch(() => false))) return dialog;
+
+    return title.locator('xpath=ancestor::div[contains(@class,"modal") or contains(@class,"dialog") or contains(@class,"popup")][1]').first();
   }
 
   const candidates = [
@@ -394,10 +412,26 @@ async function getBadgeConfigModal(page) {
   return null;
 }
 
+async function isBadgeConfigModalOpen(page) {
+  const titles = page.getByText(/Configuration de Badge/i);
+  const count = await titles.count();
+  for (let i = 0; i < count; i += 1) {
+    if (await titles.nth(i).isVisible().catch(() => false)) return true;
+  }
+  return false;
+}
+
 async function waitForBadgeConfigModal(page, timeoutMs = 15000, { tryReopen = true } = {}) {
+  try {
+    await page.getByText(/Configuration de Badge/i).first().waitFor({ state: 'visible', timeout: timeoutMs });
+    return true;
+  } catch {
+    /* continue below */
+  }
+
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (await getBadgeConfigModal(page)) return true;
+    if (await isBadgeConfigModalOpen(page)) return true;
     await page.waitForTimeout(300);
   }
 
@@ -411,7 +445,7 @@ async function waitForBadgeConfigModal(page, timeoutMs = 15000, { tryReopen = tr
     await randomDelay(800, 1200);
     return waitForBadgeConfigModal(page, 8000, { tryReopen: false });
   }
-  return false;
+  return isBadgeConfigModalOpen(page);
 }
 
 async function clickBadgeConfigEntry(page) {
@@ -435,7 +469,7 @@ async function reopenBadgeConfigModal(page) {
 }
 
 async function ensureBadgeConfigModalForSale(page) {
-  if (await waitForBadgeConfigModal(page, 4000, { tryReopen: false })) return true;
+  if (await waitForBadgeConfigModal(page, 8000, { tryReopen: false })) return true;
 
   await clickBadgeConfigEntry(page);
   await randomDelay(1000, 1500);
@@ -451,7 +485,8 @@ async function ensureBadgeConfigModalForSale(page) {
 }
 
 async function isBadgeConfigModalOpen(page) {
-  return Boolean(await getBadgeConfigModal(page));
+  const title = page.getByText(/Configuration de Badge/i).first();
+  return (await title.count()) > 0 && (await title.isVisible().catch(() => false));
 }
 
 async function waitForBadgeModalClosed(page, timeoutMs = 12000) {
@@ -480,11 +515,14 @@ function minBadgePaymentDate(delayDays = 7) {
 }
 
 async function readBadgeConfigModalText(page) {
+  if (!(await isBadgeConfigModalOpen(page))) return '';
   const modal = await getBadgeConfigModal(page);
   if (modal) {
     return (await modal.innerText().catch(() => '')).replace(/\s+/g, ' ');
   }
-  return '';
+  const title = page.getByText(/Configuration de Badge/i).first();
+  const block = title.locator('xpath=ancestor::*[1]').locator('xpath=ancestor::*[1]');
+  return (await block.innerText().catch(() => '')).replace(/\s+/g, ' ');
 }
 
 async function readBadgeAuValueFromModal(page) {
