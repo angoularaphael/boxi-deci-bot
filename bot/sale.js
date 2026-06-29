@@ -373,32 +373,85 @@ async function captureBadgeDebugScreenshot(page, label) {
 }
 
 async function getBadgeConfigModal(page) {
+  const title = page.getByText(/Configuration de Badge/i).first();
+  if ((await title.count()) > 0 && (await title.isVisible().catch(() => false))) {
+    const gb = page.locator('#GB_window').first();
+    if ((await gb.count()) > 0 && (await gb.isVisible().catch(() => false))) return gb;
+    const dialog = page.locator('[role="dialog"]').first();
+    if ((await dialog.count()) > 0 && (await dialog.isVisible().catch(() => false))) return dialog;
+  }
+
   const candidates = [
-    page.locator('#GB_window').filter({ hasText: /Configuration de Badge/i }),
-    page.locator('#GB_window'),
-    page.locator('[role="dialog"]').filter({ hasText: /Configuration de Badge/i }),
-    page.locator('.modal-content').filter({ hasText: /Configuration de Badge/i }),
+    page.locator('#GB_window').first(),
+    page.locator('[role="dialog"]').first(),
+    page.locator('.modal-content').first(),
   ];
-  for (const loc of candidates) {
-    const modal = loc.first();
-    if ((await modal.count()) > 0 && (await modal.isVisible().catch(() => false))) {
-      return modal;
-    }
+  for (const modal of candidates) {
+    if ((await modal.count()) === 0 || !(await modal.isVisible().catch(() => false))) continue;
+    const text = (await modal.innerText().catch(() => '')).replace(/\s+/g, ' ');
+    if (/Configuration de Badge|Paiement Comptant|Valide du/i.test(text)) return modal;
   }
   return null;
 }
 
-async function isBadgeConfigModalOpen(page) {
-  return Boolean(await getBadgeConfigModal(page));
-}
-
-async function waitForBadgeConfigModal(page, timeoutMs = 15000) {
+async function waitForBadgeConfigModal(page, timeoutMs = 15000, { tryReopen = true } = {}) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    if (await isBadgeConfigModalOpen(page)) return true;
+    if (await getBadgeConfigModal(page)) return true;
     await page.waitForTimeout(300);
   }
+
+  await page.getByText(/Configuration de Badge|Paiement Comptant/i).first()
+    .waitFor({ state: 'visible', timeout: 3000 })
+    .catch(() => {});
+  if (await getBadgeConfigModal(page)) return true;
+
+  if (tryReopen) {
+    await clickBadgeConfigEntry(page);
+    await randomDelay(800, 1200);
+    return waitForBadgeConfigModal(page, 8000, { tryReopen: false });
+  }
   return false;
+}
+
+async function clickBadgeConfigEntry(page) {
+  const targets = [
+    page.locator('text=/Prestation/i').locator('xpath=ancestor::*[1]').getByText(/^Badge$/i).first(),
+    page.locator('div, tr, li, section').filter({ hasText: /^Badge$/ }).filter({ hasText: /34[,.]99/ }).first(),
+    page.getByText(/^Badge$/i).last(),
+  ];
+  for (const el of targets) {
+    if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
+    await el.click({ force: true }).catch(() => {});
+    return true;
+  }
+  return false;
+}
+
+async function reopenBadgeConfigModal(page) {
+  await clickBadgeConfigEntry(page);
+  await randomDelay(800, 1200);
+  return waitForBadgeConfigModal(page, 10000, { tryReopen: false });
+}
+
+async function ensureBadgeConfigModalForSale(page) {
+  if (await waitForBadgeConfigModal(page, 4000, { tryReopen: false })) return true;
+
+  await clickBadgeConfigEntry(page);
+  await randomDelay(1000, 1500);
+  if (await waitForBadgeConfigModal(page, 6000, { tryReopen: false })) return true;
+
+  const tile = page.locator('.product-wrapper-title, [class*="product-wrapper"]').filter({ hasText: /^Badge$/i }).first();
+  if ((await tile.count()) > 0 && (await tile.isVisible().catch(() => false))) {
+    await tile.click({ force: true }).catch(() => {});
+    await randomDelay(1500, 2200);
+  }
+
+  return waitForBadgeConfigModal(page, 12000, { tryReopen: false });
+}
+
+async function isBadgeConfigModalOpen(page) {
+  return Boolean(await getBadgeConfigModal(page));
 }
 
 async function waitForBadgeModalClosed(page, timeoutMs = 12000) {
@@ -408,22 +461,6 @@ async function waitForBadgeModalClosed(page, timeoutMs = 12000) {
     await page.waitForTimeout(300);
   }
   return false;
-}
-
-async function reopenBadgeConfigModal(page) {
-  const targets = [
-    page.locator('text=/Prestation/i').locator('xpath=ancestor::*[1]').getByText(/^Badge$/i).first(),
-    page.getByText(/^Badge$/i).filter({ has: page.locator('xpath=ancestor::*[contains(., "Prestation")]') }).first(),
-    page.locator('div, tr, li, section').filter({ hasText: /^Badge$/ }).filter({ hasText: /34[,.]99/ }).first(),
-    page.getByText(/^Badge$/i).last(),
-  ];
-  for (const el of targets) {
-    if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
-    await el.click({ force: true }).catch(() => {});
-    await randomDelay(800, 1200);
-    break;
-  }
-  return waitForBadgeConfigModal(page, 10000);
 }
 
 function extractBadgePaymentDate(text) {
@@ -1143,15 +1180,16 @@ async function configureBadgeDeferredDates(page, delayDays) {
 }
 
 async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
+  await randomDelay(1500, 2500);
+
   const delayDays = resolveBadgePrelevementDelayDays(productConfig);
   const { endStr } = badgeContractDates(delayDays);
   const maxAttempts = 3;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    if (!(await waitForBadgeConfigModal(page, 15000))) {
-      await reopenBadgeConfigModal(page);
-    }
-    if (!(await waitForBadgeConfigModal(page, 5000))) {
+    if (!(await ensureBadgeConfigModalForSale(page))) {
+      await captureBadgeDebugScreenshot(page, `modal-missing-${attempt}`);
+      if (attempt < maxAttempts) continue;
       throw new Error('Badge — modale Configuration de Badge introuvable');
     }
 
