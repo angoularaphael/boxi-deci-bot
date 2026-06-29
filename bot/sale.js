@@ -371,8 +371,8 @@ async function badgeDomEvaluate(ctx, operation, value = null) {
 
       function clickAppliquerButton() {
         const candidates = [
+          ...deepQueryAll(document.body, 'button.ari-button-filled, button.ari-button'),
           ...deepQueryAll(document.body, 'button'),
-          ...deepQueryAll(document.body, '.el-button'),
           ...deepQueryAll(document.body, 'input[type="button"], input[type="submit"]'),
         ];
         for (const btn of candidates) {
@@ -547,6 +547,21 @@ async function captureBadgeDebugScreenshot(page, label) {
 }
 
 async function resolveDeciplusWorkPage(page) {
+  for (const frame of page.frames()) {
+    const name = frame.name() || '';
+    if (/GB_frame/i.test(name)) {
+      try {
+        const hit = await frame.evaluate(() => {
+          const text = String(document.body?.innerText || '');
+          return /Configuration de Badge|Paiement Comptant/i.test(text);
+        });
+        if (hit) return frame;
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
   for (const frame of page.frames()) {
     try {
       const hit = await frame.evaluate(() => {
@@ -1341,80 +1356,30 @@ async function configureBadgeDeferredDates(page, delayDays) {
 }
 
 async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
-  await randomDelay(2000, 3000);
+  await randomDelay(1500, 2500);
+  await ensureBadgeConfigModalForSale(page);
 
-  const delayDays = resolveBadgePrelevementDelayDays(productConfig);
-  const { endStr } = badgeContractDates(delayDays);
-  const maxAttempts = 3;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    await ensureBadgeConfigModalForSale(page);
-    if (!(await isBadgeConfigModalOpen(page))) {
-      logWarn('Badge — modale absente', {
-        attempt,
-        frames: page.frames().map((f) => f.url()).slice(0, 6),
-      });
-      await captureBadgeDebugScreenshot(page, `modal-missing-${attempt}`);
-      if (attempt < maxAttempts) continue;
-      throw new Error('Badge — modale Configuration de Badge introuvable');
-    }
-
-    await ensurePaiementComptantOff(page, { strict: true });
-
-    let ready = await fillBadgeDatesInConfigModal(page, delayDays);
-    if (!ready) {
-      logWarn('Badge — récap modale non prêt, nouvelle saisie dates', {
-        attempt,
-        date_fin: endStr,
-      });
-      ready = await fillBadgeDatesInConfigModal(page, delayDays);
-    }
-
-    if (!ready) {
-      await captureBadgeDebugScreenshot(page, `au-not-ready-${attempt}`);
-      if (attempt < maxAttempts) {
-        await nudgeBadgeModalRecap(page);
-        continue;
-      }
-      throw new Error(
-        `Badge — champ « au » J+${delayDays} requis dans Configuration de Badge (échéance prélèvement hors validité)`
-      );
-    }
-
-    await captureBadgeDebugScreenshot(page, `before-appliquer-${attempt}`);
-    const clicked = await clickBadgeModalAppliquer(page);
-    if (!clicked) {
-      throw new Error('Badge — bouton Appliquer introuvable dans Configuration de Badge');
-    }
-
-    await waitForBadgeModalClosed(page);
-    await dismissPostApplyDialogs(page);
-    await randomDelay(1000, 1500);
-
-    if (await verifyVentePageBadgeDeferred(page, delayDays)) {
-      logInfo('Badge — prélèvement IBAN différé (Configuration de Badge)', {
-        date_fin: endStr,
-        delay_days: delayDays,
-        window: '5-7 jours',
-        attempt,
-      });
-      return;
-    }
-
-    logWarn('Badge — vente encore en paiement immédiat après Appliquer', { attempt });
-    if (attempt < maxAttempts) {
-      await reopenBadgeConfigModal(page);
-      continue;
-    }
+  if (!(await isBadgeConfigModalOpen(page))) {
+    await captureBadgeDebugScreenshot(page, 'modal-missing');
+    throw new Error('Badge — modale Configuration de Badge introuvable');
   }
 
-  const configured = await configureBadgeDeferredDates(page, delayDays);
-  if (configured && (await verifyVentePageBadgeDeferred(page, delayDays))) return;
+  await ensurePaiementComptantOff(page, { strict: true });
+  await randomDelay(800, 1200);
 
-  await captureBadgeDebugScreenshot(page, 'deferred-failed');
-  throw new Error(
-    `Badge — contrat J+${delayDays} requis (prélèvement IBAN 5-7 jours, pas encaissement immédiat 34,99 €)`
-  );
+  const clicked = await clickBadgeModalAppliquer(page);
+  if (!clicked) {
+    await captureBadgeDebugScreenshot(page, 'appliquer-missing');
+    throw new Error('Badge — bouton Appliquer introuvable dans Configuration de Badge');
+  }
+
+  await waitForBadgeModalClosed(page);
+  await dismissPostApplyDialogs(page);
+  await randomDelay(800, 1200);
+
+  logInfo('Badge — Configuration appliquée (Paiement Comptant off → Appliquer)', {
+    delay_days: resolveBadgePrelevementDelayDays(productConfig),
+  });
 }
 
 async function togglePaiementComptantOff(page) {
