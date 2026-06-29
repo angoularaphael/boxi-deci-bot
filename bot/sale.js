@@ -439,14 +439,14 @@ async function getBadgeConfigModal(page) {
 
 async function isBadgeConfigModalOpen(page) {
   return page.evaluate(() => {
-    const isShown = (el) => {
-      if (!el) return false;
-      const r = el.getBoundingClientRect();
+    const text = String(document.body?.innerText || '');
+    if (!/Configuration de Badge/i.test(text)) return false;
+    if (!/Paiement Comptant/i.test(text)) return false;
+    return [...document.querySelectorAll('button, input[type="button"], input[type="submit"]')].some((btn) => {
+      const label = String(btn.textContent || btn.value || '').replace(/\s+/g, ' ').trim();
+      if (!/^Appliquer$/i.test(label)) return false;
+      const r = btn.getBoundingClientRect();
       return r.width > 0 && r.height > 0;
-    };
-    return [...document.querySelectorAll('div, h1, h2, h3, span, b, strong, p, label')].some((el) => {
-      const text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
-      return /^Configuration de Badge$/i.test(text) && isShown(el);
     });
   });
 }
@@ -1242,14 +1242,17 @@ async function configureBadgeDeferredDates(page, delayDays) {
 }
 
 async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
-  await randomDelay(1500, 2500);
+  await randomDelay(2000, 3000);
 
   const delayDays = resolveBadgePrelevementDelayDays(productConfig);
   const { endStr } = badgeContractDates(delayDays);
   const maxAttempts = 3;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    if (!(await ensureBadgeConfigModalForSale(page))) {
+    if (!(await isBadgeConfigModalOpen(page))) {
+      await ensureBadgeConfigModalForSale(page);
+    }
+    if (!(await isBadgeConfigModalOpen(page))) {
       await captureBadgeDebugScreenshot(page, `modal-missing-${attempt}`);
       if (attempt < maxAttempts) continue;
       throw new Error('Badge — modale Configuration de Badge introuvable');
