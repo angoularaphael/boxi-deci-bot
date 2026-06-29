@@ -1276,7 +1276,7 @@ async function fillBadgeDatesInConfigModal(page, delayDays = 7) {
   await badgeDomEvaluate(ctx, 'fillDu', startStr);
   let filledAu = await badgeDomEvaluate(ctx, 'fillAu', endStr);
   await randomDelay(500, 800);
-  await ctx.keyboard.press('Escape').catch(() => {});
+  await page.keyboard.press('Escape').catch(() => {});
   await badgeDomEvaluate(ctx, 'closePicker');
   await randomDelay(800, 1200);
 
