@@ -424,30 +424,49 @@ async function captureBadgeDebugScreenshot(page, label) {
   }
 }
 
+async function resolveDeciplusWorkPage(page) {
+  for (const frame of page.frames()) {
+    try {
+      const hit = await frame.evaluate(() => {
+        const text = String(document.body?.innerText || '');
+        return /Configuration de Badge/i.test(text) && /Paiement Comptant/i.test(text);
+      });
+      if (hit) return frame;
+    } catch {
+      /* ignore detached/cross-origin frames */
+    }
+  }
+
+  for (const frame of page.frames()) {
+    if (/nextgen\/vente|\/vente/i.test(frame.url())) return frame;
+  }
+
+  return page;
+}
+
 async function getBadgeConfigModal(page) {
+  const ctx = await resolveDeciplusWorkPage(page);
   if (!(await isBadgeConfigModalOpen(page))) return null;
 
-  const modal = page
+  const modal = ctx
     .locator('div, section, form')
-    .filter({ has: page.locator('text=/Configuration de Badge/i') })
-    .filter({ has: page.getByRole('button', { name: /^Appliquer$/i }) })
+    .filter({ has: ctx.locator('text=/Configuration de Badge/i') })
+    .filter({ has: ctx.getByRole('button', { name: /Appliquer/i }) })
     .last();
   if ((await modal.count()) > 0) return modal;
 
-  return page.locator('body');
+  return ctx.locator('body');
 }
 
 async function isBadgeConfigModalOpen(page) {
-  return page.evaluate(() => {
+  const ctx = await resolveDeciplusWorkPage(page);
+  return ctx.evaluate(() => {
     const text = String(document.body?.innerText || '');
-    if (!/Configuration de Badge/i.test(text)) return false;
-    if (!/Paiement Comptant/i.test(text)) return false;
-    return [...document.querySelectorAll('button, input[type="button"], input[type="submit"]')].some((btn) => {
-      const label = String(btn.textContent || btn.value || '').replace(/\s+/g, ' ').trim();
-      if (!/^Appliquer$/i.test(label)) return false;
-      const r = btn.getBoundingClientRect();
-      return r.width > 0 && r.height > 0;
-    });
+    return (
+      /Configuration de Badge/i.test(text) &&
+      /Paiement Comptant/i.test(text) &&
+      /Valide du/i.test(text)
+    );
   });
 }
 
@@ -472,10 +491,11 @@ async function waitForBadgeConfigModal(page, timeoutMs = 15000, { tryReopen = tr
 }
 
 async function clickBadgeConfigEntry(page) {
+  const ctx = await resolveDeciplusWorkPage(page);
   const targets = [
-    page.locator('text=/Prestation/i').locator('xpath=ancestor::*[1]').getByText(/^Badge$/i).first(),
-    page.locator('div, tr, li, section').filter({ hasText: /^Badge$/ }).filter({ hasText: /34[,.]99/ }).first(),
-    page.getByText(/^Badge$/i).last(),
+    ctx.locator('text=/Prestation/i').locator('xpath=ancestor::*[1]').getByText(/^Badge$/i).first(),
+    ctx.locator('div, tr, li, section').filter({ hasText: /^Badge$/ }).filter({ hasText: /34[,.]99/ }).first(),
+    ctx.getByText(/^Badge$/i).last(),
   ];
   for (const el of targets) {
     if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
@@ -492,13 +512,14 @@ async function reopenBadgeConfigModal(page) {
 }
 
 async function ensureBadgeConfigModalForSale(page) {
+  const ctx = await resolveDeciplusWorkPage(page);
   if (await waitForBadgeConfigModal(page, 10000, { tryReopen: false })) return true;
 
   await clickBadgeConfigEntry(page);
   await randomDelay(1000, 1500);
   if (await waitForBadgeConfigModal(page, 8000, { tryReopen: false })) return true;
 
-  const tile = page.locator('.product-wrapper-title, [class*="product-wrapper"]').filter({ hasText: /^Badge$/i }).first();
+  const tile = ctx.locator('.product-wrapper-title, [class*="product-wrapper"]').filter({ hasText: /^Badge$/i }).first();
   if ((await tile.count()) > 0 && (await tile.isVisible().catch(() => false))) {
     await tile.click({ force: true }).catch(() => {});
     await randomDelay(1500, 2200);
@@ -1253,6 +1274,10 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
       await ensureBadgeConfigModalForSale(page);
     }
     if (!(await isBadgeConfigModalOpen(page))) {
+      logWarn('Badge — modale absente', {
+        attempt,
+        frames: page.frames().map((f) => f.url()).slice(0, 6),
+      });
       await captureBadgeDebugScreenshot(page, `modal-missing-${attempt}`);
       if (attempt < maxAttempts) continue;
       throw new Error('Badge — modale Configuration de Badge introuvable');
