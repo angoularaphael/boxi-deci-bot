@@ -81,7 +81,7 @@
   "payment_finalize": {
     "virement": "button:has-text(\"Virement\"), text=Virement",
     "carte_bancaire": "button:has-text(\"Carte Bancaire\"), text=Carte Bancaire",
-    "terminer": "button:has-text(\"Terminer\"), text=Terminer, .verticalDocumentBar:has-text(\"Terminer\"), div:has-text(\"Terminer\")",
+    "terminer": "button:has-text(\"Terminer\"), text=Terminer, .verticalDocumentBar:has-text(\"Terminer\"), [class*=\"verticalDocumentBar\"]:has-text(\"Terminer\"), div.col-auto:has-text(\"Terminer\")",
     "cloturer": "button:has-text(\"Clôturer\"), text=Clôturer, .paymentModes-caisse-free:has-text(\"Clôturer\"), div:has-text(\"Clôturer la note\")",
     "modifier_date_fin_popup": "button.p-button:has-text(\"Modifier la date de fin\"), button[aria-label=\"Modifier la date de fin\"], button:has-text(\"Modifier la date de fin\")"
   },
