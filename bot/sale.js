@@ -263,82 +263,191 @@ async function selectProductInCatalog(page, productConfig) {
   throw new Error(`Produit Deciplus introuvable: "${name}"`);
 }
 
-async function clickPaiementComptantToggleOff(scope) {
-  if (typeof scope.evaluate !== 'function') return false;
-  return scope.evaluate(() => {
-    const labels = [...document.querySelectorAll('label, span, div, p, b, strong')].filter((el) =>
-      /^Paiement Comptant$/i.test(String(el.textContent || '').replace(/\s+/g, ' ').trim())
-    );
-    for (const label of labels) {
-      let parent = label.parentElement;
-      for (let depth = 0; depth < 8 && parent; depth += 1) {
-        const toggles = [
-          ...parent.querySelectorAll('input[type="checkbox"]'),
-          ...parent.querySelectorAll('[role="switch"]'),
-          ...parent.querySelectorAll('[class*="switch"], [class*="toggle"]'),
-        ];
-        for (const toggle of toggles) {
-          if (toggle.offsetParent === null && toggle.type !== 'checkbox') continue;
-          if (toggle.type === 'checkbox') {
-            if (!toggle.checked) return true;
-            toggle.click();
-            toggle.checked = false;
-            toggle.dispatchEvent(new Event('change', { bubbles: true }));
-            toggle.dispatchEvent(new Event('input', { bubbles: true }));
-            return true;
+async function badgeDomEvaluate(ctx, operation, value = null) {
+  return ctx.evaluate(
+    ({ op, val }) => {
+      function deepWalk(root, fn) {
+        if (!root) return;
+        fn(root);
+        if (root.shadowRoot) deepWalk(root.shadowRoot, fn);
+        for (const child of root.children || []) deepWalk(child, fn);
+      }
+
+      function deepQueryAll(root, selector) {
+        const out = [];
+        deepWalk(root, (node) => {
+          if (node.querySelectorAll) {
+            for (const el of node.querySelectorAll(selector)) out.push(el);
           }
-          toggle.click();
+        });
+        return out;
+      }
+
+      function deepText(node) {
+        if (!node) return '';
+        let text = node.innerText || node.textContent || '';
+        if (node.shadowRoot) text += ` ${deepText(node.shadowRoot)}`;
+        for (const child of node.children || []) text += ` ${deepText(child)}`;
+        return text;
+      }
+
+      function setNativeInputValue(input, v) {
+        if (!input) return false;
+        input.focus();
+        input.click();
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (setter) setter.call(input, v);
+        else input.value = v;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: v }));
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+        return String(input.value || '').trim() === v;
+      }
+
+      function findPaiementComptantSwitch() {
+        const spans = deepQueryAll(document.body, 'span').filter((el) =>
+          /Paiement Comptant/i.test(String(el.textContent || '').replace(/\s+/g, ' ').trim())
+        );
+        for (const span of spans) {
+          let parent = span.parentElement;
+          for (let depth = 0; depth < 8 && parent; depth += 1) {
+            const sw = parent.querySelector('.el-switch');
+            if (sw) return sw;
+            parent = parent.parentElement;
+          }
+        }
+        return (
+          deepQueryAll(document.body, '.el-switch').find((sw) => {
+            const row = sw.closest('.col-12, .row, div');
+            return row && /Paiement Comptant/i.test(row.textContent || '');
+          }) || null
+        );
+      }
+
+      function turnOffElSwitch(sw) {
+        if (!sw) return false;
+        if (!sw.classList.contains('is-checked')) return true;
+        const core = sw.querySelector('.el-switch__core');
+        if (core) core.click();
+        else {
+          const input = sw.querySelector('input.el-switch__input, input[role="switch"]');
+          if (input) input.click();
+          else sw.click();
+        }
+        return !sw.classList.contains('is-checked');
+      }
+
+      function findBadgeDateInputs() {
+        const editors = deepQueryAll(
+          document.body,
+          '.el-date-editor input.el-input__inner, .el-date-editor input, input.el-input__inner'
+        ).filter((input) => {
+          if (input.type === 'checkbox' || input.type === 'hidden') return false;
+          const r = input.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        });
+
+        const dateLike = editors.filter((input) =>
+          /^\d{2}\/\d{2}\/\d{4}$/.test(String(input.value || '').trim())
+        );
+        if (dateLike.length >= 2) return dateLike;
+
+        const valideNode = deepQueryAll(document.body, 'span, label, div, b, strong').find((el) =>
+          /^Valide du$/i.test(String(el.textContent || '').replace(/\s+/g, ' ').trim())
+        );
+        if (valideNode) {
+          let parent = valideNode.parentElement;
+          for (let depth = 0; depth < 10 && parent; depth += 1) {
+            const near = deepQueryAll(parent, '.el-date-editor input, input.el-input__inner').filter(
+              (input) => input.type !== 'checkbox' && input.type !== 'hidden'
+            );
+            if (near.length >= 2) return near;
+            parent = parent.parentElement;
+          }
+        }
+        return editors;
+      }
+
+      function clickAppliquerButton() {
+        const candidates = [
+          ...deepQueryAll(document.body, 'button'),
+          ...deepQueryAll(document.body, '.el-button'),
+          ...deepQueryAll(document.body, 'input[type="button"], input[type="submit"]'),
+        ];
+        for (const btn of candidates) {
+          const label = String(btn.textContent || btn.value || '').replace(/\s+/g, ' ').trim();
+          if (!/^Appliquer$/i.test(label)) continue;
+          const r = btn.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          btn.click();
           return true;
         }
-        parent = parent.parentElement;
+        return false;
       }
-    }
-    return false;
-  });
+
+      if (op === 'readText') return deepText(document.body).replace(/\s+/g, ' ');
+      if (op === 'turnOffComptant') return turnOffElSwitch(findPaiementComptantSwitch());
+      if (op === 'isComptantOn') {
+        const sw = findPaiementComptantSwitch();
+        return Boolean(sw && sw.classList.contains('is-checked'));
+      }
+      if (op === 'readAu') {
+        const inputs = findBadgeDateInputs();
+        return inputs.length >= 2 ? String(inputs[1].value || '').trim() : null;
+      }
+      if (op === 'fillAu') {
+        const inputs = findBadgeDateInputs();
+        if (inputs.length < 2) return false;
+        return setNativeInputValue(inputs[1], val);
+      }
+      if (op === 'fillDu') {
+        const inputs = findBadgeDateInputs();
+        if (inputs.length < 1) return false;
+        return setNativeInputValue(inputs[0], val);
+      }
+      if (op === 'clickAppliquer') return clickAppliquerButton();
+      return null;
+    },
+    { op: operation, val: value }
+  );
+}
+
+async function clickPaiementComptantToggleOff(scope) {
+  if (typeof scope.evaluate !== 'function') return false;
+  return badgeDomEvaluate(scope, 'turnOffComptant');
+}
+
+async function isElSwitchComptantOn(page) {
+  const ctx = await resolveDeciplusWorkPage(page);
+  return badgeDomEvaluate(ctx, 'isComptantOn');
 }
 
 async function ensurePaiementComptantOff(page, { strict = false } = {}) {
-  await page.getByText('Paiement Comptant', { exact: false }).first()
-    .waitFor({ state: 'attached', timeout: 12000 })
-    .catch(() => {});
+  const ctx = await resolveDeciplusWorkPage(page);
 
-  const modal = await getBadgeConfigModal(page);
-  if (modal) {
-    await clickPaiementComptantToggleOff(modal);
-    await randomDelay(400, 700);
-  } else {
-    await clickPaiementComptantToggleOff(page);
-    await randomDelay(400, 700);
-  }
+  for (let pass = 0; pass < 5; pass += 1) {
+    await clickPaiementComptantToggleOff(ctx);
+    await randomDelay(500, 900);
 
-  for (let pass = 0; pass < 4; pass += 1) {
-    const cb = await findPaiementComptantCheckbox(page);
-    if (!cb) break;
-
-    const checked = await cb.isChecked().catch(() => null);
-    if (checked === false) {
-      logInfo('Paiement Comptant — désactivé');
+    if (!(await isElSwitchComptantOn(page))) {
+      logInfo('Paiement Comptant — désactivé (el-switch)');
       return true;
     }
-    if (checked === true) {
-      try {
-        await uncheckPaiementComptantInput(cb);
-      } catch (err) {
-        logWarn('Paiement Comptant — uncheck JS échoué', { error: err.message });
-        await cb.uncheck({ force: true, timeout: 5000 }).catch(() => {});
-      }
-      const label = page.locator('[role="dialog"]').getByText(/Paiement Comptant/i).first();
-      if ((await label.count()) > 0) {
-        await label.click({ force: true, timeout: 3000 }).catch(() => {});
-      }
-      await randomDelay(400, 700);
-    }
-  }
 
-  const stillChecked = await isPaiementComptantChecked(page);
-  if (stillChecked === false) {
-    logInfo('Paiement Comptant — désactivé');
-    return true;
+    const cb = await findPaiementComptantCheckbox(page);
+    if (cb) {
+      const checked = await cb.isChecked().catch(() => null);
+      if (checked === false) {
+        logInfo('Paiement Comptant — désactivé');
+        return true;
+      }
+      if (checked === true) {
+        await uncheckPaiementComptantInput(cb).catch(() => {});
+        await cb.uncheck({ force: true, timeout: 5000 }).catch(() => {});
+        await randomDelay(400, 700);
+      }
+    }
   }
 
   if (await isBadgeConfigModalOpen(page)) {
@@ -349,16 +458,15 @@ async function ensurePaiementComptantOff(page, { strict = false } = {}) {
     }
   }
 
-  if (stillChecked === true) {
+  if (await isElSwitchComptantOn(page)) {
     const msg = 'Paiement Comptant toujours activé';
     if (strict) throw new Error(msg);
     logWarn(msg);
     return false;
   }
 
-  logWarn('Paiement Comptant — état indéterminé');
-  if (strict) throw new Error('Paiement Comptant — toggle introuvable');
-  return false;
+  logInfo('Paiement Comptant — désactivé');
+  return true;
 }
 
 function resolveBadgePrelevementDelayDays(productConfig = {}) {
@@ -445,43 +553,18 @@ async function resolveDeciplusWorkPage(page) {
 }
 
 async function getBadgeConfigModal(page) {
-  const ctx = await resolveDeciplusWorkPage(page);
   if (!(await isBadgeConfigModalOpen(page))) return null;
-
-  const modal = ctx
-    .locator('div, section, form')
-    .filter({ has: ctx.locator('text=/Configuration de Badge/i') })
-    .filter({ has: ctx.getByRole('button', { name: /Appliquer/i }) })
-    .last();
-  if ((await modal.count()) > 0) return modal;
-
-  return ctx.locator('body');
+  return resolveDeciplusWorkPage(page);
 }
 
 async function isBadgeConfigModalOpen(page) {
   const ctx = await resolveDeciplusWorkPage(page);
-
-  const titles = ctx.getByText(/Configuration de Badge/i);
-  const count = await titles.count();
-  for (let i = 0; i < count; i += 1) {
-    if (await titles.nth(i).isVisible().catch(() => false)) return true;
-  }
-
-  return ctx.evaluate(() => {
-    function deepText(node) {
-      if (!node) return '';
-      let text = node.innerText || node.textContent || '';
-      if (node.shadowRoot) text += ` ${deepText(node.shadowRoot)}`;
-      for (const child of node.children || []) text += ` ${deepText(child)}`;
-      return text;
-    }
-    const text = deepText(document.body);
-    return (
-      /Configuration de Badge/i.test(text) &&
-      /Paiement Comptant/i.test(text) &&
-      /Valide\s+du/i.test(text)
-    );
-  });
+  const text = await badgeDomEvaluate(ctx, 'readText');
+  return (
+    /Configuration de Badge/i.test(text) &&
+    /Paiement Comptant/i.test(text) &&
+    /Valide\s+du/i.test(text)
+  );
 }
 
 async function waitForBadgeConfigModal(page, timeoutMs = 15000, { tryReopen = true } = {}) {
@@ -543,11 +626,6 @@ async function ensureBadgeConfigModalForSale(page) {
   return isBadgeConfigModalOpen(page);
 }
 
-async function isBadgeConfigModalOpen(page) {
-  const title = page.getByText(/Configuration de Badge/i).first();
-  return (await title.count()) > 0 && (await title.isVisible().catch(() => false));
-}
-
 async function waitForBadgeModalClosed(page, timeoutMs = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -575,37 +653,20 @@ function minBadgePaymentDate(delayDays = 7) {
 
 async function readBadgeConfigModalText(page) {
   if (!(await isBadgeConfigModalOpen(page))) return '';
-  const modal = await getBadgeConfigModal(page);
-  if (modal) {
-    return (await modal.innerText().catch(() => '')).replace(/\s+/g, ' ');
-  }
-  const title = page.getByText(/Configuration de Badge/i).first();
-  const block = title.locator('xpath=ancestor::*[1]').locator('xpath=ancestor::*[1]');
-  return (await block.innerText().catch(() => '')).replace(/\s+/g, ' ');
+  const ctx = await resolveDeciplusWorkPage(page);
+  return badgeDomEvaluate(ctx, 'readText');
 }
 
 async function readBadgeAuValueFromModal(page) {
-  const modal = await getBadgeConfigModal(page);
-  if (!modal) return null;
-  return readBadgeAuValue(modal);
+  const ctx = await resolveDeciplusWorkPage(page);
+  return badgeDomEvaluate(ctx, 'readAu');
 }
 
 async function clickBadgeModalAppliquer(page) {
-  const modal = await getBadgeConfigModal(page);
-  if (!modal) return false;
-
-  const buttons = [
-    modal.getByRole('button', { name: /^Appliquer$/i }).first(),
-    modal.locator('button:has-text("Appliquer"):not(:has-text("Quitter"))').first(),
-    modal.locator('input[type="button"][value="Appliquer"], input[type="submit"][value="Appliquer"]').first(),
-  ];
-  for (const btn of buttons) {
-    if ((await btn.count()) === 0 || !(await btn.isVisible().catch(() => false))) continue;
-    await btn.click({ force: true, timeout: 10000 });
-    await randomDelay(600, 1000);
-    return true;
-  }
-  return clickFirst(modal, sel('sale_config_modal.appliquer'));
+  const ctx = await resolveDeciplusWorkPage(page);
+  const clicked = await badgeDomEvaluate(ctx, 'clickAppliquer');
+  if (clicked) await randomDelay(600, 1000);
+  return clicked;
 }
 
 async function waitForBadgeModalRecapReady(page, delayDays = 7, timeoutMs = 15000) {
@@ -1203,28 +1264,22 @@ async function verifyBadgeDeferredSetup(page, delayDays = 7) {
 async function fillBadgeDatesInConfigModal(page, delayDays = 7) {
   await waitForBadgeConfigModal(page, 15000);
 
-  const modal = await getBadgeConfigModal(page);
-  const scopes = modal ? [modal] : await getBadgeEditorScopes(page);
+  const ctx = await resolveDeciplusWorkPage(page);
   const { startStr, endStr } = badgeContractDates(delayDays);
 
-  let filledAu = false;
-  for (const scope of scopes) {
-    await uncheckKeepDuration(scope);
-    await fillBadgeValideDuDate(scope, startStr);
-    filledAu = (await fillBadgeAuDate(page, scope, endStr)) || filledAu;
-    await nudgeBadgeModalRecap(page);
+  await badgeDomEvaluate(ctx, 'fillDu', startStr);
+  let filledAu = await badgeDomEvaluate(ctx, 'fillAu', endStr);
+  await randomDelay(800, 1200);
+
+  if (!filledAu) {
+    filledAu = await fillBadgeAuDateViaDom(ctx, endStr);
+  }
+  if (!filledAu) {
+    filledAu = await fillBadgeAuDateViaKeyboard(page, ctx, endStr);
   }
 
-  if (!filledAu && modal) {
-    filledAu = await fillBadgeAuDateViaDom(modal, endStr);
-  }
-  if (!filledAu && modal) {
-    filledAu = await fillBadgeAuDateViaKeyboard(page, modal, endStr);
-  }
-
-  await nudgeBadgeModalRecap(page);
-  await waitForBadgeWarningGone(page);
   await randomDelay(1200, 1800);
+  await waitForBadgeWarningGone(page);
 
   const auReadback = await readBadgeAuValueFromModal(page);
   const ready = await waitForBadgeModalRecapReady(page, delayDays, 12000);
