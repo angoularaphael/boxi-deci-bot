@@ -62,6 +62,10 @@
   },
   "sale_config_modal": {
     "paiement_comptant_toggle": "text=Paiement Comptant",
+    "paiement_comptant_el_switch": ".el-switch:has(+ span:has-text(\"Paiement Comptant\")), span:has-text(\"Paiement Comptant\") >> xpath=following::div[contains(@class,\"el-switch\")][1]",
+    "paiement_comptant_el_switch_core": ".el-switch__core",
+    "valide_du_el_date": ":text(\"Valide du\") >> xpath=following::div[contains(@class,\"el-date-editor\")][1] >> input",
+    "valide_au_el_date": ":text(\"Valide du\") >> xpath=following::div[contains(@class,\"el-date-editor\")][2] >> input",
     "saisir_rib": "button:has-text(\"Saisir le RIB\"), text=Saisir le RIB",
     "appliquer": "button:has-text(\"Appliquer\")",
     "modifier_date_fin": "button:has-text(\"Modifier la date de fin\"), a:has-text(\"Modifier la date de fin\")",
