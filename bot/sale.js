@@ -263,10 +263,53 @@ async function selectProductInCatalog(page, productConfig) {
   throw new Error(`Produit Deciplus introuvable: "${name}"`);
 }
 
+async function clickPaiementComptantToggleOff(scope) {
+  if (typeof scope.evaluate !== 'function') return false;
+  return scope.evaluate(() => {
+    const labels = [...document.querySelectorAll('label, span, div, p, b, strong')].filter((el) =>
+      /^Paiement Comptant$/i.test(String(el.textContent || '').replace(/\s+/g, ' ').trim())
+    );
+    for (const label of labels) {
+      let parent = label.parentElement;
+      for (let depth = 0; depth < 8 && parent; depth += 1) {
+        const toggles = [
+          ...parent.querySelectorAll('input[type="checkbox"]'),
+          ...parent.querySelectorAll('[role="switch"]'),
+          ...parent.querySelectorAll('[class*="switch"], [class*="toggle"]'),
+        ];
+        for (const toggle of toggles) {
+          if (toggle.offsetParent === null && toggle.type !== 'checkbox') continue;
+          if (toggle.type === 'checkbox') {
+            if (!toggle.checked) return true;
+            toggle.click();
+            toggle.checked = false;
+            toggle.dispatchEvent(new Event('change', { bubbles: true }));
+            toggle.dispatchEvent(new Event('input', { bubbles: true }));
+            return true;
+          }
+          toggle.click();
+          return true;
+        }
+        parent = parent.parentElement;
+      }
+    }
+    return false;
+  });
+}
+
 async function ensurePaiementComptantOff(page, { strict = false } = {}) {
   await page.getByText('Paiement Comptant', { exact: false }).first()
     .waitFor({ state: 'attached', timeout: 12000 })
     .catch(() => {});
+
+  const modal = await getBadgeConfigModal(page);
+  if (modal) {
+    await clickPaiementComptantToggleOff(modal);
+    await randomDelay(400, 700);
+  } else {
+    await clickPaiementComptantToggleOff(page);
+    await randomDelay(400, 700);
+  }
 
   for (let pass = 0; pass < 4; pass += 1) {
     const cb = await findPaiementComptantCheckbox(page);
@@ -297,6 +340,15 @@ async function ensurePaiementComptantOff(page, { strict = false } = {}) {
     logInfo('Paiement Comptant — désactivé');
     return true;
   }
+
+  if (await isBadgeConfigModalOpen(page)) {
+    const text = await readBadgeConfigModalText(page);
+    if (/Pr[eé]l[eè]vement Automatique/i.test(text) && !modalShowsImmediateBadgePayment(text)) {
+      logInfo('Paiement Comptant — désactivé (modale badge)');
+      return true;
+    }
+  }
+
   if (stillChecked === true) {
     const msg = 'Paiement Comptant toujours activé';
     if (strict) throw new Error(msg);
@@ -373,66 +425,37 @@ async function captureBadgeDebugScreenshot(page, label) {
 }
 
 async function getBadgeConfigModal(page) {
-  const title = page.getByText(/Configuration de Badge/i).first();
-  if ((await title.count()) > 0 && (await title.isVisible().catch(() => false))) {
-    const scoped = page
-      .locator('div, section, form, [role="dialog"], #GB_window')
-      .filter({ has: page.getByText(/Configuration de Badge/i) })
-      .filter({ has: page.getByRole('button', { name: /^Appliquer$/i }) })
-      .last();
-    if ((await scoped.count()) > 0 && (await scoped.isVisible().catch(() => false))) {
-      return scoped;
-    }
+  if (!(await isBadgeConfigModalOpen(page))) return null;
 
-    const ancestor = title.locator(
-      'xpath=ancestor::*[.//button[contains(normalize-space(.),"Appliquer")] or .//input[@value="Appliquer"]][1]'
-    );
-    if ((await ancestor.count()) > 0 && (await ancestor.isVisible().catch(() => false))) {
-      return ancestor.first();
-    }
+  const modal = page
+    .locator('div, section, form')
+    .filter({ has: page.locator('text=/Configuration de Badge/i') })
+    .filter({ has: page.getByRole('button', { name: /^Appliquer$/i }) })
+    .last();
+  if ((await modal.count()) > 0) return modal;
 
-    const gb = page.locator('#GB_window').first();
-    if ((await gb.count()) > 0 && (await gb.isVisible().catch(() => false))) return gb;
-    const dialog = page.locator('[role="dialog"]').first();
-    if ((await dialog.count()) > 0 && (await dialog.isVisible().catch(() => false))) return dialog;
-
-    return title.locator('xpath=ancestor::div[contains(@class,"modal") or contains(@class,"dialog") or contains(@class,"popup")][1]').first();
-  }
-
-  const candidates = [
-    page.locator('#GB_window').first(),
-    page.locator('[role="dialog"]').first(),
-    page.locator('.modal-content').first(),
-  ];
-  for (const modal of candidates) {
-    if ((await modal.count()) === 0 || !(await modal.isVisible().catch(() => false))) continue;
-    const text = (await modal.innerText().catch(() => '')).replace(/\s+/g, ' ');
-    if (/Configuration de Badge|Paiement Comptant|Valide du/i.test(text)) return modal;
-  }
-  return null;
+  return page.locator('body');
 }
 
 async function isBadgeConfigModalOpen(page) {
-  const titles = page.getByText(/Configuration de Badge/i);
-  const count = await titles.count();
-  for (let i = 0; i < count; i += 1) {
-    if (await titles.nth(i).isVisible().catch(() => false)) return true;
-  }
-  return false;
+  return page.evaluate(() => {
+    const isShown = (el) => {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    };
+    return [...document.querySelectorAll('div, h1, h2, h3, span, b, strong, p, label')].some((el) => {
+      const text = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+      return /^Configuration de Badge$/i.test(text) && isShown(el);
+    });
+  });
 }
 
 async function waitForBadgeConfigModal(page, timeoutMs = 15000, { tryReopen = true } = {}) {
-  try {
-    await page.getByText(/Configuration de Badge/i).first().waitFor({ state: 'visible', timeout: timeoutMs });
-    return true;
-  } catch {
-    /* continue below */
-  }
-
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     if (await isBadgeConfigModalOpen(page)) return true;
-    await page.waitForTimeout(300);
+    await page.waitForTimeout(250);
   }
 
   await page.getByText(/Configuration de Badge|Paiement Comptant/i).first()
@@ -469,11 +492,11 @@ async function reopenBadgeConfigModal(page) {
 }
 
 async function ensureBadgeConfigModalForSale(page) {
-  if (await waitForBadgeConfigModal(page, 8000, { tryReopen: false })) return true;
+  if (await waitForBadgeConfigModal(page, 10000, { tryReopen: false })) return true;
 
   await clickBadgeConfigEntry(page);
   await randomDelay(1000, 1500);
-  if (await waitForBadgeConfigModal(page, 6000, { tryReopen: false })) return true;
+  if (await waitForBadgeConfigModal(page, 8000, { tryReopen: false })) return true;
 
   const tile = page.locator('.product-wrapper-title, [class*="product-wrapper"]').filter({ hasText: /^Badge$/i }).first();
   if ((await tile.count()) > 0 && (await tile.isVisible().catch(() => false))) {
@@ -481,7 +504,8 @@ async function ensureBadgeConfigModalForSale(page) {
     await randomDelay(1500, 2200);
   }
 
-  return waitForBadgeConfigModal(page, 12000, { tryReopen: false });
+  await waitForBadgeConfigModal(page, 10000, { tryReopen: false });
+  return isBadgeConfigModalOpen(page);
 }
 
 async function isBadgeConfigModalOpen(page) {
