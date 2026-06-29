@@ -460,12 +460,26 @@ async function getBadgeConfigModal(page) {
 
 async function isBadgeConfigModalOpen(page) {
   const ctx = await resolveDeciplusWorkPage(page);
+
+  const titles = ctx.getByText(/Configuration de Badge/i);
+  const count = await titles.count();
+  for (let i = 0; i < count; i += 1) {
+    if (await titles.nth(i).isVisible().catch(() => false)) return true;
+  }
+
   return ctx.evaluate(() => {
-    const text = String(document.body?.innerText || '');
+    function deepText(node) {
+      if (!node) return '';
+      let text = node.innerText || node.textContent || '';
+      if (node.shadowRoot) text += ` ${deepText(node.shadowRoot)}`;
+      for (const child of node.children || []) text += ` ${deepText(child)}`;
+      return text;
+    }
+    const text = deepText(document.body);
     return (
       /Configuration de Badge/i.test(text) &&
       /Paiement Comptant/i.test(text) &&
-      /Valide du/i.test(text)
+      /Valide\s+du/i.test(text)
     );
   });
 }
@@ -1270,9 +1284,7 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   const maxAttempts = 3;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    if (!(await isBadgeConfigModalOpen(page))) {
-      await ensureBadgeConfigModalForSale(page);
-    }
+    await ensureBadgeConfigModalForSale(page);
     if (!(await isBadgeConfigModalOpen(page))) {
       logWarn('Badge — modale absente', {
         attempt,
