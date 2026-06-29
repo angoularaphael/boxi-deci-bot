@@ -721,54 +721,169 @@ async function clickBadgeModalAppliquer(page) {
   return clicked;
 }
 
-async function clickDeepLabel(ctx, labelPattern) {
+async function clickDeepLabel(ctx, labelPattern, { exact = false, preferClass = null } = {}) {
   if (typeof ctx?.evaluate !== 'function') return false;
-  return ctx.evaluate((patternStr) => {
-    const pattern = new RegExp(patternStr, 'i');
+  return ctx.evaluate(
+    ({ patternStr, exactMatch, classHint }) => {
+      const pattern = new RegExp(patternStr, exactMatch ? '' : 'i');
 
-    function deepWalk(root, fn) {
-      if (!root) return;
-      fn(root);
-      if (root.shadowRoot) deepWalk(root.shadowRoot, fn);
-      for (const child of root.children || []) deepWalk(child, fn);
-    }
+      function deepWalk(root, fn) {
+        if (!root) return;
+        fn(root);
+        if (root.shadowRoot) deepWalk(root.shadowRoot, fn);
+        for (const child of root.children || []) deepWalk(child, fn);
+      }
 
-    function deepQueryAll(root, selector) {
-      const out = [];
-      deepWalk(root, (node) => {
-        if (node.querySelectorAll) {
-          for (const el of node.querySelectorAll(selector)) out.push(el);
+      function deepQueryAll(root, selector) {
+        const out = [];
+        deepWalk(root, (node) => {
+          if (node.querySelectorAll) {
+            for (const el of node.querySelectorAll(selector)) out.push(el);
+          }
+        });
+        return out;
+      }
+
+      function normText(el) {
+        return String(el.innerText || el.textContent || el.getAttribute('aria-label') || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+      }
+
+      function isVisible(el) {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      }
+
+      function matches(label) {
+        if (exactMatch) return pattern.test(label) && label.length <= 24;
+        return pattern.test(label);
+      }
+
+      const prioritized = classHint
+        ? deepQueryAll(document.body, `[class*="${classHint}"]`)
+        : [];
+
+      const selector =
+        'button, [role="button"], a, div.verticalDocumentBar, div[class*="verticalDocumentBar"], div[class*="paymentModes"], div[class*="DocumentBar"], span, div';
+      const candidates = [...prioritized, ...deepQueryAll(document.body, selector)];
+
+      let best = null;
+      let bestScore = -1;
+
+      for (const el of candidates) {
+        const label = normText(el);
+        if (!label || !matches(label)) continue;
+        if (!isVisible(el)) continue;
+        if (/Facture|Reçu|Contrat/i.test(label) && /Terminer/i.test(label) && label.length > 16) {
+          continue;
         }
-      });
-      return out;
-    }
 
-    const selector =
-      'button, [role="button"], a, div.verticalDocumentBar, div[class*="paymentModes"], div[class*="DocumentBar"]';
-    for (const el of deepQueryAll(document.body, selector)) {
-      const label = String(
-        el.innerText || el.textContent || el.getAttribute('aria-label') || ''
-      ).replace(/\s+/g, ' ').trim();
-      if (!pattern.test(label)) continue;
-      const r = el.getBoundingClientRect();
-      if (r.width <= 0 || r.height <= 0) continue;
-      el.click();
-      return true;
+        const r = el.getBoundingClientRect();
+        let score = r.top;
+        if (classHint && String(el.className || '').includes(classHint)) score += 10000;
+        if (/^>?[\s>]*Terminer$/i.test(label)) score += 5000;
+        if (label.length <= 12) score += 1000;
+
+        if (score > bestScore) {
+          bestScore = score;
+          best = el;
+        }
+      }
+
+      if (best) {
+        best.scrollIntoView({ block: 'center', inline: 'center' });
+        best.click();
+        return true;
+      }
+      return false;
+    },
+    {
+      patternStr: labelPattern.source,
+      exactMatch: exact,
+      classHint: preferClass,
     }
-    return false;
-  }, labelPattern.source);
+  );
 }
 
-async function clickVenteFooterAction(page, labelPattern) {
-  const scopes = [page, ...(page.frames?.() || [])];
+async function clickVenteFooterAction(page, labelPattern, opts = {}) {
+  const work = await resolveDeciplusWorkPage(page);
+  const scopes = [work, page, ...(page.frames?.() || [])];
+  const seen = new Set();
   for (const ctx of scopes) {
+    const key = ctx.url?.() || String(ctx);
+    if (seen.has(key)) continue;
+    seen.add(key);
     try {
-      if (await clickDeepLabel(ctx, labelPattern)) return true;
+      await ctx.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+      if (await clickDeepLabel(ctx, labelPattern, opts)) return true;
     } catch {
       /* frame détachée */
     }
   }
   return false;
+}
+
+async function clickTerminerVente(page) {
+  await randomDelay(800, 1200);
+
+  const work = await resolveDeciplusWorkPage(page);
+  const scopes = [work, page, ...(page.frames?.() || [])];
+  const seen = new Set();
+
+  for (const ctx of scopes) {
+    const key = ctx.url?.() || String(ctx);
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    try {
+      await ctx.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+
+      const viaDom = await clickDeepLabel(ctx, /\bTerminer\b/i, {
+        preferClass: 'verticalDocumentBar',
+      });
+      if (viaDom) return true;
+
+      const bar = ctx.locator('[class*="verticalDocumentBar"]').filter({ hasText: /Terminer/i }).last();
+      if ((await bar.count()) > 0 && (await bar.isVisible().catch(() => false))) {
+        await bar.scrollIntoViewIfNeeded().catch(() => {});
+        await bar.click({ force: true });
+        return true;
+      }
+
+      const terminerText = ctx.getByText(/^>?[\s>]*Terminer$/i).last();
+      if ((await terminerText.count()) > 0 && (await terminerText.isVisible().catch(() => false))) {
+        await terminerText.scrollIntoViewIfNeeded().catch(() => {});
+        await clickParentClickable(terminerText);
+        return true;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
+}
+
+async function clickParentClickable(locator) {
+  const handle = await locator.elementHandle().catch(() => null);
+  if (!handle) {
+    await locator.click({ force: true });
+    return;
+  }
+  await handle.evaluate((el) => {
+    let node = el;
+    for (let i = 0; i < 6 && node; i += 1) {
+      const cls = String(node.className || '');
+      if (/verticalDocumentBar|DocumentBar|paymentModes|col-auto/i.test(cls)) {
+        node.scrollIntoView({ block: 'center', inline: 'center' });
+        node.click();
+        return;
+      }
+      node = node.parentElement;
+    }
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+    el.click();
+  });
 }
 
 async function isBadgeDateFinDialogOpen(page) {
@@ -1471,9 +1586,12 @@ async function finalizeBadgePayment(page) {
     throw new Error('Badge — « Clôturer la note » introuvable');
   }
   logInfo('Badge — note clôturée');
-  await randomDelay(600, 1000);
+  await randomDelay(1000, 1500);
 
-  let done = await clickVenteFooterAction(page, /^Terminer$/i);
+  let done = await clickTerminerVente(page);
+  if (!done) {
+    done = await clickVenteFooterAction(page, /\bTerminer\b/i, { preferClass: 'verticalDocumentBar' });
+  }
   if (!done) {
     done = await clickFirst(page, sel('payment_finalize.terminer'));
   }
