@@ -19,6 +19,34 @@ const API_BASE = 'https://api.deciplus.pro/staff/v1';
 
 const TEST_ORDER_PREFIXES = /^(LOCAL-BADGE|TEST-BADGE|STORE-|DEMO-)/i;
 
+/** Noms / emails évidents de tests manuels (clavier, demo, etc.) */
+function isKeyboardTestName(value) {
+  const v = String(value || '').trim().toLowerCase();
+  if (!v || v.length > 40) return false;
+  return /^(azert(y|ty)?\d*|qwert(y|y)?\d*|test\d*|badg(e?\d*)|box\d*|josko\d*|demo\d*)$/i.test(v);
+}
+
+function isObviousTestEmail(email) {
+  const e = String(email || '').trim().toLowerCase();
+  if (!e) return false;
+  if (e.endsWith('@boxplus-test.local')) return true;
+  if (e === 'test@teste.com') return true;
+  if (/^test[-+]?/i.test(e) && /@(example|teste?|boxplus)/i.test(e)) return true;
+  if (/azert/i.test(e) && /@(azerty|azert2y|example|test)/i.test(e)) return true;
+  if (/^badge[-+]/i.test(e)) return true;
+  return false;
+}
+
+function isAzertyLikeMember(nom, prenom) {
+  const n = String(nom || '').trim();
+  const p = String(prenom || '').trim();
+  if (isKeyboardTestName(n) || isKeyboardTestName(p)) return true;
+  if (n && p && n.toLowerCase() === p.toLowerCase() && /^(azert|test|badge|box|josko)/i.test(n)) {
+    return true;
+  }
+  return false;
+}
+
 function matchesTestMemberRecord(member, { strict = false } = {}) {
   if (!member || typeof member !== 'object') return false;
 
@@ -29,8 +57,8 @@ function matchesTestMemberRecord(member, { strict = false } = {}) {
   const admin = String(member.info_admin || member.infoAdmin || '').toLowerCase();
   const blob = `${info} ${admin}`;
 
-  if (email.endsWith('@boxplus-test.local')) return true;
-  if (email === 'test@teste.com') return true;
+  if (isObviousTestEmail(email)) return true;
+  if (isAzertyLikeMember(nom, prenom)) return true;
   if (/^badge/i.test(nom) && /^test$/i.test(prenom)) return true;
   if (/^box/i.test(nom) && /^test$/i.test(prenom)) return true;
 
@@ -39,6 +67,7 @@ function matchesTestMemberRecord(member, { strict = false } = {}) {
   if (/test automatique/i.test(member.adr1 || member.address || '')) return true;
   if (/commande:\s*(local-badge|test-badge|store-|demo-)/i.test(blob)) return true;
   if (/source:\s*boxplus/i.test(blob)) return true;
+  if (/azert/i.test(email)) return true;
 
   return false;
 }
@@ -118,6 +147,9 @@ async function discoverTestMembersBySearch(page) {
     '@boxplus-test.local',
     'boxplus-test.local',
     'test@teste.com',
+    'azerty@azerty.com',
+    'azerty',
+    'AZERTY',
   ];
   const found = [];
   const seen = new Set();
@@ -248,6 +280,8 @@ async function runTestCleanup(page, options = {}) {
 
 module.exports = {
   matchesTestMemberRecord,
+  isAzertyLikeMember,
+  isObviousTestEmail,
   collectMemberIdsFromProcessed,
   collectMemberIdsFromFile,
   parseIdRange,
