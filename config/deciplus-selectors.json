@@ -57,7 +57,8 @@
     "achat_abonnement": "button:has-text(\"Achat Abonnement\"), a:has-text(\"Achat Abonnement\"), text=Achat Abonnement",
     "achat_carte": "button:has-text(\"Achat Carte\"), a:has-text(\"Achat Carte\"), text=Achat Carte",
     "saisir_mandat_sepa": "button:has-text(\"Saisir mandat SEPA\"), text=Saisir mandat SEPA",
-    "consulter_abo": "button:has-text(\"Consulter\")",
+    "consulter_abo": "input.fichemembre_button_grey[value=\"Consulter\"], input[value=\"Consulter\"].fichemembre_button_grey, button:has-text(\"Consulter\")",
+    "prestation_item": "div.og-product-item[id^=\"prestation_\"], div[id^=\"prestation_\"].og-product-item",
     "product_search": "input[placeholder*=\"Rechercher un produit\"], input[placeholder*=\"produit\"]"
   },
   "sale_config_modal": {
@@ -86,7 +87,8 @@
     "modifier_date_fin_popup": "button.p-button:has-text(\"Modifier la date de fin\"), button[aria-label=\"Modifier la date de fin\"], button:has-text(\"Modifier la date de fin\")"
   },
   "contract_actions": {
-    "annuler_vente": "text=Annuler la vente",
-    "appliquer_quitter": "button:has-text(\"Appliquer et Quitter\"), text=Appliquer et Quitter"
+    "annuler_vente": "text=Annuler la vente, [aria-label=\"Annuler la vente\"]",
+    "appliquer_quitter": "button.ari-button-filled:has-text(\"Appliquer et Quitter\"), button:has-text(\"Appliquer et Quitter\"), text=Appliquer et Quitter",
+    "confirmer_annulation": "button:has-text(\"Confirmer\"), button.ari-button:has-text(\"Confirmer\"), text=Confirmer"
   }
 }
