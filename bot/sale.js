@@ -2,7 +2,8 @@
  * Ventes Deciplus — toutes offres (DUO, Saison, Badge, Essai)
  * Sans module Caisse → via check.php + nextgen/vente
  */
-const { randomDelay } = require('../lib/utils');
+const path = require('path');
+const { randomDelay, ensureDir, timestamp } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
 const { buildInternalNote } = require('../lib/normalize');
 const { openMemberCheck, clickFirst, fillFirst, sel, closeGreyboxIfOpen } = require('./wallet');
@@ -22,10 +23,12 @@ function formatFrDate(date) {
 }
 
 async function findPaiementComptantCheckbox(page) {
-  const dialog = page.locator('[role="dialog"]').first();
   const scopes = [];
-  if ((await dialog.count()) > 0) scopes.push(dialog);
-  scopes.push(page);
+  const gb = page.locator('#GB_window').first();
+  if ((await gb.count()) > 0 && (await gb.isVisible().catch(() => false))) scopes.push(gb);
+  const dialog = page.locator('[role="dialog"]').first();
+  if ((await dialog.count()) > 0 && (await dialog.isVisible().catch(() => false))) scopes.push(dialog);
+  if (!scopes.length) scopes.push(page);
 
   for (const scope of scopes) {
     const selectors = [
@@ -344,7 +347,192 @@ function badgeEndDate(delayDays = 7) {
   return { endDate, endStr, iso };
 }
 
+function parseFrDate(str) {
+  const m = String(str || '').match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if (!m) return null;
+  return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+}
+
+function isFrDateAtLeast(actual, expected) {
+  const a = parseFrDate(actual);
+  const e = parseFrDate(expected);
+  return Boolean(a && e && a.getTime() >= e.getTime());
+}
+
+async function captureBadgeDebugScreenshot(page, label) {
+  try {
+    const dir = path.join(process.env.BOT_DATA_DIR || 'data', 'logs');
+    ensureDir(dir);
+    const file = path.join(dir, `badge-${label}-${timestamp()}.png`);
+    await page.screenshot({ path: file, fullPage: true });
+    logWarn('Badge — capture debug', { screenshot: file });
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+async function getBadgeConfigModal(page) {
+  const candidates = [
+    page.locator('#GB_window').filter({ hasText: /Configuration de Badge/i }),
+    page.locator('#GB_window'),
+    page.locator('[role="dialog"]').filter({ hasText: /Configuration de Badge/i }),
+    page.locator('.modal-content').filter({ hasText: /Configuration de Badge/i }),
+  ];
+  for (const loc of candidates) {
+    const modal = loc.first();
+    if ((await modal.count()) > 0 && (await modal.isVisible().catch(() => false))) {
+      return modal;
+    }
+  }
+  return null;
+}
+
+async function isBadgeConfigModalOpen(page) {
+  return Boolean(await getBadgeConfigModal(page));
+}
+
+async function waitForBadgeConfigModal(page, timeoutMs = 15000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await isBadgeConfigModalOpen(page)) return true;
+    await page.waitForTimeout(300);
+  }
+  return false;
+}
+
+async function waitForBadgeModalClosed(page, timeoutMs = 12000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (!(await isBadgeConfigModalOpen(page))) return true;
+    await page.waitForTimeout(300);
+  }
+  return false;
+}
+
+async function reopenBadgeConfigModal(page) {
+  const targets = [
+    page.locator('text=/Prestation/i').locator('xpath=ancestor::*[1]').getByText(/^Badge$/i).first(),
+    page.getByText(/^Badge$/i).filter({ has: page.locator('xpath=ancestor::*[contains(., "Prestation")]') }).first(),
+    page.locator('div, tr, li, section').filter({ hasText: /^Badge$/ }).filter({ hasText: /34[,.]99/ }).first(),
+    page.getByText(/^Badge$/i).last(),
+  ];
+  for (const el of targets) {
+    if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
+    await el.click({ force: true }).catch(() => {});
+    await randomDelay(800, 1200);
+    break;
+  }
+  return waitForBadgeConfigModal(page, 10000);
+}
+
+function extractBadgePaymentDate(text) {
+  const m = String(text || '').match(/Date de paiement\s*(\d{2}\/\d{2}\/\d{4})/i);
+  return m ? m[1] : null;
+}
+
+function modalShowsImmediateBadgePayment(text) {
+  return /Paiement imm[ée]diat/i.test(text) && /34[,.]99/.test(text);
+}
+
+function minBadgePaymentDate(delayDays = 7) {
+  const d = new Date();
+  d.setDate(d.getDate() + Math.max(5, delayDays - 2));
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+async function readBadgeConfigModalText(page) {
+  const modal = await getBadgeConfigModal(page);
+  if (modal) {
+    return (await modal.innerText().catch(() => '')).replace(/\s+/g, ' ');
+  }
+  return '';
+}
+
+async function readBadgeAuValueFromModal(page) {
+  const modal = await getBadgeConfigModal(page);
+  if (!modal) return null;
+  return readBadgeAuValue(modal);
+}
+
+async function clickBadgeModalAppliquer(page) {
+  const modal = await getBadgeConfigModal(page);
+  if (!modal) return false;
+
+  const buttons = [
+    modal.getByRole('button', { name: /^Appliquer$/i }).first(),
+    modal.locator('button:has-text("Appliquer"):not(:has-text("Quitter"))').first(),
+    modal.locator('input[type="button"][value="Appliquer"], input[type="submit"][value="Appliquer"]').first(),
+  ];
+  for (const btn of buttons) {
+    if ((await btn.count()) === 0 || !(await btn.isVisible().catch(() => false))) continue;
+    await btn.click({ force: true, timeout: 10000 });
+    await randomDelay(600, 1000);
+    return true;
+  }
+  return clickFirst(modal, sel('sale_config_modal.appliquer'));
+}
+
+async function waitForBadgeModalRecapReady(page, delayDays = 7, timeoutMs = 15000) {
+  const { endStr } = badgeContractDates(delayDays);
+  const minPay = minBadgePaymentDate(delayDays);
+  const start = Date.now();
+
+  while (Date.now() - start < timeoutMs) {
+    const text = await readBadgeConfigModalText(page);
+    if (!text) {
+      await page.waitForTimeout(400);
+      continue;
+    }
+    if (/en dehors de la dur[ée]e de validit[ée]/i.test(text)) {
+      await page.waitForTimeout(400);
+      continue;
+    }
+    if (modalShowsImmediateBadgePayment(text)) {
+      await page.waitForTimeout(400);
+      continue;
+    }
+
+    const auValue = await readBadgeAuValueFromModal(page);
+    if (!isFrDateAtLeast(auValue, endStr)) {
+      await page.waitForTimeout(400);
+      continue;
+    }
+
+    const payDate = extractBadgePaymentDate(text);
+    const payOk = payDate ? parseFrDate(payDate) >= minPay : false;
+    const prelevementOk = /Pr[eé]l[eè]vement Automatique/i.test(text) && /Date de paiement/i.test(text);
+
+    if (prelevementOk && payOk) return true;
+    await page.waitForTimeout(500);
+  }
+  return false;
+}
+
+async function verifyVentePageBadgeDeferred(page, delayDays = 7) {
+  const text = (await page.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  if (modalShowsImmediateBadgePayment(text)) return false;
+
+  const minPay = minBadgePaymentDate(delayDays);
+  const payDate = extractBadgePaymentDate(text);
+  if (payDate && parseFrDate(payDate) >= minPay) return true;
+
+  if (/Pr[eé]l[eè]vement/i.test(text) && /34[,.]99/.test(text) && !modalShowsImmediateBadgePayment(text)) {
+    return true;
+  }
+
+  if (/Paiement par [eé]ch[eé]ances/i.test(text) && /34[,.]99/.test(text) && !/Paiement imm[ée]diat/i.test(text)) {
+    return true;
+  }
+
+  return false;
+}
+
 async function getBadgeEditorScopes(page) {
+  const modal = await getBadgeConfigModal(page);
+  if (modal) return [modal];
+
   const locators = [
     page.locator('#GB_window').first(),
     page.locator('[role="dialog"]').first(),
@@ -357,7 +545,6 @@ async function getBadgeEditorScopes(page) {
       out.push(scope);
     }
   }
-  out.push(page);
   return out;
 }
 
@@ -655,21 +842,14 @@ async function adjustBadgeEndDateWithRetry(page, delayDays = 7, { attempts = 12,
   return false;
 }
 
-async function fillBadgeAuDateViaDom(scope, endStr) {
-  if (typeof scope.evaluate !== 'function') return false;
-  return scope.evaluate((val) => {
+async function readBadgeAuValueViaDom(scope) {
+  if (typeof scope.evaluate !== 'function') return null;
+  return scope.evaluate(() => {
     const isVisible = (el) => el && el.offsetParent !== null;
-    const setInput = (input) => {
-      if (!input || !isVisible(input)) return false;
-      input.focus();
-      input.value = val;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      input.dispatchEvent(new Event('blur', { bubbles: true }));
-      return true;
-    };
+    const readInput = (input) => String(input?.value || '').trim();
 
     const modalRoot =
+      document.querySelector('#GB_window') ||
       document.querySelector('[role="dialog"]') ||
       [...document.querySelectorAll('*')].find((el) =>
         /Configuration de Badge/i.test(String(el.textContent || '').slice(0, 80))
@@ -682,7 +862,7 @@ async function fillBadgeAuDateViaDom(scope, endStr) {
       const dateLike = inputs.filter((input) =>
         /^\d{2}\/\d{2}\/\d{4}$/.test(String(input.value || '').trim())
       );
-      if (dateLike.length >= 2 && setInput(dateLike[1])) return true;
+      if (dateLike.length >= 2) return readInput(dateLike[1]);
 
       const valideNode = [...root.querySelectorAll('*')].find(
         (el) => /^Valide du$/i.test(String(el.textContent || '').trim())
@@ -691,16 +871,136 @@ async function fillBadgeAuDateViaDom(scope, endStr) {
         let parent = valideNode.parentElement;
         for (let depth = 0; depth < 8 && parent; depth += 1) {
           const near = [...parent.querySelectorAll('input:not([type="hidden"])')].filter(isVisible);
-          if (near.length >= 2 && setInput(near[1])) return true;
+          if (near.length >= 2) return readInput(near[1]);
+          parent = parent.parentElement;
+        }
+      }
+
+      const auNode = [...root.querySelectorAll('*')].find(
+        (el) => /^au$/i.test(String(el.textContent || '').trim())
+      );
+      if (auNode) {
+        let parent = auNode.parentElement;
+        for (let depth = 0; depth < 6 && parent; depth += 1) {
+          const near = [...parent.querySelectorAll('input:not([type="hidden"])')].filter(isVisible);
+          if (near.length >= 1) return readInput(near[0]);
           parent = parent.parentElement;
         }
       }
     }
-    return false;
-  }, endStr);
+    return null;
+  });
 }
 
-async function fillBadgeAuDate(scope, endStr) {
+async function readBadgeAuValue(scope) {
+  const selectors = [
+    sel('sale_config_modal.valide_au_input'),
+    sel('sale_config_modal.valide_au_alt'),
+    ':text("Valide du") >> xpath=following::input[2]',
+    ':text-is("au") >> xpath=following::input[1]',
+  ];
+
+  for (const selector of selectors) {
+    if (!selector || selector.includes(',')) continue;
+    const el = scope.locator(selector).first();
+    if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
+    const current = (await el.inputValue().catch(() => '')).trim();
+    if (current) return current;
+  }
+
+  return readBadgeAuValueViaDom(scope);
+}
+
+async function fillBadgeAuDateViaDom(scope, endStr) {
+  if (typeof scope.evaluate !== 'function') return false;
+  return scope.evaluate(
+    ({ val, helper }) => {
+      const isVisible = (el) => el && el.offsetParent !== null;
+      const setInput = (input) => {
+        if (!input || !isVisible(input)) return false;
+        input.focus();
+        const proto = window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) setter.call(input, val);
+        else input.value = val;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: val }));
+        input.dispatchEvent(new Event('blur', { bubbles: true }));
+        return String(input.value || '').trim() === val;
+      };
+
+      const modalRoot =
+        document.querySelector('#GB_window') ||
+        document.querySelector('[role="dialog"]') ||
+        [...document.querySelectorAll('*')].find((el) =>
+          /Configuration de Badge/i.test(String(el.textContent || '').slice(0, 80))
+        )?.closest('div');
+
+      const searchRoots = modalRoot ? [modalRoot, document.body] : [document.body];
+
+      for (const root of searchRoots) {
+        const inputs = [...root.querySelectorAll('input:not([type="hidden"])')].filter(isVisible);
+        const dateLike = inputs.filter((input) =>
+          /^\d{2}\/\d{2}\/\d{4}$/.test(String(input.value || '').trim())
+        );
+        if (dateLike.length >= 2 && setInput(dateLike[1])) return true;
+
+        const valideNode = [...root.querySelectorAll('*')].find(
+          (el) => /^Valide du$/i.test(String(el.textContent || '').trim())
+        );
+        if (valideNode) {
+          let parent = valideNode.parentElement;
+          for (let depth = 0; depth < 8 && parent; depth += 1) {
+            const near = [...parent.querySelectorAll('input:not([type="hidden"])')].filter(isVisible);
+            if (near.length >= 2 && setInput(near[1])) return true;
+            parent = parent.parentElement;
+          }
+        }
+
+        const auNode = [...root.querySelectorAll('*')].find(
+          (el) => /^au$/i.test(String(el.textContent || '').trim())
+        );
+        if (auNode) {
+          let parent = auNode.parentElement;
+          for (let depth = 0; depth < 6 && parent; depth += 1) {
+            const near = [...parent.querySelectorAll('input:not([type="hidden"])')].filter(isVisible);
+            if (near.length >= 1 && setInput(near[0])) return true;
+            parent = parent.parentElement;
+          }
+        }
+      }
+      return false;
+    },
+    { val: endStr, helper: true }
+  );
+}
+
+async function fillBadgeAuDateViaKeyboard(page, scope, endStr) {
+  const keyboard = page.keyboard;
+  const selectors = [
+    sel('sale_config_modal.valide_au_input'),
+    sel('sale_config_modal.valide_au_alt'),
+    ':text("Valide du") >> xpath=following::input[2]',
+    ':text-is("au") >> xpath=following::input[1]',
+  ];
+
+  for (const selector of selectors) {
+    if (!selector || selector.includes(',')) continue;
+    const el = scope.locator(selector).first();
+    if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
+    await el.click({ clickCount: 3, force: true }).catch(() => {});
+    await keyboard.press('Control+A').catch(() => {});
+    await keyboard.type(endStr, { delay: 40 }).catch(() => {});
+    await keyboard.press('Tab').catch(() => {});
+    const current = (await el.inputValue().catch(() => '')).trim();
+    if (isFrDateAtLeast(current, endStr)) return true;
+  }
+
+  return false;
+}
+
+async function fillBadgeAuDate(page, scope, endStr) {
   const selectors = [
     sel('sale_config_modal.valide_au_input'),
     sel('sale_config_modal.valide_au_alt'),
@@ -717,10 +1017,14 @@ async function fillBadgeAuDate(scope, endStr) {
     await el.fill(endStr).catch(() => {});
     await el.press('Tab').catch(() => {});
     const current = (await el.inputValue().catch(() => '')).trim();
-    if (current.includes(endStr.slice(0, 5)) || current === endStr) return true;
+    if (isFrDateAtLeast(current, endStr)) return true;
   }
 
-  return fillBadgeAuDateViaDom(scope, endStr);
+  if (await fillBadgeAuDateViaDom(scope, endStr)) return true;
+  if (await fillBadgeAuDateViaKeyboard(page, scope, endStr)) return true;
+
+  const readback = await readBadgeAuValue(scope);
+  return isFrDateAtLeast(readback, endStr);
 }
 
 async function fillBadgeValideDuDate(scope, startStr) {
@@ -734,80 +1038,67 @@ async function fillBadgeValideDuDate(scope, startStr) {
   return true;
 }
 
-async function readBadgeConfigModalText(page) {
-  for (const scope of await getBadgeEditorScopes(page)) {
-    if (typeof scope.innerText !== 'function') continue;
-    const text = (await scope.innerText().catch(() => '')).replace(/\s+/g, ' ');
-    if (/Configuration de Badge|Valide du|Prélèvement Automatique/i.test(text)) return text;
+async function nudgeBadgeModalRecap(page) {
+  const modal = await getBadgeConfigModal(page);
+  if (!modal) return;
+  await modal.getByText(/Configuration de Badge|Récap|Valide du/i).first().click({ force: true }).catch(() => {});
+  await randomDelay(400, 700);
+}
+
+async function waitForBadgeWarningGone(page, timeoutMs = 8000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const text = await readBadgeConfigModalText(page);
+    if (!text || !/en dehors de la dur[ée]e de validit[ée]/i.test(text)) return true;
+    await page.waitForTimeout(400);
   }
-  return (await page.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ');
+  return false;
 }
 
 async function verifyBadgeConfigModalReady(page, delayDays = 7) {
-  const { endStr } = badgeContractDates(delayDays);
-  const text = await readBadgeConfigModalText(page);
-
-  if (/en dehors de la dur[ée]e de validit[ée]/i.test(text)) return false;
-
-  if (/Prélèvement Automatique/i.test(text) && /Date de paiement/i.test(text)) {
-    return true;
-  }
-
-  if (text.includes(endStr)) return true;
-
-  return false;
+  return waitForBadgeModalRecapReady(page, delayDays, 2000);
 }
 
 async function verifyBadgeDeferredSetup(page, delayDays = 7) {
-  if (await verifyBadgeConfigModalReady(page, delayDays)) return true;
-
-  const { endStr } = badgeContractDates(delayDays);
-  const text = (await page.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ');
-
-  if (text.includes(endStr)) return true;
-
-  if (/Prélèvement Automatique/i.test(text) && /Date de paiement/i.test(text)) {
-    return !/en dehors de la dur[ée]e de validit[ée]/i.test(text);
+  if (await isBadgeConfigModalOpen(page)) {
+    return waitForBadgeModalRecapReady(page, delayDays, 2000);
   }
-
-  if (/Restant d[uû].*34[,.]99/i.test(text) && !/Total encaiss[ée].*34[,.]99/i.test(text)) {
-    return true;
-  }
-
-  return false;
+  return verifyVentePageBadgeDeferred(page, delayDays);
 }
 
 async function fillBadgeDatesInConfigModal(page, delayDays = 7) {
-  await page.getByText(/Configuration de Badge/i).first()
-    .waitFor({ state: 'visible', timeout: 15000 })
-    .catch(() => {});
+  await waitForBadgeConfigModal(page, 15000);
 
+  const modal = await getBadgeConfigModal(page);
+  const scopes = modal ? [modal] : await getBadgeEditorScopes(page);
   const { startStr, endStr } = badgeContractDates(delayDays);
-  let filledAu = await fillBadgeAuDate(page, endStr);
 
-  for (const scope of await getBadgeEditorScopes(page)) {
+  let filledAu = false;
+  for (const scope of scopes) {
     await uncheckKeepDuration(scope);
     await fillBadgeValideDuDate(scope, startStr);
-    if (!filledAu && (await fillBadgeAuDate(scope, endStr))) {
-      filledAu = true;
-    }
+    filledAu = (await fillBadgeAuDate(page, scope, endStr)) || filledAu;
+    await nudgeBadgeModalRecap(page);
   }
 
-  if (!filledAu) {
-    filledAu = await fillBadgeAuDateViaDom(page, endStr);
+  if (!filledAu && modal) {
+    filledAu = await fillBadgeAuDateViaDom(modal, endStr);
+  }
+  if (!filledAu && modal) {
+    filledAu = await fillBadgeAuDateViaKeyboard(page, modal, endStr);
   }
 
+  await nudgeBadgeModalRecap(page);
+  await waitForBadgeWarningGone(page);
   await randomDelay(1200, 1800);
 
-  let ready = await verifyBadgeConfigModalReady(page, delayDays);
-  if (!ready && filledAu) {
-    await randomDelay(1000, 1500);
-    ready = await verifyBadgeConfigModalReady(page, delayDays);
-  }
+  const auReadback = await readBadgeAuValueFromModal(page);
+  const ready = await waitForBadgeModalRecapReady(page, delayDays, 12000);
 
   logInfo('Badge — validité modale Configuration', {
     valide_du: startStr,
     valide_au: endStr,
+    au_readback: auReadback,
     delay_days: delayDays,
     filled_au: filledAu,
     prelevement_ok: ready,
@@ -852,49 +1143,71 @@ async function configureBadgeDeferredDates(page, delayDays) {
 }
 
 async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
-  await page.getByText(/Configuration de Badge/i).first()
-    .waitFor({ state: 'visible', timeout: 15000 })
-    .catch(() => {
-      return page.locator('[role="dialog"]').first().waitFor({ state: 'visible', timeout: 15000 }).catch(() => {});
-    });
-
-  await ensurePaiementComptantOff(page, { strict: true });
-
   const delayDays = resolveBadgePrelevementDelayDays(productConfig);
   const { endStr } = badgeContractDates(delayDays);
+  const maxAttempts = 3;
 
-  const modalReady = await fillBadgeDatesInConfigModal(page, delayDays);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (!(await waitForBadgeConfigModal(page, 15000))) {
+      await reopenBadgeConfigModal(page);
+    }
+    if (!(await waitForBadgeConfigModal(page, 5000))) {
+      throw new Error('Badge — modale Configuration de Badge introuvable');
+    }
 
-  if (!modalReady) {
-    logWarn('Badge — modale Configuration : validité « au » non confirmée, nouvelle tentative', {
-      date_fin: endStr,
-    });
-    await fillBadgeDatesInConfigModal(page, delayDays);
-  }
+    await ensurePaiementComptantOff(page, { strict: true });
 
-  if (!(await verifyBadgeConfigModalReady(page, delayDays))) {
-    throw new Error(
-      `Badge — champ « au » J+${delayDays} requis dans Configuration de Badge (échéance prélèvement hors validité)`
-    );
-  }
+    let ready = await fillBadgeDatesInConfigModal(page, delayDays);
+    if (!ready) {
+      logWarn('Badge — récap modale non prêt, nouvelle saisie dates', {
+        attempt,
+        date_fin: endStr,
+      });
+      ready = await fillBadgeDatesInConfigModal(page, delayDays);
+    }
 
-  await clickFirst(page, sel('sale_config_modal.appliquer'));
-  await randomDelay(1500, 2500);
-  await dismissPostApplyDialogs(page);
-  await randomDelay(1000, 1500);
+    if (!ready) {
+      await captureBadgeDebugScreenshot(page, `au-not-ready-${attempt}`);
+      if (attempt < maxAttempts) {
+        await nudgeBadgeModalRecap(page);
+        continue;
+      }
+      throw new Error(
+        `Badge — champ « au » J+${delayDays} requis dans Configuration de Badge (échéance prélèvement hors validité)`
+      );
+    }
 
-  if (await verifyBadgeDeferredSetup(page, delayDays)) {
-    logInfo('Badge — prélèvement IBAN différé (Configuration de Badge)', {
-      date_fin: endStr,
-      delay_days: delayDays,
-      window: '5-7 jours',
-    });
-    return;
+    await captureBadgeDebugScreenshot(page, `before-appliquer-${attempt}`);
+    const clicked = await clickBadgeModalAppliquer(page);
+    if (!clicked) {
+      throw new Error('Badge — bouton Appliquer introuvable dans Configuration de Badge');
+    }
+
+    await waitForBadgeModalClosed(page);
+    await dismissPostApplyDialogs(page);
+    await randomDelay(1000, 1500);
+
+    if (await verifyVentePageBadgeDeferred(page, delayDays)) {
+      logInfo('Badge — prélèvement IBAN différé (Configuration de Badge)', {
+        date_fin: endStr,
+        delay_days: delayDays,
+        window: '5-7 jours',
+        attempt,
+      });
+      return;
+    }
+
+    logWarn('Badge — vente encore en paiement immédiat après Appliquer', { attempt });
+    if (attempt < maxAttempts) {
+      await reopenBadgeConfigModal(page);
+      continue;
+    }
   }
 
   const configured = await configureBadgeDeferredDates(page, delayDays);
-  if (configured) return;
+  if (configured && (await verifyVentePageBadgeDeferred(page, delayDays))) return;
 
+  await captureBadgeDebugScreenshot(page, 'deferred-failed');
   throw new Error(
     `Badge — contrat J+${delayDays} requis (prélèvement IBAN 5-7 jours, pas encaissement immédiat 34,99 €)`
   );
@@ -940,6 +1253,12 @@ async function applyConfigModal(page, productConfig, memberId = null) {
 async function finalizePayment(page, productConfig) {
   const mode = productConfig.payment_mode || 'virement';
   const badge = isBadgeSale(productConfig);
+
+  if (badge) {
+    await clickFirst(page, sel('payment_finalize.terminer'));
+    logInfo('Paiement finalisé Deciplus', { mode: 'prelevement_differe', badge_differe: true });
+    return;
+  }
 
   if (mode === 'virement') {
     await clickFirst(page, sel('payment_finalize.virement'));
