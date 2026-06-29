@@ -7,6 +7,7 @@ const { randomDelay, ensureDir, timestamp } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
 const { buildInternalNote } = require('../lib/normalize');
 const { openMemberCheck, clickFirst, fillFirst, sel, closeGreyboxIfOpen } = require('./wallet');
+const { cancelSale } = require('./cancel-sale');
 const { ensureDeciplusSaleZone } = require('./deciplus-zone');
 const { buildDeciplusProductSearch, buildSearchTokens, normalizeText } = require('./catalog');
 
@@ -1790,30 +1791,13 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
   return { sale_id: null, ...result, member_id: memberId };
 }
 
-async function cancelSale(page, memberId) {
-  if (!memberId) throw new Error('member_id requis pour annuler la vente');
-
-  await openMemberCheck(page, memberId);
-  await randomDelay();
-
-  const consulter = page.locator(sel('member_check.consulter_abo')).first();
-  if ((await consulter.count()) === 0) {
-    throw new Error('Bouton Consulter introuvable — aucune vente active ?');
-  }
-  await consulter.click();
-  await randomDelay();
-
-  await clickFirst(page, sel('contract_actions.annuler_vente'));
-  await randomDelay();
-  await clickFirst(page, sel('contract_actions.appliquer_quitter'));
-
-  logInfo('Vente annulée Deciplus', { member_id: memberId });
-  return { action: 'sale_cancelled', sale_type: 'cancel' };
+async function cancelSaleOnMember(page, memberId) {
+  return cancelSale(page, memberId);
 }
 
 module.exports = {
   recordSale,
-  cancelSale,
+  cancelSale: cancelSaleOnMember,
   buyAbonnement,
   buyCarteBadge,
 };
