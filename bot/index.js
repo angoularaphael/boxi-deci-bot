@@ -28,6 +28,7 @@ const {
 const { fetchDeciplusCatalog, resolveProductConfig, resolveBadgeProductConfig } = require('./catalog');
 const { logInfo, logError, logWarn, sendAlert } = require('../lib/logger');
 const { sleep } = require('../lib/utils');
+const { maybeKeepSessionAlive, touchKeepAliveClock } = require('./session-keepalive');
 
 const MAX_RETRIES = Number(process.env.BOT_MAX_RETRIES || 3);
 const POLL_MS = Number(process.env.BOT_POLL_MS || 5000);
@@ -215,6 +216,7 @@ async function processOneJob(job) {
       status: outcome.status,
     });
 
+    touchKeepAliveClock();
     return { ok: true, result: outcome };
   } catch (err) {
     if (err.message.startsWith('Validation:')) {
@@ -273,6 +275,7 @@ async function runLoop(once = false) {
     const pending = listPending();
     if (pending.length === 0) {
       if (once) break;
+      await maybeKeepSessionAlive();
       await sleep(POLL_MS);
       continue;
     }

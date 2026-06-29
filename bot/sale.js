@@ -407,6 +407,29 @@ async function badgeDomEvaluate(ctx, operation, value = null) {
         return setNativeInputValue(inputs[0], val);
       }
       if (op === 'clickAppliquer') return clickAppliquerButton();
+      if (op === 'clickModifierDateFin') {
+        const candidates = [
+          ...deepQueryAll(document.body, 'button.p-button, button, [role="button"], a'),
+        ];
+        for (const btn of candidates) {
+          const label = String(
+            btn.textContent || btn.getAttribute('aria-label') || ''
+          ).replace(/\s+/g, ' ').trim();
+          if (!/Modifier la date de fin/i.test(label)) continue;
+          const r = btn.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) continue;
+          btn.click();
+          return true;
+        }
+        return false;
+      }
+      if (op === 'isDateFinDialogOpen') {
+        const text = deepText(document.body).replace(/\s+/g, ' ');
+        return (
+          /Derni[eè]re [eé]ch[eé]ance apr[eè]s/i.test(text) &&
+          /Modifier la date de fin/i.test(text)
+        );
+      }
       if (op === 'closePicker') {
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
         const title = deepQueryAll(document.body, 'span, h1, h2, h3, div').find((el) =>
@@ -696,6 +719,107 @@ async function clickBadgeModalAppliquer(page) {
   const clicked = await badgeDomEvaluate(ctx, 'clickAppliquer');
   if (clicked) await randomDelay(600, 1000);
   return clicked;
+}
+
+async function clickDeepLabel(ctx, labelPattern) {
+  if (typeof ctx?.evaluate !== 'function') return false;
+  return ctx.evaluate((patternStr) => {
+    const pattern = new RegExp(patternStr, 'i');
+
+    function deepWalk(root, fn) {
+      if (!root) return;
+      fn(root);
+      if (root.shadowRoot) deepWalk(root.shadowRoot, fn);
+      for (const child of root.children || []) deepWalk(child, fn);
+    }
+
+    function deepQueryAll(root, selector) {
+      const out = [];
+      deepWalk(root, (node) => {
+        if (node.querySelectorAll) {
+          for (const el of node.querySelectorAll(selector)) out.push(el);
+        }
+      });
+      return out;
+    }
+
+    const selector =
+      'button, [role="button"], a, div.verticalDocumentBar, div[class*="paymentModes"], div[class*="DocumentBar"]';
+    for (const el of deepQueryAll(document.body, selector)) {
+      const label = String(
+        el.innerText || el.textContent || el.getAttribute('aria-label') || ''
+      ).replace(/\s+/g, ' ').trim();
+      if (!pattern.test(label)) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width <= 0 || r.height <= 0) continue;
+      el.click();
+      return true;
+    }
+    return false;
+  }, labelPattern.source);
+}
+
+async function clickVenteFooterAction(page, labelPattern) {
+  const scopes = [page, ...(page.frames?.() || [])];
+  for (const ctx of scopes) {
+    try {
+      if (await clickDeepLabel(ctx, labelPattern)) return true;
+    } catch {
+      /* frame détachée */
+    }
+  }
+  return false;
+}
+
+async function isBadgeDateFinDialogOpen(page) {
+  const scopes = [page, ...(page.frames?.() || [])];
+  for (const ctx of scopes) {
+    try {
+      if (await badgeDomEvaluate(ctx, 'isDateFinDialogOpen')) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
+}
+
+async function handleBadgeModifierDateFinDialog(page, { timeoutMs = 15000 } = {}) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const scopes = [await resolveDeciplusWorkPage(page), page, ...(page.frames?.() || [])];
+    for (const ctx of scopes) {
+      try {
+        if (await badgeDomEvaluate(ctx, 'clickModifierDateFin')) {
+          logInfo('Badge — « Modifier la date de fin » (popup échéance)');
+          await randomDelay(800, 1200);
+          if (await isBadgeConfigModalOpen(page)) {
+            await clickBadgeModalAppliquer(page);
+            await randomDelay(600, 1000);
+          }
+          return true;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (!(await isBadgeDateFinDialogOpen(page))) {
+      return false;
+    }
+    await page.waitForTimeout(400);
+  }
+
+  if (await isBadgeDateFinDialogOpen(page)) {
+    const clicked = await clickFirst(page, sel('payment_finalize.modifier_date_fin_popup'));
+    if (clicked) {
+      logInfo('Badge — « Modifier la date de fin » (fallback sélecteur)');
+      await randomDelay(800, 1200);
+      return true;
+    }
+    throw new Error('Badge — popup « Modifier la date de fin » visible mais bouton introuvable');
+  }
+
+  return false;
 }
 
 async function waitForBadgeModalRecapReady(page, delayDays = 7, timeoutMs = 15000) {
@@ -1338,6 +1462,28 @@ async function dismissPostApplyDialogs(page) {
   await randomDelay(400, 700);
 }
 
+async function finalizeBadgePayment(page) {
+  let clotured = await clickVenteFooterAction(page, /Cl[ôo]turer(\s+la\s+note)?/i);
+  if (!clotured) {
+    clotured = await clickFirst(page, sel('payment_finalize.cloturer'));
+  }
+  if (!clotured) {
+    throw new Error('Badge — « Clôturer la note » introuvable');
+  }
+  logInfo('Badge — note clôturée');
+  await randomDelay(600, 1000);
+
+  let done = await clickVenteFooterAction(page, /^Terminer$/i);
+  if (!done) {
+    done = await clickFirst(page, sel('payment_finalize.terminer'));
+  }
+  if (!done) {
+    throw new Error('Badge — bouton « Terminer » introuvable');
+  }
+
+  logInfo('Paiement finalisé Deciplus', { mode: 'prelevement_differe', badge_differe: true });
+}
+
 async function configureBadgeDeferredDates(page, delayDays) {
   if (await waitForModifierDateFinPopup(page, delayDays)) return true;
   if (await fillBadgeContractDates(page, delayDays)) return true;
@@ -1373,11 +1519,13 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
     throw new Error('Badge — bouton Appliquer introuvable dans Configuration de Badge');
   }
 
+  await randomDelay(1000, 1500);
+  await handleBadgeModifierDateFinDialog(page);
   await waitForBadgeModalClosed(page);
-  await dismissPostApplyDialogs(page);
+  await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
   await randomDelay(800, 1200);
 
-  logInfo('Badge — Configuration appliquée (Paiement Comptant off → Appliquer)', {
+  logInfo('Badge — Configuration appliquée (Comptant off → Appliquer → date de fin)', {
     delay_days: resolveBadgePrelevementDelayDays(productConfig),
   });
 }
@@ -1424,8 +1572,7 @@ async function finalizePayment(page, productConfig) {
   const badge = isBadgeSale(productConfig);
 
   if (badge) {
-    await clickFirst(page, sel('payment_finalize.terminer'));
-    logInfo('Paiement finalisé Deciplus', { mode: 'prelevement_differe', badge_differe: true });
+    await finalizeBadgePayment(page);
     return;
   }
 
