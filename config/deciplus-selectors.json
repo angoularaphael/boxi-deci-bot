@@ -67,7 +67,7 @@
     "valide_du_el_date": ":text(\"Valide du\") >> xpath=following::div[contains(@class,\"el-date-editor\")][1] >> input",
     "valide_au_el_date": ":text(\"Valide du\") >> xpath=following::div[contains(@class,\"el-date-editor\")][2] >> input",
     "saisir_rib": "button:has-text(\"Saisir le RIB\"), text=Saisir le RIB",
-    "appliquer": "button:has-text(\"Appliquer\")",
+    "appliquer": "button.ari-button-filled:has-text(\"Appliquer\"), button.ari-button:has-text(\"Appliquer\"), button:has-text(\"Appliquer\")",
     "modifier_date_fin": "button:has-text(\"Modifier la date de fin\"), a:has-text(\"Modifier la date de fin\")",
     "date_fin_input": "text=/Date de fin/i >> xpath=following::input[1]",
     "conserver_duree": "label:has-text(\"Conserver la durée\") input[type=\"checkbox\"]",
