@@ -407,6 +407,20 @@ async function badgeDomEvaluate(ctx, operation, value = null) {
         return setNativeInputValue(inputs[0], val);
       }
       if (op === 'clickAppliquer') return clickAppliquerButton();
+      if (op === 'closePicker') {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        const title = deepQueryAll(document.body, 'span, h1, h2, h3, div').find((el) =>
+          /^Configuration de Badge$/i.test(String(el.textContent || '').replace(/\s+/g, ' ').trim())
+        );
+        title?.click();
+        return true;
+      }
+      if (op === 'recapReady') {
+        const text = deepText(document.body).replace(/\s+/g, ' ');
+        if (/en dehors de la dur[ée]e de validit[ée]/i.test(text)) return false;
+        if (/Paiement imm[ée]diat/i.test(text) && /34[,.]99/.test(text)) return false;
+        return /Pr[eé]l[eè]vement Automatique/i.test(text) && /Date de paiement/i.test(text);
+      }
       return null;
     },
     { op: operation, val: value }
@@ -672,34 +686,26 @@ async function clickBadgeModalAppliquer(page) {
 async function waitForBadgeModalRecapReady(page, delayDays = 7, timeoutMs = 15000) {
   const { endStr } = badgeContractDates(delayDays);
   const minPay = minBadgePaymentDate(delayDays);
+  const ctx = await resolveDeciplusWorkPage(page);
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
+    if (await badgeDomEvaluate(ctx, 'recapReady')) {
+      const text = await readBadgeConfigModalText(page);
+      const payDate = extractBadgePaymentDate(text);
+      if (payDate && parseFrDate(payDate) >= minPay) return true;
+      const auValue = await readBadgeAuValueFromModal(page);
+      if (isFrDateAtLeast(auValue, endStr)) return true;
+    }
+
     const text = await readBadgeConfigModalText(page);
-    if (!text) {
-      await page.waitForTimeout(400);
-      continue;
-    }
-    if (/en dehors de la dur[ée]e de validit[ée]/i.test(text)) {
-      await page.waitForTimeout(400);
-      continue;
-    }
-    if (modalShowsImmediateBadgePayment(text)) {
-      await page.waitForTimeout(400);
-      continue;
+    if (text && !/en dehors de la dur[ée]e de validit[ée]/i.test(text)) {
+      if (/Pr[eé]l[eè]vement Automatique/i.test(text) && !modalShowsImmediateBadgePayment(text)) {
+        const payDate = extractBadgePaymentDate(text);
+        if (payDate && parseFrDate(payDate) >= minPay) return true;
+      }
     }
 
-    const auValue = await readBadgeAuValueFromModal(page);
-    if (!isFrDateAtLeast(auValue, endStr)) {
-      await page.waitForTimeout(400);
-      continue;
-    }
-
-    const payDate = extractBadgePaymentDate(text);
-    const payOk = payDate ? parseFrDate(payDate) >= minPay : false;
-    const prelevementOk = /Pr[eé]l[eè]vement Automatique/i.test(text) && /Date de paiement/i.test(text);
-
-    if (prelevementOk && payOk) return true;
     await page.waitForTimeout(500);
   }
   return false;
@@ -1269,6 +1275,9 @@ async function fillBadgeDatesInConfigModal(page, delayDays = 7) {
 
   await badgeDomEvaluate(ctx, 'fillDu', startStr);
   let filledAu = await badgeDomEvaluate(ctx, 'fillAu', endStr);
+  await randomDelay(500, 800);
+  await ctx.keyboard.press('Escape').catch(() => {});
+  await badgeDomEvaluate(ctx, 'closePicker');
   await randomDelay(800, 1200);
 
   if (!filledAu) {
