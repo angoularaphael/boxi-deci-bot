@@ -91,14 +91,24 @@ async function fillFirst(ctx, selectors, value) {
 }
 
 async function navigateToMembers(page) {
-  if (page.url().includes('select.php')) return;
+  const onSearchPage =
+    page.url().includes('select.php') && !page.url().match(/idj=\d+/);
+  if (onSearchPage) return;
 
   await gotoDeciplus(page, 'select.php').catch(async () => {
     const icon = page.locator('i.icon.fa-solid').first();
     if ((await icon.count()) > 0) await icon.click();
+    await gotoDeciplus(page, 'select.php').catch(() => {});
   });
+  await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await randomDelay();
+  await dismissJqueryUiOverlay(page);
+}
+
+async function resetMemberSearchContext(page) {
+  logInfo('Retour recherche membres Deciplus');
+  await navigateToMembers(page);
 }
 
 async function searchMember(page, query) {
@@ -337,6 +347,8 @@ async function detectDuplicateError(page) {
 async function findOrCreateMember(page, order, gymConfig) {
   const { customer } = order;
 
+  await resetMemberSearchContext(page);
+
   if (customer.email) {
     const byEmail = await searchMember(page, customer.email);
     if (byEmail.found) return { member_id: byEmail.member_id, action: 'found_email' };
@@ -385,4 +397,5 @@ module.exports = {
   extractMemberId,
   detectDuplicateError,
   phoneForDeciplus,
+  resetMemberSearchContext,
 };
