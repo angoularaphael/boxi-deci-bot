@@ -2,6 +2,7 @@ const { randomDelay, loadJson } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
 const { buildInternalNote } = require('../lib/normalize');
 const { gotoDeciplus } = require('./auth');
+const { dismissJqueryUiOverlay } = require('./ui');
 
 function navTimeout() {
   return Number(process.env.DECIPLUS_NAV_TIMEOUT || 90000);
@@ -116,6 +117,7 @@ async function searchMember(page, query) {
   await page.keyboard.press('Enter').catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
   await randomDelay();
+  await dismissJqueryUiOverlay(page);
 
   const url = page.url();
   const idMatch = url.match(/idj=(\d+)/);
@@ -143,6 +145,7 @@ async function openNewMemberFormViaSelect(page, customer) {
   await newBtn.click();
   await page.waitForURL(/joueurs\.php.*idj=new/, { timeout: navTimeout() }).catch(() => {});
   await randomDelay();
+  await dismissJqueryUiOverlay(page);
 
   const ctx = await getMemberFormContext(page);
   if ((await ctx.locator('form[name="db1_form"], input[name="nom"]').count()) > 0) {
@@ -164,6 +167,7 @@ async function openNewMemberFormViaUrl(page, customer) {
   await gotoDeciplus(page, `joueurs.php?${params}`);
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await randomDelay();
+  await dismissJqueryUiOverlay(page);
 
   const ctx = await getMemberFormContext(page);
   if ((await ctx.locator('form[name="db1_form"], input[name="nom"]').count()) > 0) {
@@ -240,25 +244,62 @@ async function fillMemberForm(page, customer, gymConfig, order) {
   }
 }
 
+async function isNewMemberForm(page, ctx) {
+  if (/idj=new/.test(page.url())) return true;
+  const mode = ctx.locator('input[name="alde_mode"][value="new"]').first();
+  if ((await mode.count()) > 0) return true;
+  const idj = ctx.locator('input[name="idj"]').first();
+  if ((await idj.count()) > 0) {
+    const value = await idj.inputValue().catch(() => '');
+    if (!value || value === 'new') return true;
+  }
+  return false;
+}
+
+async function prepareMemberFormSubmit(ctx, isNew) {
+  await ctx.evaluate(({ createMode }) => {
+    const form = document.querySelector('form[name="db1_form"]');
+    if (!form) return;
+    const aldeSubmit = form.querySelector('input[name="alde_submit"]');
+    if (aldeSubmit) aldeSubmit.value = 'valider';
+    const demandeMaj = form.querySelector('input[name="demande_maj"]');
+    if (demandeMaj) demandeMaj.value = createMode ? '0' : '1';
+  }, { createMode: isNew });
+}
+
 async function submitMemberForm(page) {
   const cfg = getSelectors();
   const ctx = await getMemberFormContext(page);
-  const submitSelectors = [
+  const isNew = await isNewMemberForm(page, ctx);
+
+  await dismissJqueryUiOverlay(page);
+  await prepareMemberFormSubmit(ctx, isNew);
+
+  const validateSelectors = [
     cfg.member_form_selectors?.submit,
     cfg.member_detail?.validate_button,
-    'input[type="submit"].albut_dw',
-    'input[type="submit"].albut',
+    'form[name="db1_form"] input[type="submit"][value="Valider"]',
     'input[type="submit"][value="Valider"]',
-    'form[name="db1_form"] input[type="submit"]',
   ]
     .filter(Boolean)
     .join(', ');
 
-  const clicked = await clickFirst(ctx, submitSelectors);
+  const updateSelectors = [
+    cfg.member_detail?.update_button,
+    'input[type="submit"][value="Mettre à jour"]',
+  ]
+    .filter(Boolean)
+    .join(', ');
+
+  const submitSelectors = isNew ? validateSelectors : `${updateSelectors}, ${validateSelectors}`;
+  let clicked = await clickFirst(ctx, submitSelectors, { force: true });
+
   if (!clicked) {
     const form = ctx.locator('form[name="db1_form"]').first();
     if ((await form.count()) > 0) {
+      await prepareMemberFormSubmit(ctx, isNew);
       await form.evaluate((f) => f.submit());
+      clicked = true;
     } else {
       throw new Error(`Bouton Valider membre introuvable (${page.url()})`);
     }
@@ -268,6 +309,7 @@ async function submitMemberForm(page) {
     timeout: navTimeout(),
   }).catch(() => {});
   await randomDelay();
+  await dismissJqueryUiOverlay(page);
 }
 
 function extractMemberId(page) {

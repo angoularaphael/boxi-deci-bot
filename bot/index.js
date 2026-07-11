@@ -26,6 +26,7 @@ const {
   getGymConfig,
 } = require('../lib/normalize');
 const { fetchDeciplusCatalog, resolveProductConfig, resolveBadgeProductConfig } = require('./catalog');
+const { applyBillingPlanToProductConfig } = require('../lib/billing-plan');
 const { logInfo, logError, logWarn, sendAlert } = require('../lib/logger');
 const { sleep } = require('../lib/utils');
 const { maybeKeepSessionAlive, touchKeepAliveClock } = require('./session-keepalive');
@@ -67,7 +68,10 @@ async function processCancelJob(_page, order) {
 
 async function processSaleJob(page, order) {
   const catalog = await fetchDeciplusCatalog(page);
-  const productConfig = resolveProductConfig(order, catalog);
+  const productConfig = applyBillingPlanToProductConfig(
+    resolveProductConfig(order, catalog),
+    order
+  );
   const gymConfig = getGymConfig(order.gym || 'minimes');
 
   let badgeProductConfig = null;

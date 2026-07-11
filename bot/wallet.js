@@ -117,7 +117,7 @@ async function ensureMemberPostalAddress(page, memberId, addr) {
   });
   await clickFirst(
     page,
-    'input[type="submit"][value="Valider"], input.albut[value="Valider"], input[type="submit"].albut'
+    'input[type="submit"][value="Mettre à jour"], input[type="submit"][value="Valider"], input.albut[value="Valider"]'
   );
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await randomDelay();

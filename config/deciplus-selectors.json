@@ -34,7 +34,7 @@
     "info_compta": "input[name=\"info_compta\"]",
     "info_admin": "textarea[name=\"info_admin\"]",
     "idz": "select[name=\"idz\"]",
-    "submit": "input[type=\"submit\"].albut_dw, input[type=\"submit\"].albut, input[type=\"submit\"][value=\"Valider\"], form[name=\"db1_form\"] input[type=\"submit\"]"
+    "submit": "form[name=\"db1_form\"] input[type=\"submit\"][value=\"Valider\"], input[type=\"submit\"].albut_dw[value=\"Valider\"], input[type=\"submit\"][value=\"Valider\"]"
   },
   "member_detail": {
     "fiche_detaillee_link": "a:has-text(\"Fiche détaillée\"), text=Fiche détaillée",
