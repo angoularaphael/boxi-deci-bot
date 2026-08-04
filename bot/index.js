@@ -100,7 +100,10 @@ async function processSaleJob(page, order) {
   let badgeProductConfig = null;
   if (productConfig.auto_badge) {
     try {
-      badgeProductConfig = resolveBadgeProductConfig(catalog);
+      badgeProductConfig = resolveBadgeProductConfig(catalog, {
+        badge_timing: order.badge_timing || order.payment?.badge_timing || 'deferred',
+        badge_method: order.badge_method || order.payment?.badge_method || 'iban',
+      });
     } catch (err) {
       logWarn('Badge non ajouté automatiquement', { order_id: order.order_id, error: err.message });
     }

@@ -3,9 +3,15 @@
  */
 const fs = require('fs');
 const path = require('path');
-const { ROOT, loadJson } = require('../lib/utils');
+const { ROOT, ensureDir, loadJson } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
 const { gotoDeciplus, getAccessToken } = require('./auth');
+const {
+  normalizeText,
+  inferSaleType,
+  buildDeciplusProductSearch,
+} = require('../lib/catalog-text');
+const { isTrialOrder, buildProductConfig } = require('../lib/catalog-sale');
 
 const API_BASE = 'https://api.deciplus.pro/staff/v1';
 const CATALOG_CACHE_MS = Number(process.env.BOT_CATALOG_CACHE_MS || 300000);
@@ -145,16 +151,6 @@ async function fetchDeciplusCatalog(page, { force = false } = {}) {
   return products;
 }
 
-function normalizeText(value) {
-  return String(value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/€/g, 'e')
-    .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
-}
-
 function scoreMatch(query, product) {
   const q = normalizeText(query);
   const title = normalizeText(product.title);
@@ -215,72 +211,6 @@ function findProductInCatalog(catalog, order) {
   return best;
 }
 
-function inferSaleType(product) {
-  const type = product.type || product.categoryId || '';
-  if (type === 'decipass' || /badge/i.test(product.title)) return 'carte';
-  if (['seances', 'seance'].includes(type)) return 'carte';
-  if (type === 'abo' || product.categoryId === 'abo') return 'abonnement';
-  return 'abonnement';
-}
-
-function isTrialOrder(order) {
-  const name = normalizeText(order.product_name || order.offer);
-  return order.payment.amount === 0 || name.includes('essai');
-}
-
-function buildDeciplusProductSearch(title, productId = null) {
-  const name = String(title || '').replace(/\s+/g, ' ').trim();
-  if (!name) return productId ? String(productId) : '';
-
-  if (/association/i.test(name)) return 'ASSOCIATION';
-  if (/baby boxe/i.test(name)) return 'BABY BOXE';
-  if (/boxe educative/i.test(name)) return 'BOXE EDUCATIVE';
-
-  if (/training camp/i.test(name)) {
-    const price =
-      name.match(/(\d+[,.]\d{2})\s*€/i)?.[1] ||
-      name.match(/^(\d+[,.]?\d*)\s*€?\s*\/?/i)?.[1];
-    if (price) return price.replace(',', '.');
-    return 'Training camp';
-  }
-
-  if (/cours illimit/i.test(name)) {
-    const price = name.match(/(\d+[,.]\d{2})/);
-    if (price) return price[1].replace(',', '.');
-    return 'Cours illimités';
-  }
-
-  if (/offre promo/i.test(name)) {
-    const price = name.match(/(\d+[,.]\d{2}|\d+)\s*€?/i);
-    if (price) {
-      const p = price[1].replace(',', '.');
-      return p.length <= 2 ? `OFFRE PROMO ${p.replace('.00', '')}` : p;
-    }
-    return 'OFFRE PROMO';
-  }
-
-  if (/offre a\s*29/i.test(name)) return 'OFFRE A 29';
-
-  if (/comptant/i.test(name)) {
-    const parts = name.split(/\s+/).slice(0, 3);
-    return parts.join(' ');
-  }
-
-  const price = name.match(/(\d+[,.]\d{2})/);
-  if (price) return price[1].replace(',', '.');
-
-  const segments = name.split(/\s*-\s*/).map((s) => s.trim()).filter(Boolean);
-  const shortestUseful = segments.find((s) => s.length >= 4 && s.length <= 35 && !/^offre/i.test(s));
-  if (shortestUseful) return shortestUseful.replace(/\s*€.*$/i, '').trim();
-
-  const stripped = name.replace(/\s*€.*$/i, '').trim();
-  if (stripped.length <= 35) return stripped;
-
-  const words = stripped.split(/\s+/).filter(Boolean);
-  if (words.length >= 2) return `${words[0]} ${words[1]}`;
-  return words[0] || stripped.slice(0, 20);
-}
-
 function buildSearchTokens(title) {
   const name = String(title || '').replace(/\s+/g, ' ').trim();
   const tokens = new Set();
@@ -307,45 +237,6 @@ function buildSearchTokens(title) {
   return [...tokens].filter((t) => t.length >= 2 && t.length <= 45);
 }
 
-function buildProductConfig(order, matchedProduct = null) {
-  const defaults = loadJson('config/sale-defaults.json');
-
-  if (isTrialOrder(order)) {
-    return {
-      key: 'essai',
-      label: order.product_name || 'Séance essai',
-      sale_type: 'none',
-      ...defaults.none,
-    };
-  }
-
-  if (!matchedProduct) {
-    throw new Error(
-      `Produit introuvable dans Deciplus: "${order.product_name || order.offer}"`
-    );
-  }
-
-  const saleType = inferSaleType(matchedProduct);
-  const typeDefaults = defaults[saleType] || defaults.abonnement;
-  const comptant = /comptant/i.test(matchedProduct.title);
-
-  return {
-    key: String(matchedProduct.id),
-    label: matchedProduct.title,
-    deciplus_product_name: matchedProduct.title,
-    deciplus_product_search:
-      order.deciplus_product_search ||
-      buildDeciplusProductSearch(matchedProduct.title, matchedProduct.id),
-    deciplus_product_id: matchedProduct.id,
-    deciplus_reference: matchedProduct.reference || null,
-    amount: order.payment.amount || matchedProduct.price,
-    ...typeDefaults,
-    sale_type: saleType,
-    paiement_comptant: comptant,
-    auto_badge: saleType === 'abonnement',
-  };
-}
-
 function findBadgeProduct(catalog) {
   if (!catalog?.length) return null;
 
@@ -361,13 +252,17 @@ function findBadgeProduct(catalog) {
   );
 }
 
-function resolveBadgeProductConfig(catalog) {
+function resolveBadgeProductConfig(catalog, overrides = {}) {
   const matched = findBadgeProduct(catalog);
   if (!matched) {
     throw new Error('Produit Badge introuvable dans le catalogue Deciplus');
   }
 
   const defaults = loadJson('config/sale-defaults.json').carte;
+  const timing = String(overrides.badge_timing || overrides.timing || 'deferred').toLowerCase();
+  const method = String(overrides.badge_method || overrides.method || 'iban').toLowerCase();
+  const immediate = timing === 'immediate';
+
   return {
     key: String(matched.id),
     label: matched.title,
@@ -377,8 +272,14 @@ function resolveBadgeProductConfig(catalog) {
     amount: Number(matched.price) || 34.99,
     ...defaults,
     sale_type: 'carte',
-    paiement_comptant: false,
-    prelevement_delay_days: defaults.prelevement_delay_days || 3,
+    // Immédiat : Comptant ON (CB Stripe déjà prise ou prélèvement J0)
+    // Différé : Comptant OFF + Date de paiement J+3
+    paiement_comptant: immediate,
+    badge_timing: immediate ? 'immediate' : 'deferred',
+    badge_method: method === 'card' || method === 'cb' ? 'card' : 'iban',
+    prelevement_delay_days: immediate
+      ? 0
+      : Number(overrides.prelevement_delay_days || defaults.prelevement_delay_days || 3),
     requires_iban: false,
     skip_rib_prompt: true,
     auto_badge: false,

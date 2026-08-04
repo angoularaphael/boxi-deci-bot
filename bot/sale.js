@@ -506,6 +506,54 @@ async function badgeDomEvaluate(ctx, operation, value = null) {
         if (/Paiement imm[ée]diat/i.test(text) && /34[,.]99/.test(text)) return false;
         return /Pr[eé]l[eè]vement Automatique/i.test(text) && /Date de paiement/i.test(text);
       }
+      if (op === 'fillPaymentDate') {
+        const setInput = (input) => {
+          if (!input) return false;
+          const r = input.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          input.focus();
+          const proto = window.HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) setter.call(input, val);
+          else input.value = val;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.dispatchEvent(new Event('blur', { bubbles: true }));
+          return String(input.value || '').trim() === val;
+        };
+
+        // Champ proche du libellé « Date de paiement »
+        const payLabel = deepQueryAll(document.body, 'span, label, div, b, strong, td, th, p').find((el) =>
+          /^Date de paiement$/i.test(String(el.textContent || '').replace(/\s+/g, ' ').trim())
+        );
+        if (payLabel) {
+          let parent = payLabel.parentElement;
+          for (let depth = 0; depth < 10 && parent; depth += 1) {
+            const near = deepQueryAll(
+              parent,
+              '.el-date-editor input, input.el-input__inner, input[type="text"], input:not([type])'
+            ).filter((input) => input.type !== 'checkbox' && input.type !== 'hidden');
+            for (const input of near) {
+              if (setInput(input)) return true;
+            }
+            parent = parent.parentElement;
+          }
+        }
+
+        // Repli : date inputs visibles hors « Valide du »
+        const editors = deepQueryAll(
+          document.body,
+          '.el-date-editor input.el-input__inner, .el-date-editor input, input.el-input__inner'
+        ).filter((input) => {
+          if (input.type === 'checkbox' || input.type === 'hidden') return false;
+          const r = input.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        });
+        // Souvent : [Valide du, au, Date de paiement] → 3e ; sinon 2e si seulement 2
+        if (editors.length >= 3 && setInput(editors[2])) return true;
+        if (editors.length === 2 && setInput(editors[1])) return true;
+        return false;
+      }
       return null;
     },
     { op: operation, val: value }
@@ -1685,6 +1733,15 @@ async function configureBadgeDeferredDates(page, delayDays) {
   return false;
 }
 
+async function fillBadgePaymentDate(page, dateStr) {
+  const ctx = await resolveDeciplusWorkPage(page);
+  const ok = await badgeDomEvaluate(ctx, 'fillPaymentDate', dateStr);
+  if (ok) {
+    logInfo('Badge — Date de paiement forcée', { date_paiement: dateStr });
+  }
+  return Boolean(ok);
+}
+
 async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   await randomDelay(1500, 2500);
   await ensureBadgeConfigModalForSale(page);
@@ -1695,15 +1752,31 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   }
 
   const delayDays = resolveBadgePrelevementDelayDays(productConfig);
+  const timing = String(productConfig.badge_timing || 'deferred').toLowerCase();
+  const immediate = timing === 'immediate' || productConfig.paiement_comptant === true;
+  const { startStr, endStr } = badgeContractDates(immediate ? 0 : delayDays);
+  // Immédiat : débit aujourd'hui ; différé : J+delay (~72h) — PAS le 5 du mois suivant Deciplus
+  const payStr = immediate ? startStr : endStr;
 
-  await ensurePaiementComptantOff(page, { strict: true });
-  await randomDelay(800, 1200);
+  if (immediate) {
+    // Laisser Paiement Comptant ON → Deciplus « Paiement immédiat » (CB déjà encaissée Stripe ou IBAN J0)
+    logInfo('Badge — paiement immédiat (Comptant)', {
+      badge_timing: timing,
+      badge_method: productConfig.badge_method || null,
+    });
+  } else {
+    await ensurePaiementComptantOff(page, { strict: true });
+    await randomDelay(400, 700);
+    // Remplir Valide du / au + Date de paiement AVANT Appliquer
+    const ctx = await resolveDeciplusWorkPage(page);
+    await badgeDomEvaluate(ctx, 'fillDu', startStr).catch(() => false);
+    await badgeDomEvaluate(ctx, 'fillAu', endStr).catch(() => false);
+    await fillBadgePaymentDate(page, payStr);
+    await randomDelay(400, 700);
+  }
 
-  // Ne pas Escape/dates avant Appliquer : ça ferme la modale Configuration de Badge.
-  // Flux validé historiquement : Comptant off → Appliquer → popup date de fin (J+delay).
   const clicked = await clickBadgeModalAppliquer(page);
   if (!clicked) {
-    // Repli Playwright (hors evaluate GB_frame)
     const fallback = await clickFirst(
       page,
       [
@@ -1722,27 +1795,74 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
 
   await randomDelay(1000, 1500);
 
-  // Pousser l'échéance / date de fin à ~J+3 (72h)
-  let dateFinOk = await configureBadgeDeferredDates(page, delayDays).catch((err) => {
-    logWarn('Badge — ajustement date de fin', { error: err.message });
-    return false;
-  });
-  if (!dateFinOk) {
-    dateFinOk = await handleBadgeModifierDateFinDialog(page);
+  let dateFinOk = false;
+  let payDateOk = false;
+
+  if (!immediate) {
+    // Date de fin contrat (popup) + re-forcer Date de paiement (défaut Deciplus = ~5 du mois suivant)
+    dateFinOk = await configureBadgeDeferredDates(page, delayDays).catch((err) => {
+      logWarn('Badge — ajustement date de fin', { error: err.message });
+      return false;
+    });
+    if (!dateFinOk) {
+      dateFinOk = await handleBadgeModifierDateFinDialog(page);
+    }
+
+    // Re-ouvrir / forcer Date de paiement si encore sur le défaut mensuel
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const text = (await readBadgeConfigModalText(page).catch(() => '')) || '';
+      const venteText =
+        text ||
+        ((await page.locator('body').innerText().catch(() => '')) || '').slice(0, 4000);
+      const payDate = extractBadgePaymentDate(venteText);
+      const minPay = minBadgePaymentDate(delayDays);
+      const maxPay = new Date();
+      maxPay.setDate(maxPay.getDate() + delayDays + 2);
+      const parsed = parseFrDate(payDate);
+      const inWindow = parsed && parsed >= minPay && parsed <= maxPay;
+      if (inWindow) {
+        payDateOk = true;
+        break;
+      }
+      if (!(await isBadgeConfigModalOpen(page))) {
+        await reopenBadgeConfigModal(page).catch(() => false);
+      }
+      await fillBadgePaymentDate(page, payStr);
+      await clickBadgeModalAppliquer(page).catch(() => false);
+      await randomDelay(600, 1000);
+    }
+  } else {
+    payDateOk = true;
   }
 
   await waitForBadgeModalClosed(page);
   await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
   await randomDelay(800, 1200);
 
-  const deferredOk = await verifyBadgeDeferredSetup(page, delayDays).catch(() => false);
+  const deferredOk = immediate
+    ? true
+    : await verifyBadgeDeferredSetup(page, delayDays).catch(() => false);
 
-  logInfo('Badge — Configuration appliquée (prélèvement différé ~72h)', {
-    delay_days: delayDays,
-    delay_hours: delayDays * 24,
-    date_fin_ok: Boolean(dateFinOk),
-    deferred_ok: Boolean(deferredOk),
-  });
+  logInfo(
+    immediate
+      ? 'Badge — Configuration appliquée (paiement immédiat)'
+      : 'Badge — Configuration appliquée (prélèvement différé ~72h)',
+    {
+      delay_days: immediate ? 0 : delayDays,
+      date_paiement: payStr,
+      date_fin_ok: Boolean(dateFinOk),
+      pay_date_ok: Boolean(payDateOk),
+      deferred_ok: Boolean(deferredOk),
+      badge_timing: timing,
+      badge_method: productConfig.badge_method || null,
+    }
+  );
+
+  if (!immediate && !payDateOk && !deferredOk) {
+    logWarn('Badge — Date de paiement peut encore être au défaut Deciplus (ex. 5 du mois suivant)', {
+      expected: payStr,
+    });
+  }
 }
 
 async function togglePaiementComptantOff(page) {
