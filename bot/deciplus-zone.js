@@ -12,8 +12,15 @@ async function isChooseZoneScreen(page) {
 }
 
 async function selectSiteInPicker(page, siteLabel) {
-  const label = siteLabel || process.env.DECIPLUS_DEFAULT_SITE || 'Minimes';
+  // siteLabel vient de la commande (salle choisie). Pas de fallback Minimes ici :
+  // si absent, on ne change pas de site pour éviter d'écraser le choix client.
+  const label = String(siteLabel || '').trim();
+  if (!label) {
+    logInfo('Aucune salle fournie pour le picker Deciplus — site session inchangé');
+    return false;
+  }
   const pattern = new RegExp(escapeRegExp(label), 'i');
+  logInfo('Sélection site Deciplus', { site: label });
 
   const customSelect = page.locator('.ari-select').first();
   if ((await customSelect.count()) > 0 && (await customSelect.isVisible().catch(() => false))) {
@@ -29,11 +36,22 @@ async function selectSiteInPicker(page, siteLabel) {
 
   const nativeSelect = page.locator('select').first();
   if ((await nativeSelect.count()) > 0) {
-    await nativeSelect.selectOption({ label }).catch(async () => {
-      await nativeSelect.selectOption({ label: pattern }).catch(() => {});
+    const ok = await nativeSelect.selectOption({ label }).then(() => true).catch(async () => {
+      const options = nativeSelect.locator('option');
+      const count = await options.count();
+      for (let i = 0; i < count; i += 1) {
+        const opt = options.nth(i);
+        const text = ((await opt.textContent().catch(() => '')) || '').trim();
+        if (!pattern.test(text)) continue;
+        const value = await opt.getAttribute('value');
+        if (value == null) continue;
+        await nativeSelect.selectOption(value);
+        return true;
+      }
+      return false;
     });
     await randomDelay(400, 800);
-    return true;
+    return ok;
   }
 
   return false;
@@ -54,10 +72,19 @@ async function clickSellOnSite(page) {
 async function ensureDeciplusSaleZone(page, gymConfig = {}) {
   if (!(await isChooseZoneScreen(page))) return false;
 
-  const siteLabel = gymConfig.deciplus_label || gymConfig.label || process.env.DECIPLUS_DEFAULT_SITE || 'Minimes';
-  logInfo('Sélection site Deciplus pour vente', { site: siteLabel });
+  // Respecte la salle de la commande (gymConfig), jamais une salle hardcodée.
+  const siteLabel = gymConfig.deciplus_label || gymConfig.label || '';
+  if (!siteLabel) {
+    logInfo('Écran zone Deciplus sans salle commande — pas de sélection forcée');
+    return false;
+  }
+  logInfo('Sélection site Deciplus pour vente', { site: siteLabel, gym: gymConfig.key || null });
 
-  await selectSiteInPicker(page, siteLabel);
+  const selected = await selectSiteInPicker(page, siteLabel);
+  if (!selected) {
+    logInfo('Échec sélection site vente', { site: siteLabel });
+    return false;
+  }
   await clickSellOnSite(page);
   return true;
 }

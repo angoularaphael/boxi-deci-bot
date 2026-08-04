@@ -8,6 +8,12 @@ const { isChooseZoneScreen, selectSiteInPicker, clickSellOnSite } = require('./d
 const SESSION_DIR = process.env.BOT_SESSION_DIR || path.join(ROOT, 'data', 'session');
 const STORAGE_FILE = path.join(SESSION_DIR, 'storage-state.json');
 
+function isMfaAuthError(message = '') {
+  return /code.*email|DECIPLUS_EMAIL_CODE|vérification|verification|otp|mfa|cooldown/i.test(
+    String(message || '')
+  );
+}
+
 async function getAccessToken(page) {
   return page.evaluate(() => {
     try {
@@ -314,4 +320,5 @@ module.exports = {
   gotoDeciplus,
   getAccessToken,
   login,
+  isMfaAuthError,
 };

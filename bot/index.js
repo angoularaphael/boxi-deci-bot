@@ -73,7 +73,13 @@ async function processSaleJob(page, order) {
     resolveProductConfig(order, catalog),
     order
   );
-  const gymConfig = getGymConfig(order.gym || 'minimes');
+  if (!order.gym) {
+    return {
+      status: STATUS.MANUAL_REVIEW,
+      error: 'Salle (gym) manquante sur la commande',
+    };
+  }
+  const gymConfig = getGymConfig(order.gym);
 
   let badgeProductConfig = null;
   if (productConfig.auto_badge) {
@@ -210,8 +216,20 @@ async function processOneJob(job) {
   updateJob(filePath, { status: STATUS.PROCESSING, attempts: (job.attempts || 0) + 1 });
 
   try {
+    if (!order.gym) {
+      throw new Error('Validation: salle (gym) manquante sur la commande — impossible de choisir le site Deciplus');
+    }
+    const gymConfig = getGymConfig(order.gym);
+    const siteLabel = gymConfig.deciplus_label || gymConfig.label;
+    logInfo('Salle commande → Deciplus', {
+      job_id: jobId,
+      order_id: order.order_id,
+      gym: order.gym,
+      site: siteLabel,
+    });
+
     const outcome = await runWithSession('job', async (page) => {
-      await login(page);
+      await login(page, { siteLabel });
       return processJob(page, job);
     });
 
