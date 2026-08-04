@@ -1,17 +1,11 @@
-/**
- * Catalogue Deciplus — récupéré automatiquement via l'API interne (pas de JSON manuel).
+﻿/**
+ * Catalogue Deciplus â€” rÃ©cupÃ©rÃ© automatiquement via l'API interne (pas de JSON manuel).
  */
 const fs = require('fs');
 const path = require('path');
-const { ROOT, ensureDir, loadJson } = require('../lib/utils');
+const { ROOT, loadJson } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
 const { gotoDeciplus, getAccessToken } = require('./auth');
-const {
-  normalizeText,
-  inferSaleType,
-  buildDeciplusProductSearch,
-} = require('../lib/catalog-text');
-const { isTrialOrder, buildProductConfig } = require('../lib/catalog-sale');
 
 const API_BASE = 'https://api.deciplus.pro/staff/v1';
 const CATALOG_CACHE_MS = Number(process.env.BOT_CATALOG_CACHE_MS || 300000);
@@ -35,7 +29,7 @@ async function ensureDeciplusAuth(page) {
       break;
     }
     await gotoDeciplus(page, pathPart).catch((err) => {
-      logWarn('Warm Deciplus ignoré', { path: pathPart, error: err.message });
+      logWarn('Warm Deciplus ignorÃ©', { path: pathPart, error: err.message });
     });
     token = token || (await getAccessToken(page));
     if (token) break;
@@ -49,7 +43,7 @@ function loadCatalogFallback() {
   try {
     const data = JSON.parse(fs.readFileSync(CATALOG_FALLBACK_FILE, 'utf8'));
     if (!data.products?.length) return null;
-    logWarn('Catalogue Deciplus — repli sur catalog-live.json', { count: data.products.length });
+    logWarn('Catalogue Deciplus â€” repli sur catalog-live.json', { count: data.products.length });
     return data.products.map((p) => ({
       id: p.deciplus_id,
       title: p.name,
@@ -129,14 +123,14 @@ async function fetchDeciplusCatalog(page, { force = false } = {}) {
       catalogCache = { at: now, products: fallback };
       return fallback;
     }
-    throw new Error('Token Deciplus introuvable — relancer login (session expirée)');
+    throw new Error('Token Deciplus introuvable â€” relancer login (session expirÃ©e)');
   }
 
   let data;
   try {
     data = await fetchCatalogFromApi(page, token);
   } catch (err) {
-    logWarn('API catalogue Deciplus en échec', { error: err.message });
+    logWarn('API catalogue Deciplus en Ã©chec', { error: err.message });
     const fallback = loadCatalogFallback();
     if (fallback) {
       catalogCache = { at: now, products: fallback };
@@ -147,8 +141,18 @@ async function fetchDeciplusCatalog(page, { force = false } = {}) {
 
   const products = flattenCatalog(data);
   catalogCache = { at: now, products };
-  logInfo('Catalogue Deciplus chargé', { count: products.length });
+  logInfo('Catalogue Deciplus chargÃ©', { count: products.length });
   return products;
+}
+
+function normalizeText(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/â‚¬/g, 'e')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
 }
 
 function scoreMatch(query, product) {
@@ -199,16 +203,82 @@ function findProductInCatalog(catalog, order) {
 
   const query = candidates[0] || '';
   if (!best || bestScore < 40) {
-    logWarn('Produit Deciplus non trouvé dans le catalogue', { query, bestScore });
+    logWarn('Produit Deciplus non trouvÃ© dans le catalogue', { query, bestScore });
     return null;
   }
 
-  logInfo('Produit Deciplus résolu', {
+  logInfo('Produit Deciplus rÃ©solu', {
     query,
     matched: best.title,
     score: bestScore,
   });
   return best;
+}
+
+function inferSaleType(product) {
+  const type = product.type || product.categoryId || '';
+  if (type === 'decipass' || /badge/i.test(product.title)) return 'carte';
+  if (['seances', 'seance'].includes(type)) return 'carte';
+  if (type === 'abo' || product.categoryId === 'abo') return 'abonnement';
+  return 'abonnement';
+}
+
+function isTrialOrder(order) {
+  const name = normalizeText(order.product_name || order.offer);
+  return order.payment.amount === 0 || name.includes('essai');
+}
+
+function buildDeciplusProductSearch(title, productId = null) {
+  const name = String(title || '').replace(/\s+/g, ' ').trim();
+  if (!name) return productId ? String(productId) : '';
+
+  if (/association/i.test(name)) return 'ASSOCIATION';
+  if (/baby boxe/i.test(name)) return 'BABY BOXE';
+  if (/boxe educative/i.test(name)) return 'BOXE EDUCATIVE';
+
+  if (/training camp/i.test(name)) {
+    const price =
+      name.match(/(\d+[,.]\d{2})\s*â‚¬/i)?.[1] ||
+      name.match(/^(\d+[,.]?\d*)\s*â‚¬?\s*\/?/i)?.[1];
+    if (price) return price.replace(',', '.');
+    return 'Training camp';
+  }
+
+  if (/cours illimit/i.test(name)) {
+    const price = name.match(/(\d+[,.]\d{2})/);
+    if (price) return price[1].replace(',', '.');
+    return 'Cours illimitÃ©s';
+  }
+
+  if (/offre promo/i.test(name)) {
+    const price = name.match(/(\d+[,.]\d{2}|\d+)\s*â‚¬?/i);
+    if (price) {
+      const p = price[1].replace(',', '.');
+      return p.length <= 2 ? `OFFRE PROMO ${p.replace('.00', '')}` : p;
+    }
+    return 'OFFRE PROMO';
+  }
+
+  if (/offre a\s*29/i.test(name)) return 'OFFRE A 29';
+
+  if (/comptant/i.test(name)) {
+    const parts = name.split(/\s+/).slice(0, 3);
+    return parts.join(' ');
+  }
+
+  const price = name.match(/(\d+[,.]\d{2})/);
+  if (price) return price[1].replace(',', '.');
+
+  const segments = name.split(/\s*-\s*/).map((s) => s.trim()).filter(Boolean);
+  const shortestUseful = segments.find((s) => s.length >= 4 && s.length <= 35 && !/^offre/i.test(s));
+  if (shortestUseful) return shortestUseful.replace(/\s*â‚¬.*$/i, '').trim();
+
+  const stripped = name.replace(/\s*â‚¬.*$/i, '').trim();
+  if (stripped.length <= 35) return stripped;
+
+  const words = stripped.split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return `${words[0]} ${words[1]}`;
+  return words[0] || stripped.slice(0, 20);
 }
 
 function buildSearchTokens(title) {
@@ -222,19 +292,58 @@ function buildSearchTokens(title) {
     tokens.add('BOXING CENTER');
   }
 
-  const withoutPrice = name.replace(/\s*€.*$/i, '').trim();
+  const withoutPrice = name.replace(/\s*â‚¬.*$/i, '').trim();
   const words = withoutPrice.split(/\s+/).filter((w) => w.length > 1);
   for (let len = Math.min(5, words.length); len >= 1; len -= 1) {
     tokens.add(words.slice(0, len).join(' '));
   }
 
-  const price = name.match(/(\d+[,.]\d{2}|\d+)\s*€?/i);
+  const price = name.match(/(\d+[,.]\d{2}|\d+)\s*â‚¬?/i);
   if (price) {
     tokens.add(price[1]);
     tokens.add(price[1].replace('.', ','));
   }
 
   return [...tokens].filter((t) => t.length >= 2 && t.length <= 45);
+}
+
+function buildProductConfig(order, matchedProduct = null) {
+  const defaults = loadJson('config/sale-defaults.json');
+
+  if (isTrialOrder(order)) {
+    return {
+      key: 'essai',
+      label: order.product_name || 'SÃ©ance essai',
+      sale_type: 'none',
+      ...defaults.none,
+    };
+  }
+
+  if (!matchedProduct) {
+    throw new Error(
+      `Produit introuvable dans Deciplus: "${order.product_name || order.offer}"`
+    );
+  }
+
+  const saleType = inferSaleType(matchedProduct);
+  const typeDefaults = defaults[saleType] || defaults.abonnement;
+  const comptant = /comptant/i.test(matchedProduct.title);
+
+  return {
+    key: String(matchedProduct.id),
+    label: matchedProduct.title,
+    deciplus_product_name: matchedProduct.title,
+    deciplus_product_search:
+      order.deciplus_product_search ||
+      buildDeciplusProductSearch(matchedProduct.title, matchedProduct.id),
+    deciplus_product_id: matchedProduct.id,
+    deciplus_reference: matchedProduct.reference || null,
+    amount: order.payment.amount || matchedProduct.price,
+    ...typeDefaults,
+    sale_type: saleType,
+    paiement_comptant: comptant,
+    auto_badge: saleType === 'abonnement',
+  };
 }
 
 function findBadgeProduct(catalog) {
