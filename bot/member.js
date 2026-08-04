@@ -3,6 +3,12 @@ const { logInfo, logWarn } = require('../lib/logger');
 const { buildInternalNote } = require('../lib/normalize');
 const { gotoDeciplus } = require('./auth');
 const { dismissJqueryUiOverlay } = require('./ui');
+const {
+  phoneForDeciplus,
+  expandDeciplusUrl,
+  extractMemberIdFromUrl,
+  isNewMemberUrl,
+} = require('../lib/deciplus-member-format');
 
 function navTimeout() {
   return Number(process.env.DECIPLUS_NAV_TIMEOUT || 90000);
@@ -30,14 +36,6 @@ function formatBirthdate(raw) {
   if (Number.isNaN(d.getTime())) return raw;
   const pad = (n) => String(n).padStart(2, '0');
   return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
-}
-
-function phoneForDeciplus(raw) {
-  let digits = String(raw || '').replace(/\D/g, '');
-  if (digits.startsWith('33') && digits.length === 11) digits = `0${digits.slice(2)}`;
-  if (digits.startsWith('0') && digits.length > 10) digits = digits.slice(0, 10);
-  if (digits.length === 9) digits = `0${digits}`;
-  return digits;
 }
 
 function countryLabelForDeciplus(raw) {
@@ -197,21 +195,6 @@ async function searchMember(page, query) {
 
   logInfo('Membre Deciplus introuvable', { via: query.includes('@') ? 'email' : 'phone' });
   return { found: false };
-}
-
-function extractMemberIdFromUrl(url = '') {
-  const patterns = [
-    /check\.php\?[^#]*idj=(\d+)/i,
-    /select\.php\?[^#]*idjnew=(\d+)/i,
-    /select\.php\?[^#]*idj=(\d+)/i,
-    /joueurs\.php\?[^#]*idj=(\d+)/i,
-    /[?&]idj=(\d+)/i,
-  ];
-  for (const re of patterns) {
-    const m = String(url).match(re);
-    if (m && m[1] !== 'new') return m[1];
-  }
-  return null;
 }
 
 async function extractMemberIdFromForm(page) {
@@ -377,9 +360,18 @@ async function fillMemberForm(page, customer, gymConfig, order) {
   const internalNote = buildInternalNote(order);
   const ctx = await getMemberFormContext(page);
   const phone = phoneForDeciplus(customer.phone);
+  const lastName = customer.last_name || customer.first_name || 'CLIENT';
+  const firstName = customer.first_name || customer.last_name || 'WEB';
 
-  await fillFirst(ctx, sel.nom || 'input[name="nom"]', customer.last_name);
-  await fillFirst(ctx, sel.prenom || 'input[name="prenom"]', customer.first_name);
+  logInfo('Remplissage fiche membre Deciplus', {
+    last_name: lastName,
+    phone: phone || null,
+    email: customer.email || null,
+    gym: gymConfig.key || gymConfig.deciplus_label || null,
+  });
+
+  await fillFirst(ctx, sel.nom || 'input[name="nom"]', lastName);
+  await fillFirst(ctx, sel.prenom || 'input[name="prenom"]', firstName);
   await fillFirst(ctx, sel.email || 'input[name="email"]', customer.email);
   await fillFirst(ctx, sel.date_naissance || 'input[name="date_naissance"]', formatBirthdate(customer.birthdate));
   await fillFirst(ctx, sel.sexe || 'select[name="sexe"]', genderToDeciplus(customer.gender));
@@ -460,9 +452,17 @@ async function setMemberZone(ctx, gymConfig = {}) {
 }
 
 async function isNewMemberForm(page, ctx) {
-  if (/idj=new/.test(page.url())) return true;
+  if (isNewMemberUrl(page.url())) return true;
+
   const mode = ctx.locator('input[name="alde_mode"][value="new"]').first();
   if ((await mode.count()) > 0) return true;
+
+  const aldeMode = ctx.locator('input[name="alde_mode"]').first();
+  if ((await aldeMode.count()) > 0) {
+    const value = String((await aldeMode.inputValue().catch(() => '')) || '').toLowerCase();
+    if (value === 'new') return true;
+  }
+
   const idj = ctx.locator('input[name="idj"]').first();
   if ((await idj.count()) > 0) {
     const value = await idj.inputValue().catch(() => '');
@@ -479,6 +479,10 @@ async function prepareMemberFormSubmit(ctx, isNew) {
     if (aldeSubmit) aldeSubmit.value = 'valider';
     const demandeMaj = form.querySelector('input[name="demande_maj"]');
     if (demandeMaj) demandeMaj.value = createMode ? '0' : '1';
+    const aldeMode = form.querySelector('input[name="alde_mode"]');
+    if (aldeMode && createMode) aldeMode.value = 'new';
+    const idj = form.querySelector('input[name="idj"]');
+    if (idj && createMode && (!idj.value || idj.value === 'new')) idj.value = 'new';
   }, { createMode: isNew });
 }
 
@@ -486,15 +490,22 @@ async function submitMemberForm(page) {
   const cfg = getSelectors();
   const ctx = await getMemberFormContext(page);
   const isNew = await isNewMemberForm(page, ctx);
+  logInfo('Soumission formulaire membre Deciplus', {
+    is_new: isNew,
+    url: page.url(),
+  });
 
   await dismissJqueryUiOverlay(page);
   await prepareMemberFormSubmit(ctx, isNew);
 
+  // Nouveau membre : TOUJOURS Valider (jamais Mettre à jour)
   const validateSelectors = [
     cfg.member_form_selectors?.submit,
     cfg.member_detail?.validate_button,
     'form[name="db1_form"] input[type="submit"][value="Valider"]',
     'input[type="submit"][value="Valider"]',
+    'input.albut_dw[value="Valider"]',
+    'input.albut[value="Valider"]',
   ]
     .filter(Boolean)
     .join(', ');
@@ -509,6 +520,20 @@ async function submitMemberForm(page) {
   const submitSelectors = isNew ? validateSelectors : `${updateSelectors}, ${validateSelectors}`;
   let clicked = await clickFirst(ctx, submitSelectors, { force: true });
 
+  if (!clicked && isNew) {
+    // Repli : forcer le submit HTML avec alde_submit=valider
+    clicked = await ctx.evaluate(() => {
+      const form = document.querySelector('form[name="db1_form"]');
+      if (!form) return false;
+      const aldeSubmit = form.querySelector('input[name="alde_submit"]');
+      if (aldeSubmit) aldeSubmit.value = 'valider';
+      const demandeMaj = form.querySelector('input[name="demande_maj"]');
+      if (demandeMaj) demandeMaj.value = '0';
+      form.submit();
+      return true;
+    }).catch(() => false);
+  }
+
   if (!clicked) {
     const form = ctx.locator('form[name="db1_form"]').first();
     if ((await form.count()) > 0) {
@@ -520,12 +545,18 @@ async function submitMemberForm(page) {
     }
   }
 
-  await page.waitForURL(
-    /check\.php\?[^#]*idj=\d+|select\.php\?[^#]*idj(new)?=\d+|joueurs\.php\?[^#]*idj=\d+/,
-    { timeout: navTimeout() }
-  ).catch(() => {});
+  await Promise.race([
+    page.waitForURL(
+      /check\.php|idjnew=\d+|joueurs\.php\?[^#]*idj=\d+|legacy\?path=.*idj/i,
+      { timeout: navTimeout() }
+    ),
+    page.waitForLoadState('networkidle', { timeout: navTimeout() }),
+  ]).catch(() => {});
   await randomDelay(800, 1500);
   await dismissJqueryUiOverlay(page);
+
+  const afterUrl = page.url();
+  logInfo('Après soumission membre', { url: afterUrl, member_id: extractMemberIdFromUrl(afterUrl) });
 }
 
 async function detectDuplicateError(page) {
@@ -602,6 +633,8 @@ module.exports = {
   submitMemberForm,
   findOrCreateMember,
   extractMemberId,
+  extractMemberIdFromUrl,
+  expandDeciplusUrl,
   detectDuplicateError,
   phoneForDeciplus,
   resetMemberSearchContext,
