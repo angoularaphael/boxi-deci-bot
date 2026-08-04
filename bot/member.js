@@ -57,13 +57,29 @@ async function clickFirst(ctx, selectors, opts = {}) {
   return false;
 }
 
-async function getMemberFormContext(page) {
-  if ((await page.locator('form[name="db1_form"]').count()) > 0) return page;
-  for (const frame of page.frames()) {
-    if (frame === page.mainFrame()) continue;
-    if ((await frame.locator('form[name="db1_form"]').count()) > 0) return frame;
-  }
-  if ((await page.locator('input[name="nom"], input[name="prenom"]').count()) > 0) return page;
+async function getMemberFormContext(page, { waitMs = 15000 } = {}) {
+  const deadline = Date.now() + Math.max(0, waitMs);
+  do {
+    try {
+      if ((await page.locator('form[name="db1_form"]').count()) > 0) return page;
+      if ((await page.locator('input[name="nom"], input[name="prenom"], input[name="adr1"]').count()) > 0) {
+        return page;
+      }
+      for (const frame of page.frames()) {
+        if (frame === page.mainFrame()) continue;
+        try {
+          if ((await frame.locator('form[name="db1_form"]').count()) > 0) return frame;
+          if ((await frame.locator('input[name="adr1"], input[name="nom"]').count()) > 0) return frame;
+        } catch {
+          /* iframe nextgen en cours de chargement */
+        }
+      }
+    } catch {
+      /* navigation */
+    }
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(400);
+  } while (Date.now() < deadline);
   return page;
 }
 

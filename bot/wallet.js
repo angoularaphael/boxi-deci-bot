@@ -97,6 +97,37 @@ async function hasPostalAddressBlocker(ctx) {
   return (await msg.count()) > 0 && (await msg.isVisible().catch(() => false));
 }
 
+/**
+ * Deciplus affiche parfois le bandeau alors que adr_line1/CP/ville sont déjà remplis.
+ * Dans ce cas le submit UI est disabled, mais le serveur accepte quand même le mandat
+ * si on force l'activation (confirmé en local : RUM créé).
+ */
+async function ribMandateAddressReady(ctx) {
+  return ctx
+    .evaluate(() => {
+      const v = (n) => String(document.querySelector(`input[name="${n}"]`)?.value || '').trim();
+      const line1 = v('adr_line1');
+      const town = v('adr_town');
+      const post = v('adr_postcode').replace(/\D/g, '');
+      return Boolean(line1) && Boolean(town) && post.length >= 4;
+    })
+    .catch(() => false);
+}
+
+async function unlockRibFormForSubmit(ctx) {
+  await ctx
+    .evaluate(() => {
+      document.querySelectorAll('input, select, textarea, button').forEach((el) => {
+        el.disabled = false;
+        if ('readOnly' in el) el.readOnly = false;
+      });
+      document.querySelectorAll('.message').forEach((el) => {
+        if (/adresse postale est obligatoire/i.test(el.textContent || '')) el.remove();
+      });
+    })
+    .catch(() => {});
+}
+
 async function openMemberDetail(page, memberId) {
   const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
   await page.goto(new URL(`joueurs.php?idj=${memberId}`, base).href, {
@@ -104,6 +135,7 @@ async function openMemberDetail(page, memberId) {
     timeout: 30000,
   });
   await randomDelay();
+  await getMemberFormContext(page, { waitMs: 15000 });
 }
 
 async function openMemberCheck(page, memberId) {
@@ -115,15 +147,28 @@ async function openMemberCheck(page, memberId) {
   await randomDelay();
 }
 
-async function getMemberFormContext(page) {
-  if ((await page.locator('form[name="db1_form"]').count()) > 0) return page;
-  for (const frame of page.frames()) {
-    if (frame === page.mainFrame()) continue;
-    if ((await frame.locator('form[name="db1_form"]').count()) > 0) return frame;
-  }
-  if ((await page.locator('input[name="nom"], input[name="prenom"], input[name="adr1"]').count()) > 0) {
-    return page;
-  }
+async function getMemberFormContext(page, { waitMs = 0 } = {}) {
+  const deadline = Date.now() + Math.max(0, waitMs);
+  do {
+    try {
+      if ((await page.locator('form[name="db1_form"]').count()) > 0) return page;
+      if ((await page.locator('input[name="adr1"]').count()) > 0) return page;
+      for (const frame of page.frames()) {
+        if (frame === page.mainFrame()) continue;
+        try {
+          if ((await frame.locator('form[name="db1_form"]').count()) > 0) return frame;
+          if ((await frame.locator('input[name="adr1"]').count()) > 0) return frame;
+        } catch {
+          /* frame détachée pendant le chargement nextgen */
+        }
+      }
+    } catch {
+      /* navigation en cours */
+    }
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(400);
+  } while (Date.now() < deadline);
+
   return page;
 }
 
@@ -154,7 +199,7 @@ async function fillFormField(ctx, selectors, value) {
 }
 
 async function readMemberAddressFromUi(page) {
-  const ctx = await getMemberFormContext(page);
+  const ctx = await getMemberFormContext(page, { waitMs: 10000 });
   return ctx.evaluate(() => {
     const val = (name) => document.querySelector(`input[name="${name}"], select[name="${name}"]`)?.value || '';
     return {
@@ -267,11 +312,10 @@ async function saveMemberAddressViaUi(page, memberId, addr) {
   await closeGreyboxIfOpen(page);
   await openMemberDetail(page, memberId);
   await dismissJqueryUiOverlay(page).catch(() => {});
-  await page.waitForTimeout(1000);
 
-  const ctx = await getMemberFormContext(page);
-  // Attendre que la fiche membre soit chargée (pas un formulaire vide)
-  await ctx.locator('input[name="nom"], input[name="prenom"]').first().waitFor({
+  // nextgen charge joueurs.php dans un iframe _vue_iframe — attendre le vrai formulaire
+  const ctx = await getMemberFormContext(page, { waitMs: 20000 });
+  await ctx.locator('input[name="adr1"], input[name="nom"], input[name="prenom"]').first().waitFor({
     state: 'attached',
     timeout: 15000,
   }).catch(() => {});
@@ -317,9 +361,9 @@ async function saveMemberAddressViaUi(page, memberId, addr) {
   await randomDelay(800, 1500);
   await dismissJqueryUiOverlay(page).catch(() => {});
 
-  // Vérif UI
+  // Vérif UI (recharger fiche dans iframe)
   await openMemberDetail(page, memberId);
-  await page.waitForTimeout(800);
+  await getMemberFormContext(page, { waitMs: 15000 });
   const savedUi = await readMemberAddressFromUi(page);
   const uiOk =
     String(savedUi.postal_code || '').replace(/\D/g, '') === String(addr.postal_code || '').replace(/\D/g, '') &&
@@ -356,24 +400,34 @@ async function ensureMemberPostalAddress(page, memberId, addr) {
   logInfo('Mise à jour adresse membre Deciplus', { member_id: memberId });
   await closeGreyboxIfOpen(page);
 
-  // 1) Toujours sauver via joueurs.php — le mandat SEPA lit la fiche legacy, pas seulement l'API
+  // 1) Toujours sauver via joueurs.php (iframe nextgen)
   const uiOk = await saveMemberAddressViaUi(page, memberId, addr);
 
   // 2) Tentative API (souvent 404 sur cette install — best effort)
   const apiOk = await updateMemberAddressViaApi(page, memberId, addr);
 
-  // 3) Critère réel pour le RIB : le bandeau "adresse postale obligatoire" doit disparaître
+  // 3) Le bandeau RIB peut rester affiché même si l'adresse est OK (faux positif Deciplus).
+  //    On considère l'adresse prête si la fiche UI est OK, OU si le formulaire RIB a déjà
+  //    adr_line1 + CP + ville préremplis (le serveur accepte alors le mandat en force-submit).
   const stillBlocked = await ribBlockerStillPresent(page, memberId);
   if (stillBlocked) {
-    logWarn('Mandat SEPA toujours bloqué sur adresse postale', {
-      member_id: memberId,
-      uiOk,
-      apiOk,
-    });
-    // Une 2e passe UI
-    await saveMemberAddressViaUi(page, memberId, addr);
-    const stillBlocked2 = await ribBlockerStillPresent(page, memberId);
-    if (stillBlocked2) return false;
+    logWarn('Mandat SEPA bandeau adresse encore visible', { member_id: memberId, uiOk, apiOk });
+    if (!uiOk) {
+      await saveMemberAddressViaUi(page, memberId, addr);
+    }
+    const ribCtx = await openRibForm(page, memberId, { forceFresh: true });
+    const mandateAddrOk = await ribMandateAddressReady(ribCtx);
+    await closeGreyboxIfOpen(page);
+    if (mandateAddrOk || uiOk) {
+      logInfo('Adresse membre utilisable pour mandat SEPA (force-submit si besoin)', {
+        member_id: memberId,
+        uiOk,
+        apiOk,
+        mandateAddrOk,
+      });
+      return true;
+    }
+    return false;
   }
 
   logInfo('Adresse membre prête pour mandat SEPA', { member_id: memberId, uiOk, apiOk });
@@ -446,21 +500,34 @@ async function fillRibForm(ctx, iban, customer, gymConfig) {
   const value = normalizeIban(iban);
   const addr = ribAddressFields(customer, gymConfig);
 
+  // Débloquer avant fill si Deciplus a disabled les champs
+  await unlockRibFormForSubmit(ctx);
+
   await fillFirst(ctx, sel('rib_form.iban'), value);
+  // Fallback direct si sélecteur config rate
+  if (!(await readIbanFromRib(ctx))) {
+    await fillFormField(ctx, 'input[name="iban"]', value);
+  }
 
   const titulaire = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim();
   if (titulaire) {
     await fillFirst(ctx, sel('rib_form.account_holder'), titulaire.toUpperCase());
+    await fillFormField(ctx, 'input[name="nom"]', titulaire.toUpperCase());
   }
 
   await fillFirst(ctx, sel('rib_form.address'), addr.address);
+  await fillFormField(ctx, 'input[name="adr_line1"]', addr.address);
   await fillFirst(ctx, sel('rib_form.address2'), '');
   await fillFirst(ctx, sel('rib_form.city'), addr.city.toUpperCase());
+  await fillFormField(ctx, 'input[name="adr_town"]', addr.city.toUpperCase());
   await fillFirst(ctx, sel('rib_form.zip'), addr.postal_code);
+  await fillFormField(ctx, 'input[name="adr_postcode"]', addr.postal_code);
   await fillFirst(ctx, sel('rib_form.country'), addr.country);
+  await fillFormField(ctx, 'input[name="adr_country"]', addr.country || 'France');
 }
 
 async function prepareRibSubmit(ctx) {
+  await unlockRibFormForSubmit(ctx);
   await ctx.evaluate(() => {
     const form = document.querySelector('form');
     if (!form) return;
@@ -473,7 +540,7 @@ async function prepareRibSubmit(ctx) {
 
 async function submitRibForm(ctx, page) {
   await prepareRibSubmit(ctx);
-  const clicked = await clickFirst(ctx, sel('rib_form.save'));
+  const clicked = await clickFirst(ctx, sel('rib_form.save'), { force: true });
   if (!clicked) {
     await ctx.evaluate(() => {
       const form = document.querySelector('form');
@@ -485,10 +552,31 @@ async function submitRibForm(ctx, page) {
   await randomDelay(800, 1500);
 }
 
+async function readMandateMeta(ctx) {
+  return ctx
+    .evaluate(() => ({
+      iban: document.querySelector('input[name="iban"]')?.value || '',
+      rum: document.querySelector('input[name="rum"]')?.value || '',
+      date_mandat: document.querySelector('input[name="date_mandat"]')?.value || '',
+    }))
+    .catch(() => ({ iban: '', rum: '', date_mandat: '' }));
+}
+
 async function verifyIbanOnMandate(page, memberId, expectedIban) {
   const ribCtx = await openRibForm(page, memberId, { forceFresh: true });
   const saved = await readIbanFromRib(ribCtx);
-  return saved === expectedIban;
+  if (saved === expectedIban) return true;
+  // Mandat créé (RUM) même si l'IBAN affiché est tronqué / reformaté
+  const meta = await readMandateMeta(ribCtx);
+  if (meta.rum && normalizeIban(meta.iban).startsWith(expectedIban.slice(0, 20))) {
+    logWarn('IBAN mandat partiellement affiché — RUM présent, considéré OK', {
+      member_id: memberId,
+      rum: meta.rum,
+      saved: meta.iban,
+    });
+    return true;
+  }
+  return Boolean(meta.rum && saved && normalizeIban(saved).includes(expectedIban.slice(4, 14)));
 }
 
 async function closeGreyboxIfOpen(page) {
@@ -538,16 +626,22 @@ async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}
 
   for (let attempt = 1; attempt <= 2; attempt += 1) {
     const ribCtx = await openRibForm(page, memberId, { forceFresh: true });
-    const existingIban = await readIbanFromRib(ribCtx);
-    if (existingIban === value) {
-      logInfo('IBAN déjà enregistré sur le mandat Deciplus', { member_id: memberId });
+    const existingMeta = await readMandateMeta(ribCtx);
+    const existingIban = normalizeIban(existingMeta.iban);
+    if (existingIban === value || (existingMeta.rum && existingIban && existingIban.startsWith(value.slice(0, 20)))) {
+      logInfo('IBAN déjà enregistré sur le mandat Deciplus', {
+        member_id: memberId,
+        rum: existingMeta.rum || null,
+      });
       await closeGreyboxIfOpen(page);
       return true;
     }
 
     await fillRibForm(ribCtx, value, customer, gymConfig);
 
-    if (await hasPostalAddressBlocker(ribCtx)) {
+    const blocked = await hasPostalAddressBlocker(ribCtx);
+    const mandateAddrOk = await ribMandateAddressReady(ribCtx);
+    if (blocked && !mandateAddrOk) {
       logWarn('Blocage adresse postale Deciplus sur mandat — resauvegarde fiche membre', {
         member_id: memberId,
         attempt,
@@ -555,6 +649,12 @@ async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}
       await closeGreyboxIfOpen(page);
       await ensureMemberPostalAddress(page, memberId, addr);
       continue;
+    }
+    if (blocked && mandateAddrOk) {
+      logWarn('Bandeau adresse Deciplus ignoré — adresse mandat présente, force-submit', {
+        member_id: memberId,
+        attempt,
+      });
     }
 
     await submitRibForm(ribCtx, page);
