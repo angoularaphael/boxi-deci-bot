@@ -54,9 +54,9 @@
     "save": "input[type=\"submit\"][value=\"Valider\"]"
   },
   "member_check": {
-    "achat_abonnement": "button:has-text(\"Achat Abonnement\"), a:has-text(\"Achat Abonnement\"), text=Achat Abonnement",
-    "achat_carte": "button:has-text(\"Achat Carte\"), a:has-text(\"Achat Carte\"), text=Achat Carte",
-    "saisir_mandat_sepa": "button:has-text(\"Saisir mandat SEPA\"), text=Saisir mandat SEPA",
+    "achat_abonnement": "input.fichemembre_button[value=\"Achat Abonnement\"], input[type=\"button\"][value=\"Achat Abonnement\"], button:has-text(\"Achat Abonnement\"), a:has-text(\"Achat Abonnement\")",
+    "achat_carte": "input.fichemembre_button[value=\"Achat Carte\"], input[type=\"button\"][value=\"Achat Carte\"], button:has-text(\"Achat Carte\"), a:has-text(\"Achat Carte\")",
+    "saisir_mandat_sepa": "button:has-text(\"Saisir mandat SEPA\"), input[value*=\"mandat SEPA\"], text=Saisir mandat SEPA",
     "consulter_abo": "input.fichemembre_button_grey[value=\"Consulter\"], input[value=\"Consulter\"].fichemembre_button_grey, button:has-text(\"Consulter\")",
     "prestation_item": "div.og-product-item[id^=\"prestation_\"], div[id^=\"prestation_\"].og-product-item",
     "product_search": "input[placeholder*=\"Rechercher un produit\"], input[placeholder*=\"produit\"]"

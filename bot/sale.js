@@ -233,6 +233,35 @@ const PRODUCT_SEARCH_SELECTOR =
   'input[placeholder*="Rechercher un produit"], input[placeholder*="Rechercher"], input[placeholder*="prestation"], input[placeholder*="Produit"]';
 
 /**
+ * check.php nextgen charge la fiche dans un iframe _vue_iframe.
+ * Les boutons Achat sont des input.fichemembre_button[value=...].
+ */
+async function getMemberCheckContext(page, { waitMs = 20000 } = {}) {
+  const deadline = Date.now() + Math.max(0, waitMs);
+  const achatSel =
+    'input.fichemembre_button[value="Achat Abonnement"], input[type="button"][value="Achat Abonnement"]';
+  do {
+    try {
+      if ((await page.locator(achatSel).count()) > 0) return page;
+      for (const frame of page.frames()) {
+        if (frame === page.mainFrame()) continue;
+        try {
+          if ((await frame.locator(achatSel).count()) > 0) return frame;
+          if ((await frame.locator('input.fichemembre_button').count()) > 0) return frame;
+        } catch {
+          /* detached */
+        }
+      }
+    } catch {
+      /* nav */
+    }
+    if (Date.now() >= deadline) break;
+    await page.waitForTimeout(400);
+  } while (Date.now() < deadline);
+  return page;
+}
+
+/**
  * Le catalogue nextgen/vente peut être dans la page ou un iframe.
  */
 async function resolveVenteCatalogContext(page, { timeoutMs = 25000 } = {}) {
@@ -1670,24 +1699,30 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   await ensurePaiementComptantOff(page, { strict: true });
   await randomDelay(800, 1200);
 
-  // Fixe Valide du / Valide au → Deciplus planifie le SEPA à ~J+delayDays (72h si 3)
-  const datesOk = await fillBadgeDatesInConfigModal(page, delayDays).catch((err) => {
-    logWarn('Badge — saisie dates modale échouée', { error: err.message, delay_days: delayDays });
-    return false;
-  });
-  if (!datesOk) {
-    logWarn('Badge — dates modale non confirmées avant Appliquer', { delay_days: delayDays });
-  }
-
+  // Ne pas Escape/dates avant Appliquer : ça ferme la modale Configuration de Badge.
+  // Flux validé historiquement : Comptant off → Appliquer → popup date de fin (J+delay).
   const clicked = await clickBadgeModalAppliquer(page);
   if (!clicked) {
-    await captureBadgeDebugScreenshot(page, 'appliquer-missing');
-    throw new Error('Badge — bouton Appliquer introuvable dans Configuration de Badge');
+    // Repli Playwright (hors evaluate GB_frame)
+    const fallback = await clickFirst(
+      page,
+      [
+        'button.ari-button-filled:has-text("Appliquer")',
+        'button.ari-button:has-text("Appliquer")',
+        'button:has-text("Appliquer"):not(:has-text("Quitter"))',
+        sel('sale_config_modal.appliquer'),
+      ].join(', '),
+      { force: true }
+    );
+    if (!fallback) {
+      await captureBadgeDebugScreenshot(page, 'appliquer-missing');
+      throw new Error('Badge — bouton Appliquer introuvable dans Configuration de Badge');
+    }
   }
 
   await randomDelay(1000, 1500);
 
-  // Popup « modifier la date de fin » : pousser l'échéance à J+delayDays
+  // Pousser l'échéance / date de fin à ~J+3 (72h)
   let dateFinOk = await configureBadgeDeferredDates(page, delayDays).catch((err) => {
     logWarn('Badge — ajustement date de fin', { error: err.message });
     return false;
@@ -1705,7 +1740,6 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   logInfo('Badge — Configuration appliquée (prélèvement différé ~72h)', {
     delay_days: delayDays,
     delay_hours: delayDays * 24,
-    dates_ok: Boolean(datesOk),
     date_fin_ok: Boolean(dateFinOk),
     deferred_ok: Boolean(deferredOk),
   });
@@ -1719,10 +1753,26 @@ async function openSaleFlow(page, productConfig, gymConfig, saleKind) {
   await closeGreyboxIfOpen(page);
   await dismissJqueryUiOverlay(page).catch(() => {});
 
+  // check.php est dans nextgen/legacy iframe (_vue_iframe) — boutons = input.fichemembre_button
+  const checkCtx = await getMemberCheckContext(page, { waitMs: 20000 });
   const buttonKey = saleKind === 'carte' ? 'member_check.achat_carte' : 'member_check.achat_abonnement';
-  const clicked = await clickFirst(page, sel(buttonKey));
+  const clicked = await clickFirst(checkCtx, sel(buttonKey), { force: true });
   if (!clicked) {
-    throw new Error(`Bouton vente Deciplus introuvable (${buttonKey}) — url=${page.url()}`);
+    // Repli : clic via evaluate dans l'iframe
+    const fallbackValue = saleKind === 'carte' ? 'Achat Carte' : 'Achat Abonnement';
+    const forced = await checkCtx
+      .evaluate((value) => {
+        const btn = document.querySelector(
+          `input.fichemembre_button[value="${value}"], input[type="button"][value="${value}"]`
+        );
+        if (!btn || btn.disabled) return false;
+        btn.click();
+        return true;
+      }, fallbackValue)
+      .catch(() => false);
+    if (!forced) {
+      throw new Error(`Bouton vente Deciplus introuvable (${buttonKey}) — url=${page.url()}`);
+    }
   }
 
   await page.waitForURL(/nextgen|vente|choose-zone/, { timeout: 20000 }).catch(() => {});
@@ -1836,7 +1886,13 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
   await dismissJqueryUiOverlay(page).catch(() => {});
   await openMemberCheck(page, memberId);
   await dismissJqueryUiOverlay(page).catch(() => {});
-  await annotateMember(page, order, productConfig);
+  await annotateMember(page, order, productConfig).catch((err) => {
+    logWarn('Annotation fiche membre ignorée', { error: err.message });
+  });
+  // Après Mettre à jour, revenir sur check.php (iframe) pour Achat Abonnement / Carte
+  await closeGreyboxIfOpen(page);
+  await openMemberCheck(page, memberId);
+  await randomDelay(1000, 1800);
 
   let result;
   const { badgeProductConfig } = options;
