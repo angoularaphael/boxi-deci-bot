@@ -635,37 +635,218 @@ async function findOrCreateMember(page, order, gymConfig) {
   return { member_id: memberId, action: 'created' };
 }
 
-/**
- * Tentative best-effort d'upload photo membre (input file Deciplus).
- */
-async function uploadMemberPhoto(page, photoPath) {
+async function resolvePhotoFile(photoPath, photoBase64) {
   const fs = require('fs');
-  if (!photoPath || !fs.existsSync(photoPath)) {
-    return { ok: false, reason: 'missing_file' };
+  const path = require('path');
+  const os = require('os');
+
+  if (photoPath && fs.existsSync(photoPath)) return { path: photoPath, cleanup: false };
+
+  if (photoBase64) {
+    const raw = String(photoBase64);
+    const m = raw.match(/^data:(image\/[\w+.-]+);base64,(.+)$/i);
+    const b64 = m ? m[2] : raw.replace(/^data:[^;]+;base64,/, '');
+    const ext = m && /png/i.test(m[1]) ? '.png' : m && /webp/i.test(m[1]) ? '.webp' : '.jpg';
+    const dest = path.join(os.tmpdir(), `bc-member-photo-${Date.now()}${ext}`);
+    fs.writeFileSync(dest, Buffer.from(b64, 'base64'));
+    return { path: dest, cleanup: true };
   }
-  const selectors = [
-    'input[type="file"][name*="photo" i]',
-    'input[type="file"][id*="photo" i]',
-    'input[type="file"][name*="image" i]',
-    'input[type="file"][accept*="image"]',
-    '#photo input[type="file"]',
-    'input[type="file"]',
-  ];
-  for (const sel of selectors) {
-    const input = page.locator(sel).first();
-    if ((await input.count()) === 0) continue;
-    const visible = await input.isVisible().catch(() => false);
-    // file inputs are often hidden — still settable
+
+  return null;
+}
+
+function fileToDataUrl(filePath) {
+  const fs = require('fs');
+  const path = require('path');
+  const buf = fs.readFileSync(filePath);
+  const ext = path.extname(filePath).toLowerCase();
+  const mime =
+    ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
+  return `data:${mime};base64,${buf.toString('base64')}`;
+}
+
+async function getStaffAccessToken(page) {
+  return page.evaluate(() => {
     try {
-      await input.setInputFiles(photoPath);
-      await randomDelay(300, 600);
-      logInfo('Photo membre envoyée (input file)', { selector: sel });
-      return { ok: true, selector: sel };
-    } catch (err) {
-      logWarn('Échec setInputFiles photo', { selector: sel, error: err.message });
+      return JSON.parse(localStorage.getItem('auth') || '{}').token || null;
+    } catch {
+      return null;
+    }
+  });
+}
+
+/** Upscale / downscale via canvas navigateur (min 200px côté Deciplus). */
+async function normalizePhotoDataUrl(page, dataUrl, { min = 200, max = 1000, quality = 0.9 } = {}) {
+  return page.evaluate(
+    async ({ src, minSize, maxSize, q }) => {
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = () => reject(new Error('image_load_failed'));
+        img.src = src;
+      });
+      let w = img.naturalWidth || img.width;
+      let h = img.naturalHeight || img.height;
+      if (!w || !h) throw new Error('invalid_image_dimensions');
+
+      if (w < minSize || h < minSize) {
+        const scale = Math.max(minSize / w, minSize / h);
+        w = Math.max(minSize, Math.round(w * scale));
+        h = Math.max(minSize, Math.round(h * scale));
+      } else if (w > maxSize || h > maxSize) {
+        const scale = Math.min(maxSize / w, maxSize / h);
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+      } else if (src.startsWith('data:image/jpeg')) {
+        return src;
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0, w, h);
+      return canvas.toDataURL('image/jpeg', q);
+    },
+    { src: dataUrl, minSize: min, maxSize: max, q: quality }
+  );
+}
+
+async function uploadMemberPhotoViaApi(page, memberId, dataUrl) {
+  const token = await getStaffAccessToken(page);
+  if (!token) return { ok: false, reason: 'no_staff_token' };
+  if (!memberId) return { ok: false, reason: 'no_member_id' };
+
+  const normalized = await normalizePhotoDataUrl(page, dataUrl);
+  const url = `https://api.deciplus.pro/staff/v1/member/${memberId}/photo`;
+  const res = await page.context().request.fetch(url, {
+    method: 'PUT',
+    headers: {
+      'x-access-token': token,
+      'Deciplus-Client-Type': 'manager',
+      'Content-Type': 'application/json',
+    },
+    data: { photo: normalized },
+  });
+  const status = res.status();
+  const text = await res.text().catch(() => '');
+  if (status >= 200 && status < 300) {
+    logInfo('Photo membre uploadée (API Deciplus)', { member_id: memberId, status });
+    return { ok: true, via: 'api', status };
+  }
+  logWarn('Échec upload photo API', { member_id: memberId, status, body: String(text).slice(0, 200) });
+  return { ok: false, reason: `api_${status}`, body: String(text).slice(0, 200) };
+}
+
+/** Repli legacy : Greybox photo_upload.php via bouton openUpload. */
+async function uploadMemberPhotoViaLegacyUi(page, photoPath, memberId) {
+  const fs = require('fs');
+  if (!photoPath || !fs.existsSync(photoPath)) return { ok: false, reason: 'missing_file' };
+
+  const contexts = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
+  for (const ctx of contexts) {
+    const uploadBtn = ctx.locator(
+      'input.bouton_upload, input[onclick*="openUpload"], .bouton_upload, a[onclick*="openUpload"]'
+    ).first();
+    if ((await uploadBtn.count()) === 0) continue;
+    try {
+      await uploadBtn.click({ force: true });
+      await randomDelay(500, 900);
+      break;
+    } catch {
+      /* try next */
     }
   }
-  return { ok: false, reason: 'no_file_input' };
+
+  // Ouvrir directement photo_upload.php si Greybox pas ouvert
+  const base = process.env.DECIPLUS_URL || page.url();
+  let uploadFrame = null;
+  for (let i = 0; i < 10; i += 1) {
+    for (const frame of page.frames()) {
+      const fu = frame.url() || '';
+      if (/photo_upload\.php/i.test(fu)) {
+        uploadFrame = frame;
+        break;
+      }
+    }
+    if (uploadFrame) break;
+    if (i === 3 && memberId) {
+      await page.goto(new URL(`photo_upload.php?idj=${memberId}`, base).href, {
+        waitUntil: 'domcontentloaded',
+        timeout: navTimeout(),
+      }).catch(() => {});
+    }
+    await randomDelay(300, 500);
+  }
+
+  const target = uploadFrame || page;
+  const fileInput = target.locator('input[type="file"]').first();
+  if ((await fileInput.count()) === 0) return { ok: false, reason: 'legacy_no_file_input' };
+  await fileInput.setInputFiles(photoPath);
+  await randomDelay(400, 700);
+  await clickFirst(
+    target,
+    'input[type="submit"], input[value="Valider"], input[value="Envoyer"], button[type="submit"]'
+  ).catch(() => false);
+  await randomDelay(800, 1200);
+  logInfo('Photo membre envoyée (legacy photo_upload)', { member_id: memberId });
+  return { ok: true, via: 'legacy_ui' };
+}
+
+/**
+ * Upload photo membre Deciplus.
+ * Priorité : API staff PUT /member/:id/photo (base64, min 200×200).
+ * Repli : UI legacy photo_upload.php.
+ */
+async function uploadMemberPhoto(page, photoPath, photoBase64 = null, memberId = null) {
+  const fs = require('fs');
+  const resolved = await resolvePhotoFile(photoPath, photoBase64);
+  if (!resolved?.path && !photoBase64) {
+    return { ok: false, reason: 'missing_file' };
+  }
+
+  const cleanup = () => {
+    if (resolved?.cleanup && resolved.path) {
+      try {
+        fs.unlinkSync(resolved.path);
+      } catch {
+        /* ignore */
+      }
+    }
+  };
+
+  try {
+    let dataUrl = null;
+    if (photoBase64 && /^data:image\//i.test(String(photoBase64))) {
+      dataUrl = String(photoBase64);
+    } else if (resolved?.path) {
+      dataUrl = fileToDataUrl(resolved.path);
+    } else if (photoBase64) {
+      dataUrl = `data:image/jpeg;base64,${String(photoBase64).replace(/^data:[^;]+;base64,/, '')}`;
+    }
+
+    if (dataUrl && memberId) {
+      const api = await uploadMemberPhotoViaApi(page, memberId, dataUrl);
+      if (api.ok) {
+        cleanup();
+        return api;
+      }
+    }
+
+    if (resolved?.path) {
+      const legacy = await uploadMemberPhotoViaLegacyUi(page, resolved.path, memberId);
+      cleanup();
+      return legacy;
+    }
+
+    cleanup();
+    return { ok: false, reason: 'upload_failed' };
+  } catch (err) {
+    cleanup();
+    return { ok: false, reason: err.message };
+  }
 }
 
 module.exports = {
@@ -683,4 +864,5 @@ module.exports = {
   phoneForDeciplus,
   resetMemberSearchContext,
   uploadMemberPhoto,
+  resolvePhotoFile,
 };

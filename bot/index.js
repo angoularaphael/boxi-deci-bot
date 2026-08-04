@@ -134,8 +134,13 @@ async function processSaleJob(page, order) {
   }
 
   let photoResult = null;
-  if (order.photo_path) {
-    photoResult = await uploadMemberPhoto(page, order.photo_path).catch((err) => ({
+  if (order.photo_path || order.photo_base64) {
+    photoResult = await uploadMemberPhoto(
+      page,
+      order.photo_path,
+      order.photo_base64,
+      memberId
+    ).catch((err) => ({
       ok: false,
       reason: err.message,
     }));
