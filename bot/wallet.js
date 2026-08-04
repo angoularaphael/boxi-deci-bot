@@ -1,6 +1,7 @@
 const { randomDelay, loadJson } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
 const { normalizeIban, isValidFrenchIban } = require('../lib/iban');
+const { dismissJqueryUiOverlay } = require('./ui');
 
 function sel(key) {
   try {
@@ -105,22 +106,59 @@ async function openMemberCheck(page, memberId) {
 
 async function ensureMemberPostalAddress(page, memberId, addr) {
   logInfo('Mise à jour adresse membre Deciplus', { member_id: memberId });
+  await closeGreyboxIfOpen(page);
   await openMemberDetail(page, memberId);
+  await dismissJqueryUiOverlay(page).catch(() => {});
+
   await fillFirst(page, 'input[name="adr1"]', addr.address);
   await fillFirst(page, 'input[name="codepostal"]', addr.postal_code);
   await fillFirst(page, 'input[name="ville"]', addr.city);
-  await fillFirst(page, 'input[name="pays"]', addr.country);
+  await fillFirst(page, 'input[name="pays"], select[name="pays"]', addr.country);
 
   await page.evaluate(() => {
-    const submit = document.querySelector('input[name="alde_submit"]');
+    const form = document.querySelector('form[name="db1_form"]');
+    if (!form) return;
+    const submit = form.querySelector('input[name="alde_submit"]');
     if (submit) submit.value = 'valider';
+    const demandeMaj = form.querySelector('input[name="demande_maj"]');
+    if (demandeMaj) demandeMaj.value = '1';
   });
-  await clickFirst(
+
+  const updated = await clickFirst(
     page,
-    'input[type="submit"][value="Mettre à jour"], input[type="submit"][value="Valider"], input.albut[value="Valider"]'
+    [
+      'input[type="submit"][value="Mettre à jour"]',
+      'input.albut_dw[value="Mettre à jour"]',
+      'input[type="submit"][value="Valider"]',
+      'input.albut[value="Valider"]',
+    ].join(', ')
   );
+  if (!updated) {
+    await page.evaluate(() => document.querySelector('form[name="db1_form"]')?.submit());
+  }
+
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-  await randomDelay();
+  await randomDelay(600, 1200);
+
+  // Recharger la fiche pour confirmer que l'adresse est bien persistée
+  await openMemberDetail(page, memberId);
+  const saved = await page.evaluate(() => ({
+    address: document.querySelector('input[name="adr1"]')?.value || '',
+    postal_code: document.querySelector('input[name="codepostal"]')?.value || '',
+    city: document.querySelector('input[name="ville"]')?.value || '',
+  }));
+
+  const ok =
+    String(saved.postal_code || '').replace(/\D/g, '') === String(addr.postal_code || '').replace(/\D/g, '') &&
+    Boolean(saved.address) &&
+    Boolean(saved.city);
+
+  if (!ok) {
+    logWarn('Adresse membre Deciplus non confirmée après sauvegarde', { member_id: memberId, saved, expected: addr });
+  } else {
+    logInfo('Adresse membre Deciplus confirmée', { member_id: memberId, postal_code: saved.postal_code });
+  }
+  return ok;
 }
 
 async function getRibFrame(page) {
@@ -146,13 +184,17 @@ async function waitForRibFrame(page, timeoutMs = 15000) {
   return null;
 }
 
-async function openRibForm(page, memberId) {
+async function openRibForm(page, memberId, { forceFresh = false } = {}) {
   const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
 
-  let frame = await getRibFrame(page);
-  if (frame) {
-    logInfo('Formulaire RIB déjà ouvert (modale)', { member_id: memberId });
-    return frame;
+  if (forceFresh) {
+    await closeGreyboxIfOpen(page);
+  } else {
+    let frame = await getRibFrame(page);
+    if (frame) {
+      logInfo('Formulaire RIB déjà ouvert (modale)', { member_id: memberId });
+      return frame;
+    }
   }
 
   await page.goto(new URL(`rib.php?idj=${memberId}`, base).href, {
@@ -163,7 +205,7 @@ async function openRibForm(page, memberId) {
 
   if (page.url().includes('rib.php')) return page;
 
-  frame = await waitForRibFrame(page, 5000);
+  let frame = await waitForRibFrame(page, 5000);
   if (frame) return frame;
 
   await openMemberCheck(page, memberId);
@@ -225,21 +267,39 @@ async function submitRibForm(ctx, page) {
 }
 
 async function verifyIbanOnMandate(page, memberId, expectedIban) {
-  const ribCtx = await openRibForm(page, memberId);
+  const ribCtx = await openRibForm(page, memberId, { forceFresh: true });
   const saved = await readIbanFromRib(ribCtx);
   return saved === expectedIban;
 }
 
 async function closeGreyboxIfOpen(page) {
-  const closeBtn = page.locator('#GB_window img, #GB_window a.close, #GB_window .close').first();
-  if ((await closeBtn.count()) > 0 && (await closeBtn.isVisible().catch(() => false))) {
-    await closeBtn.click().catch(() => {});
-    await randomDelay();
+  const closeSelectors = [
+    '#GB_window .close',
+    '#GB_window a.close',
+    '#GB_window img[title*="Close" i]',
+    '#GB_window img[alt*="Close" i]',
+    '#GB_close',
+    '#GB_window img',
+  ];
+  for (const selClose of closeSelectors) {
+    const closeBtn = page.locator(selClose).first();
+    if ((await closeBtn.count()) > 0 && (await closeBtn.isVisible().catch(() => false))) {
+      await closeBtn.click().catch(() => {});
+      await randomDelay(200, 500);
+    }
   }
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.evaluate(() => {
+    const win = document.querySelector('#GB_window');
+    if (win) win.remove();
+    document.querySelectorAll('#GB_overlay, .GB_overlay').forEach((el) => el.remove());
+  }).catch(() => {});
+  await randomDelay(200, 400);
 }
 
 /**
- * Flux : adresse membre → rib.php → IBAN + adresse mandat → Valider
+ * Flux : adresse membre → rib.php frais → IBAN + adresse mandat → Valider
+ * Si Deciplus bloque sur l'adresse postale, on resauvegarde la fiche puis on réessaie.
  */
 async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}) {
   const value = normalizeIban(iban);
@@ -252,34 +312,42 @@ async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}
 
   await ensureMemberPostalAddress(page, memberId, addr);
 
-  const ribCtx = await openRibForm(page, memberId);
-  const existingIban = await readIbanFromRib(ribCtx);
-  if (existingIban === value) {
-    logInfo('IBAN déjà enregistré sur le mandat Deciplus', { member_id: memberId });
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const ribCtx = await openRibForm(page, memberId, { forceFresh: true });
+    const existingIban = await readIbanFromRib(ribCtx);
+    if (existingIban === value) {
+      logInfo('IBAN déjà enregistré sur le mandat Deciplus', { member_id: memberId });
+      await closeGreyboxIfOpen(page);
+      return true;
+    }
+
+    await fillRibForm(ribCtx, value, customer, gymConfig);
+
+    if (await hasPostalAddressBlocker(ribCtx)) {
+      logWarn('Blocage adresse postale Deciplus sur mandat — resauvegarde fiche membre', {
+        member_id: memberId,
+        attempt,
+      });
+      await closeGreyboxIfOpen(page);
+      await ensureMemberPostalAddress(page, memberId, addr);
+      continue;
+    }
+
+    await submitRibForm(ribCtx, page);
     await closeGreyboxIfOpen(page);
-    return true;
+
+    const saved = await verifyIbanOnMandate(page, memberId, value);
+    await closeGreyboxIfOpen(page);
+    if (saved) {
+      logInfo('RIB saisi sur fiche membre', { member_id: memberId, attempt });
+      return true;
+    }
+
+    logWarn('IBAN non confirmé après soumission mandat', { member_id: memberId, attempt });
+    await ensureMemberPostalAddress(page, memberId, addr);
   }
 
-  const ribCtxFinal = (await getRibFrame(page)) || page;
-  await fillRibForm(ribCtxFinal, value, customer, gymConfig);
-
-  if (await hasPostalAddressBlocker(ribCtxFinal)) {
-    logWarn('Avertissement adresse postale Deciplus — soumission du mandat quand même', {
-      member_id: memberId,
-    });
-  }
-
-  await submitRibForm(ribCtxFinal, page);
-  await closeGreyboxIfOpen(page);
-
-  const saved = await verifyIbanOnMandate(page, memberId, value);
-  if (!saved) {
-    throw new Error('RIB Deciplus: échec enregistrement IBAN sur le mandat');
-  }
-
-  await closeGreyboxIfOpen(page);
-  logInfo('RIB saisi sur fiche membre', { member_id: memberId });
-  return true;
+  throw new Error('RIB Deciplus: échec enregistrement IBAN sur le mandat');
 }
 
 module.exports = {
