@@ -166,6 +166,30 @@ async function readMemberAddressFromUi(page) {
   }).catch(() => ({ address: '', postal_code: '', city: '', country: '' }));
 }
 
+async function fetchMemberViaApi(page, memberId) {
+  const token = await getAccessToken(page);
+  if (!token) return null;
+  try {
+    const get = await page.context().request.get(`${DECIPLUS_API}/member/${memberId}`, {
+      headers: apiHeaders(token),
+    });
+    if (!get.ok()) return null;
+    const body = await get.json();
+    return body.response || body || null;
+  } catch {
+    return null;
+  }
+}
+
+function addressMatchesMember(member, addr) {
+  if (!member || !addr) return false;
+  const savedPostal = String(member.postalCode || member.postal_code || '').replace(/\D/g, '');
+  const expectedPostal = String(addr.postal_code || '').replace(/\D/g, '');
+  const adr = String(member.adr1 || member.address || '').trim();
+  const city = String(member.city || member.ville || '').trim();
+  return savedPostal === expectedPostal && Boolean(adr) && Boolean(city);
+}
+
 async function updateMemberAddressViaApi(page, memberId, addr) {
   const token = await getAccessToken(page);
   if (!token) {
@@ -180,71 +204,90 @@ async function updateMemberAddressViaApi(page, memberId, addr) {
     country: addr.country || 'France',
   };
 
-  for (const method of ['PUT', 'PATCH', 'POST']) {
-    try {
-      const res = await page.request.fetch(`${DECIPLUS_API}/member/${memberId}`, {
-        method,
-        headers: apiHeaders(token),
-        data: payload,
-      });
-      if (res.ok()) {
-        logInfo('Adresse membre Deciplus via API', { member_id: memberId, method, status: res.status() });
-        break;
+  // Deciplus accepte parfois manager_legacy pour les updates
+  const headerVariants = [
+    apiHeaders(token),
+    { ...apiHeaders(token), 'Deciplus-Client-Type': 'manager_legacy' },
+  ];
+
+  let updated = false;
+  for (const headers of headerVariants) {
+    for (const method of ['PUT', 'PATCH']) {
+      try {
+        const res = await page.context().request.fetch(`${DECIPLUS_API}/member/${memberId}`, {
+          method,
+          headers,
+          data: payload,
+        });
+        if (res.ok()) {
+          logInfo('Adresse membre Deciplus via API', {
+            member_id: memberId,
+            method,
+            status: res.status(),
+            client: headers['Deciplus-Client-Type'],
+          });
+          updated = true;
+          break;
+        }
+        logWarn('API adresse membre refusée', {
+          member_id: memberId,
+          method,
+          status: res.status(),
+          client: headers['Deciplus-Client-Type'],
+        });
+      } catch (err) {
+        logWarn('API adresse membre erreur', { member_id: memberId, method, error: err.message });
       }
-      logWarn('API adresse membre refusée', { member_id: memberId, method, status: res.status() });
-    } catch (err) {
-      logWarn('API adresse membre erreur', { member_id: memberId, method, error: err.message });
     }
+    if (updated) break;
   }
 
-  try {
-    const get = await page.request.get(`${DECIPLUS_API}/member/${memberId}`, {
-      headers: apiHeaders(token),
+  if (!updated) return false;
+
+  const member = await fetchMemberViaApi(page, memberId);
+  const ok = addressMatchesMember(member, addr);
+  if (ok) {
+    logInfo('Adresse membre Deciplus confirmée (API write)', {
+      member_id: memberId,
+      postal_code: addr.postal_code,
     });
-    if (!get.ok()) return false;
-    const body = await get.json();
-    const member = body.response || body;
-    const savedPostal = String(member.postalCode || member.postal_code || '').replace(/\D/g, '');
-    const expectedPostal = String(addr.postal_code || '').replace(/\D/g, '');
-    const ok =
-      savedPostal === expectedPostal &&
-      Boolean(member.adr1 || member.address) &&
-      Boolean(member.city);
-    if (ok) {
-      logInfo('Adresse membre Deciplus confirmée (API)', {
-        member_id: memberId,
-        postal_code: savedPostal,
-      });
-    }
-    return ok;
-  } catch (err) {
-    logWarn('Lecture adresse API échouée', { member_id: memberId, error: err.message });
-    return false;
   }
+  return ok;
 }
 
-async function ensureMemberPostalAddress(page, memberId, addr) {
-  logInfo('Mise à jour adresse membre Deciplus', { member_id: memberId });
+async function ribBlockerStillPresent(page, memberId) {
   await closeGreyboxIfOpen(page);
+  const ribCtx = await openRibForm(page, memberId, { forceFresh: true });
+  const blocked = await hasPostalAddressBlocker(ribCtx);
+  await closeGreyboxIfOpen(page);
+  return blocked;
+}
 
-  // 1) API Deciplus — plus fiable que le formulaire HTML pour le mandat SEPA
-  if (await updateMemberAddressViaApi(page, memberId, addr)) {
-    return true;
-  }
-
-  // 2) Fallback UI joueurs.php
+async function saveMemberAddressViaUi(page, memberId, addr) {
+  await closeGreyboxIfOpen(page);
   await openMemberDetail(page, memberId);
   await dismissJqueryUiOverlay(page).catch(() => {});
-  await page.waitForTimeout(800);
+  await page.waitForTimeout(1000);
 
   const ctx = await getMemberFormContext(page);
+  // Attendre que la fiche membre soit chargée (pas un formulaire vide)
+  await ctx.locator('input[name="nom"], input[name="prenom"]').first().waitFor({
+    state: 'attached',
+    timeout: 15000,
+  }).catch(() => {});
+
   const filled = {
     address: await fillFormField(ctx, 'input[name="adr1"]', addr.address),
     postal: await fillFormField(ctx, 'input[name="codepostal"]', addr.postal_code),
     city: await fillFormField(ctx, 'input[name="ville"]', addr.city),
-    country: await fillFormField(ctx, 'input[name="pays"], select[name="pays"]', addr.country),
+    country: await fillFormField(ctx, 'input[name="pays"], select[name="pays"]', addr.country || 'France'),
   };
   logInfo('Champs adresse UI remplis', { member_id: memberId, filled });
+
+  if (!filled.address || !filled.postal || !filled.city) {
+    logWarn('Champs adresse introuvables sur joueurs.php', { member_id: memberId, filled });
+    return false;
+  }
 
   await ctx.evaluate(() => {
     const form = document.querySelector('form[name="db1_form"]');
@@ -255,6 +298,7 @@ async function ensureMemberPostalAddress(page, memberId, addr) {
     if (demandeMaj) demandeMaj.value = '1';
   }).catch(() => {});
 
+  await dismissJqueryUiOverlay(page).catch(() => {});
   const updated = await clickFirst(
     ctx,
     [
@@ -269,36 +313,71 @@ async function ensureMemberPostalAddress(page, memberId, addr) {
     await ctx.evaluate(() => document.querySelector('form[name="db1_form"]')?.submit()).catch(() => {});
   }
 
-  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-  await randomDelay(600, 1200);
+  await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
+  await randomDelay(800, 1500);
   await dismissJqueryUiOverlay(page).catch(() => {});
 
-  // Re-vérifie via API puis UI
-  if (await updateMemberAddressViaApi(page, memberId, addr)) {
+  // Vérif UI
+  await openMemberDetail(page, memberId);
+  await page.waitForTimeout(800);
+  const savedUi = await readMemberAddressFromUi(page);
+  const uiOk =
+    String(savedUi.postal_code || '').replace(/\D/g, '') === String(addr.postal_code || '').replace(/\D/g, '') &&
+    Boolean(savedUi.address) &&
+    Boolean(savedUi.city);
+
+  if (uiOk) {
+    logInfo('Adresse membre Deciplus confirmée (UI)', {
+      member_id: memberId,
+      postal_code: savedUi.postal_code,
+    });
     return true;
   }
 
-  await openMemberDetail(page, memberId);
-  await page.waitForTimeout(800);
-  const saved = await readMemberAddressFromUi(page);
-  const ok =
-    String(saved.postal_code || '').replace(/\D/g, '') === String(addr.postal_code || '').replace(/\D/g, '') &&
-    Boolean(saved.address) &&
-    Boolean(saved.city);
-
-  if (!ok) {
-    logWarn('Adresse membre Deciplus non confirmée après sauvegarde', {
+  // Vérif API lecture (sans considérer ça comme un write réussi)
+  const member = await fetchMemberViaApi(page, memberId);
+  if (addressMatchesMember(member, addr)) {
+    logInfo('Adresse membre Deciplus lue OK après UI (API GET)', {
       member_id: memberId,
-      saved,
-      expected: addr,
+      postal_code: addr.postal_code,
     });
-  } else {
-    logInfo('Adresse membre Deciplus confirmée (UI)', {
-      member_id: memberId,
-      postal_code: saved.postal_code,
-    });
+    return true;
   }
-  return ok;
+
+  logWarn('Adresse membre Deciplus non confirmée après sauvegarde UI', {
+    member_id: memberId,
+    saved: savedUi,
+    expected: addr,
+  });
+  return false;
+}
+
+async function ensureMemberPostalAddress(page, memberId, addr) {
+  logInfo('Mise à jour adresse membre Deciplus', { member_id: memberId });
+  await closeGreyboxIfOpen(page);
+
+  // 1) Toujours sauver via joueurs.php — le mandat SEPA lit la fiche legacy, pas seulement l'API
+  const uiOk = await saveMemberAddressViaUi(page, memberId, addr);
+
+  // 2) Tentative API (souvent 404 sur cette install — best effort)
+  const apiOk = await updateMemberAddressViaApi(page, memberId, addr);
+
+  // 3) Critère réel pour le RIB : le bandeau "adresse postale obligatoire" doit disparaître
+  const stillBlocked = await ribBlockerStillPresent(page, memberId);
+  if (stillBlocked) {
+    logWarn('Mandat SEPA toujours bloqué sur adresse postale', {
+      member_id: memberId,
+      uiOk,
+      apiOk,
+    });
+    // Une 2e passe UI
+    await saveMemberAddressViaUi(page, memberId, addr);
+    const stillBlocked2 = await ribBlockerStillPresent(page, memberId);
+    if (stillBlocked2) return false;
+  }
+
+  logInfo('Adresse membre prête pour mandat SEPA', { member_id: memberId, uiOk, apiOk });
+  return true;
 }
 
 async function getRibFrame(page) {
