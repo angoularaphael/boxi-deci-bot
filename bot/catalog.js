@@ -1,5 +1,5 @@
-﻿/**
- * Catalogue Deciplus â€” rÃ©cupÃ©rÃ© automatiquement via l'API interne (pas de JSON manuel).
+/**
+ * Catalogue Deciplus — récupéré automatiquement via l'API interne (pas de JSON manuel).
  */
 const fs = require('fs');
 const path = require('path');
@@ -29,7 +29,7 @@ async function ensureDeciplusAuth(page) {
       break;
     }
     await gotoDeciplus(page, pathPart).catch((err) => {
-      logWarn('Warm Deciplus ignorÃ©', { path: pathPart, error: err.message });
+      logWarn('Warm Deciplus ignoré', { path: pathPart, error: err.message });
     });
     token = token || (await getAccessToken(page));
     if (token) break;
@@ -43,7 +43,7 @@ function loadCatalogFallback() {
   try {
     const data = JSON.parse(fs.readFileSync(CATALOG_FALLBACK_FILE, 'utf8'));
     if (!data.products?.length) return null;
-    logWarn('Catalogue Deciplus â€” repli sur catalog-live.json', { count: data.products.length });
+    logWarn('Catalogue Deciplus — repli sur catalog-live.json', { count: data.products.length });
     return data.products.map((p) => ({
       id: p.deciplus_id,
       title: p.name,
@@ -123,14 +123,14 @@ async function fetchDeciplusCatalog(page, { force = false } = {}) {
       catalogCache = { at: now, products: fallback };
       return fallback;
     }
-    throw new Error('Token Deciplus introuvable â€” relancer login (session expirÃ©e)');
+    throw new Error('Token Deciplus introuvable — relancer login (session expirée)');
   }
 
   let data;
   try {
     data = await fetchCatalogFromApi(page, token);
   } catch (err) {
-    logWarn('API catalogue Deciplus en Ã©chec', { error: err.message });
+    logWarn('API catalogue Deciplus en échec', { error: err.message });
     const fallback = loadCatalogFallback();
     if (fallback) {
       catalogCache = { at: now, products: fallback };
@@ -141,7 +141,7 @@ async function fetchDeciplusCatalog(page, { force = false } = {}) {
 
   const products = flattenCatalog(data);
   catalogCache = { at: now, products };
-  logInfo('Catalogue Deciplus chargÃ©', { count: products.length });
+  logInfo('Catalogue Deciplus chargé', { count: products.length });
   return products;
 }
 
@@ -150,7 +150,7 @@ function normalizeText(value) {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/â‚¬/g, 'e')
+    .replace(/€/g, 'e')
     .replace(/[^a-z0-9]+/g, ' ')
     .trim();
 }
@@ -203,11 +203,11 @@ function findProductInCatalog(catalog, order) {
 
   const query = candidates[0] || '';
   if (!best || bestScore < 40) {
-    logWarn('Produit Deciplus non trouvÃ© dans le catalogue', { query, bestScore });
+    logWarn('Produit Deciplus non trouvé dans le catalogue', { query, bestScore });
     return null;
   }
 
-  logInfo('Produit Deciplus rÃ©solu', {
+  logInfo('Produit Deciplus résolu', {
     query,
     matched: best.title,
     score: bestScore,
@@ -238,8 +238,8 @@ function buildDeciplusProductSearch(title, productId = null) {
 
   if (/training camp/i.test(name)) {
     const price =
-      name.match(/(\d+[,.]\d{2})\s*â‚¬/i)?.[1] ||
-      name.match(/^(\d+[,.]?\d*)\s*â‚¬?\s*\/?/i)?.[1];
+      name.match(/(\d+[,.]\d{2})\s*€/i)?.[1] ||
+      name.match(/^(\d+[,.]?\d*)\s*€?\s*\/?/i)?.[1];
     if (price) return price.replace(',', '.');
     return 'Training camp';
   }
@@ -247,11 +247,11 @@ function buildDeciplusProductSearch(title, productId = null) {
   if (/cours illimit/i.test(name)) {
     const price = name.match(/(\d+[,.]\d{2})/);
     if (price) return price[1].replace(',', '.');
-    return 'Cours illimitÃ©s';
+    return 'Cours illimités';
   }
 
   if (/offre promo/i.test(name)) {
-    const price = name.match(/(\d+[,.]\d{2}|\d+)\s*â‚¬?/i);
+    const price = name.match(/(\d+[,.]\d{2}|\d+)\s*€?/i);
     if (price) {
       const p = price[1].replace(',', '.');
       return p.length <= 2 ? `OFFRE PROMO ${p.replace('.00', '')}` : p;
@@ -271,9 +271,9 @@ function buildDeciplusProductSearch(title, productId = null) {
 
   const segments = name.split(/\s*-\s*/).map((s) => s.trim()).filter(Boolean);
   const shortestUseful = segments.find((s) => s.length >= 4 && s.length <= 35 && !/^offre/i.test(s));
-  if (shortestUseful) return shortestUseful.replace(/\s*â‚¬.*$/i, '').trim();
+  if (shortestUseful) return shortestUseful.replace(/\s*€.*$/i, '').trim();
 
-  const stripped = name.replace(/\s*â‚¬.*$/i, '').trim();
+  const stripped = name.replace(/\s*€.*$/i, '').trim();
   if (stripped.length <= 35) return stripped;
 
   const words = stripped.split(/\s+/).filter(Boolean);
@@ -292,13 +292,13 @@ function buildSearchTokens(title) {
     tokens.add('BOXING CENTER');
   }
 
-  const withoutPrice = name.replace(/\s*â‚¬.*$/i, '').trim();
+  const withoutPrice = name.replace(/\s*€.*$/i, '').trim();
   const words = withoutPrice.split(/\s+/).filter((w) => w.length > 1);
   for (let len = Math.min(5, words.length); len >= 1; len -= 1) {
     tokens.add(words.slice(0, len).join(' '));
   }
 
-  const price = name.match(/(\d+[,.]\d{2}|\d+)\s*â‚¬?/i);
+  const price = name.match(/(\d+[,.]\d{2}|\d+)\s*€?/i);
   if (price) {
     tokens.add(price[1]);
     tokens.add(price[1].replace('.', ','));
@@ -313,7 +313,7 @@ function buildProductConfig(order, matchedProduct = null) {
   if (isTrialOrder(order)) {
     return {
       key: 'essai',
-      label: order.product_name || 'SÃ©ance essai',
+      label: order.product_name || 'Séance essai',
       sale_type: 'none',
       ...defaults.none,
     };
