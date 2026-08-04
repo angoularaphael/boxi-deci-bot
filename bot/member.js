@@ -166,6 +166,12 @@ async function searchMember(page, query) {
   const sel = getSelectors();
   await navigateToMembers(page);
 
+  // Reset champs pour éviter un filtre résiduel (ex. nom "bora")
+  for (const field of ['#i_nom', '#i_prenom', '#i_email', '#i_tel', '#i_code']) {
+    const el = page.locator(field).first();
+    if ((await el.count()) > 0) await el.fill('').catch(() => {});
+  }
+
   if (query.includes('@')) {
     await fillFirst(page, sel.quick_search_selectors?.email || '#i_email', query);
   } else {
@@ -177,15 +183,115 @@ async function searchMember(page, query) {
   await randomDelay();
   await dismissJqueryUiOverlay(page);
 
-  const url = page.url();
-  const idMatch = url.match(/idj=(\d+)/);
-  if (idMatch && idMatch[1] !== 'new') {
-    logInfo('Membre Deciplus trouvé', { member_id: idMatch[1] });
-    return { found: true, member_id: idMatch[1] };
+  const fromUrl = extractMemberIdFromUrl(page.url());
+  if (fromUrl) {
+    logInfo('Membre Deciplus trouvé', { member_id: fromUrl });
+    return { found: true, member_id: fromUrl };
+  }
+
+  const fromLink = await clickFirstMemberResult(page);
+  if (fromLink) {
+    logInfo('Membre Deciplus trouvé (liste)', { member_id: fromLink });
+    return { found: true, member_id: fromLink };
   }
 
   logInfo('Membre Deciplus introuvable', { via: query.includes('@') ? 'email' : 'phone' });
   return { found: false };
+}
+
+function extractMemberIdFromUrl(url = '') {
+  const patterns = [
+    /check\.php\?[^#]*idj=(\d+)/i,
+    /select\.php\?[^#]*idjnew=(\d+)/i,
+    /select\.php\?[^#]*idj=(\d+)/i,
+    /joueurs\.php\?[^#]*idj=(\d+)/i,
+    /[?&]idj=(\d+)/i,
+  ];
+  for (const re of patterns) {
+    const m = String(url).match(re);
+    if (m && m[1] !== 'new') return m[1];
+  }
+  return null;
+}
+
+async function extractMemberIdFromForm(page) {
+  const ctx = await getMemberFormContext(page);
+  const candidates = [
+    'input[name="idj"]',
+    'input[name="idj_hidden"]',
+    'input#idj',
+  ];
+  for (const sel of candidates) {
+    const el = ctx.locator(sel).first();
+    if ((await el.count()) === 0) continue;
+    const value = String((await el.inputValue().catch(() => '')) || '').trim();
+    if (/^\d+$/.test(value)) return value;
+  }
+  return null;
+}
+
+async function clickFirstMemberResult(page) {
+  const links = page.locator(
+    'a[href*="idj="], a[href*="check.php?idj="], a[href*="joueurs.php?idj="]'
+  );
+  const count = await links.count();
+  for (let i = 0; i < count; i += 1) {
+    const href = (await links.nth(i).getAttribute('href').catch(() => '')) || '';
+    const id = extractMemberIdFromUrl(href);
+    if (!id) continue;
+    await links.nth(i).click().catch(() => {});
+    await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+    await randomDelay();
+    return extractMemberIdFromUrl(page.url()) || id;
+  }
+  return null;
+}
+
+async function extractMemberId(page) {
+  return (
+    extractMemberIdFromUrl(page.url()) ||
+    (await extractMemberIdFromForm(page)) ||
+    null
+  );
+}
+
+async function resolveCreatedMemberId(page, customer) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const id = await extractMemberId(page);
+    if (id) return id;
+    await page.waitForTimeout(800);
+  }
+
+  if (customer?.email) {
+    const byEmail = await searchMember(page, customer.email);
+    if (byEmail.found) return byEmail.member_id;
+  }
+  if (customer?.phone) {
+    const byPhone = await searchMember(page, customer.phone);
+    if (byPhone.found) return byPhone.member_id;
+  }
+  return null;
+}
+
+async function detectFormValidationError(page) {
+  const patterns = [
+    /champ.*obligatoire/i,
+    /obligatoire/i,
+    /date.*invalide/i,
+    /email.*invalide/i,
+    /erreur/i,
+    /impossible/i,
+  ];
+  const text = ((await page.locator('body').innerText().catch(() => '')) || '').slice(0, 2000);
+  for (const re of patterns) {
+    if (re.test(text) && /obligatoire|invalide|erreur|impossible/i.test(text)) {
+      const loc = page.locator('text=/obligatoire|invalide|erreur/i').first();
+      if ((await loc.count()) > 0 && (await loc.isVisible().catch(() => false))) {
+        return ((await loc.innerText().catch(() => '')) || '').trim().slice(0, 200);
+      }
+    }
+  }
+  return null;
 }
 
 async function openNewMemberFormViaSelect(page, customer) {
@@ -414,25 +520,12 @@ async function submitMemberForm(page) {
     }
   }
 
-  await page.waitForURL(/check\.php\?idj=\d+|select\.php\?idjnew=\d+|joueurs\.php\?idj=\d+/, {
-    timeout: navTimeout(),
-  }).catch(() => {});
-  await randomDelay();
+  await page.waitForURL(
+    /check\.php\?[^#]*idj=\d+|select\.php\?[^#]*idj(new)?=\d+|joueurs\.php\?[^#]*idj=\d+/,
+    { timeout: navTimeout() }
+  ).catch(() => {});
+  await randomDelay(800, 1500);
   await dismissJqueryUiOverlay(page);
-}
-
-function extractMemberId(page) {
-  const url = page.url();
-  const patterns = [
-    /check\.php\?idj=(\d+)/,
-    /select\.php\?[^#]*idjnew=(\d+)/,
-    /joueurs\.php\?idj=(\d+)/,
-  ];
-  for (const re of patterns) {
-    const m = url.match(re);
-    if (m && m[1] !== 'new') return m[1];
-  }
-  return null;
 }
 
 async function detectDuplicateError(page) {
@@ -480,7 +573,22 @@ async function findOrCreateMember(page, order, gymConfig) {
     return { duplicate: true, message: duplicateMsg };
   }
 
-  const memberId = extractMemberId(page);
+  const validationError = await detectFormValidationError(page);
+  const memberId = await resolveCreatedMemberId(page, customer);
+
+  if (!memberId) {
+    const hint = validationError ? ` — ${validationError}` : '';
+    logWarn('Création membre sans ID récupérable', {
+      order_id: order.order_id,
+      url: page.url(),
+      validation: validationError || null,
+    });
+    throw new Error(
+      `Création membre Deciplus: ID introuvable après Valider${hint}. ` +
+        'Le membre n’apparaît peut-être pas (formulaire non validé).'
+    );
+  }
+
   logInfo('Membre Deciplus créé', { member_id: memberId, order_id: order.order_id });
   return { member_id: memberId, action: 'created' };
 }

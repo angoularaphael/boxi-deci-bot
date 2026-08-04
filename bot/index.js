@@ -104,8 +104,16 @@ async function processSaleJob(page, order) {
     };
   }
 
-  let saleResult = { sale_id: null };
   const memberId = memberResult.member_id;
+  if (!memberId) {
+    return {
+      status: STATUS.MANUAL_REVIEW,
+      error: 'member_id Deciplus manquant après création — membre non visible / non finalisé',
+      member_action: memberResult.action,
+    };
+  }
+
+  let saleResult = { sale_id: null };
 
   const needsIban = productConfig.requires_iban === true;
   const iban = order.payment.iban;
