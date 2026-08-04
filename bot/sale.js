@@ -508,26 +508,29 @@ async function ensurePaiementComptantOff(page, { strict = false } = {}) {
 }
 
 function resolveBadgePrelevementDelayDays(productConfig = {}) {
+  // Défaut : 3 jours ≈ 72h après l'abonnement
   const min = Number(
     productConfig.prelevement_delay_days_min ||
       process.env.BADGE_PRELEVEMENT_DELAY_MIN ||
-      5
+      3
   );
   const max = Number(
     productConfig.prelevement_delay_days_max ||
       process.env.BADGE_PRELEVEMENT_DELAY_MAX ||
-      7
+      3
   );
   const raw = Number(
     productConfig.prelevement_delay_days ||
       process.env.BADGE_PRELEVEMENT_DELAY_DAYS ||
-      max
+      3
   );
-  const delay = Number.isFinite(raw) ? raw : max;
-  return Math.min(max, Math.max(min, delay));
+  const delay = Number.isFinite(raw) ? raw : 3;
+  const lo = Number.isFinite(min) ? min : 3;
+  const hi = Number.isFinite(max) ? Math.max(lo, max) : lo;
+  return Math.min(hi, Math.max(lo, delay));
 }
 
-function badgeContractDates(delayDays = 7) {
+function badgeContractDates(delayDays = 3) {
   const startDate = new Date();
   const endDate = new Date(startDate);
   endDate.setDate(endDate.getDate() + delayDays);
@@ -540,7 +543,7 @@ function badgeContractDates(delayDays = 7) {
   };
 }
 
-function badgeEndDate(delayDays = 7) {
+function badgeEndDate(delayDays = 3) {
   const { endDate, endStr, isoEnd: iso } = badgeContractDates(delayDays);
   return { endDate, endStr, iso };
 }
@@ -697,9 +700,10 @@ function modalShowsImmediateBadgePayment(text) {
   return /Paiement imm[ée]diat/i.test(text) && /34[,.]99/.test(text);
 }
 
-function minBadgePaymentDate(delayDays = 7) {
+function minBadgePaymentDate(delayDays = 3) {
   const d = new Date();
-  d.setDate(d.getDate() + Math.max(5, delayDays - 2));
+  // Tolérance J+(delay-1) pour fuseau / arrondi Deciplus (ex. 72h → à partir de J+2)
+  d.setDate(d.getDate() + Math.max(1, Number(delayDays) - 1));
   d.setHours(0, 0, 0, 0);
   return d;
 }
@@ -1195,7 +1199,7 @@ async function fillBadgeContractDates(page, delayDays = 7) {
         date_debut: startStr,
         date_fin: endStr,
         delay_days: delayDays,
-        window: '5-7 jours',
+        window: `${delayDays * 24}h`,
       });
       return true;
     }
@@ -1629,8 +1633,19 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
     throw new Error('Badge — modale Configuration de Badge introuvable');
   }
 
+  const delayDays = resolveBadgePrelevementDelayDays(productConfig);
+
   await ensurePaiementComptantOff(page, { strict: true });
   await randomDelay(800, 1200);
+
+  // Fixe Valide du / Valide au → Deciplus planifie le SEPA à ~J+delayDays (72h si 3)
+  const datesOk = await fillBadgeDatesInConfigModal(page, delayDays).catch((err) => {
+    logWarn('Badge — saisie dates modale échouée', { error: err.message, delay_days: delayDays });
+    return false;
+  });
+  if (!datesOk) {
+    logWarn('Badge — dates modale non confirmées avant Appliquer', { delay_days: delayDays });
+  }
 
   const clicked = await clickBadgeModalAppliquer(page);
   if (!clicked) {
@@ -1639,13 +1654,28 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   }
 
   await randomDelay(1000, 1500);
-  await handleBadgeModifierDateFinDialog(page);
+
+  // Popup « modifier la date de fin » : pousser l'échéance à J+delayDays
+  let dateFinOk = await configureBadgeDeferredDates(page, delayDays).catch((err) => {
+    logWarn('Badge — ajustement date de fin', { error: err.message });
+    return false;
+  });
+  if (!dateFinOk) {
+    dateFinOk = await handleBadgeModifierDateFinDialog(page);
+  }
+
   await waitForBadgeModalClosed(page);
   await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
   await randomDelay(800, 1200);
 
-  logInfo('Badge — Configuration appliquée (Comptant off → Appliquer → date de fin)', {
-    delay_days: resolveBadgePrelevementDelayDays(productConfig),
+  const deferredOk = await verifyBadgeDeferredSetup(page, delayDays).catch(() => false);
+
+  logInfo('Badge — Configuration appliquée (prélèvement différé ~72h)', {
+    delay_days: delayDays,
+    delay_hours: delayDays * 24,
+    dates_ok: Boolean(datesOk),
+    date_fin_ok: Boolean(dateFinOk),
+    deferred_ok: Boolean(deferredOk),
   });
 }
 
