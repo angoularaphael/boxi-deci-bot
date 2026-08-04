@@ -8,7 +8,8 @@ const { logInfo, logWarn } = require('../lib/logger');
 const { buildInternalNote } = require('../lib/normalize');
 const { openMemberCheck, clickFirst, fillFirst, sel, closeGreyboxIfOpen } = require('./wallet');
 const { cancelSale } = require('./cancel-sale');
-const { ensureDeciplusSaleZone } = require('./deciplus-zone');
+const { ensureDeciplusSaleZone, isChooseZoneScreen } = require('./deciplus-zone');
+const { dismissJqueryUiOverlay } = require('./ui');
 const { buildDeciplusProductSearch, buildSearchTokens, normalizeText } = require('./catalog');
 
 function isBadgeSale(productConfig) {
@@ -228,18 +229,49 @@ async function listVisibleProducts(page) {
   return out;
 }
 
+const PRODUCT_SEARCH_SELECTOR =
+  'input[placeholder*="Rechercher un produit"], input[placeholder*="Rechercher"], input[placeholder*="prestation"], input[placeholder*="Produit"]';
+
+/**
+ * Le catalogue nextgen/vente peut être dans la page ou un iframe.
+ */
+async function resolveVenteCatalogContext(page, { timeoutMs = 25000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const scopes = [page];
+    try {
+      for (const frame of page.frames()) {
+        if (frame !== page.mainFrame()) scopes.push(frame);
+      }
+    } catch {
+      /* frames change during nav */
+    }
+
+    for (const ctx of scopes) {
+      try {
+        const input = ctx.locator(PRODUCT_SEARCH_SELECTOR).first();
+        if ((await input.count()) === 0) continue;
+        if (await input.isVisible().catch(() => false)) return ctx;
+        await input.waitFor({ state: 'visible', timeout: 1500 }).catch(() => {});
+        if (await input.isVisible().catch(() => false)) return ctx;
+      } catch {
+        /* frame detached */
+      }
+    }
+    await page.waitForTimeout(400);
+  }
+  return null;
+}
+
 async function selectProductInCatalog(page, productConfig) {
   const name = productConfig.deciplus_product_name || productConfig.label;
   const searchCandidates = buildSearchCandidates(productConfig);
 
-  const searchInput = page
-    .locator(
-      'input[placeholder*="Rechercher un produit"], input[placeholder*="Rechercher"], input[placeholder*="prestation"]'
-    )
-    .first();
+  const ctx = (await resolveVenteCatalogContext(page, { timeoutMs: 5000 })) || page;
+  const searchInput = ctx.locator(PRODUCT_SEARCH_SELECTOR).first();
   await searchInput.waitFor({ state: 'visible', timeout: 20000 });
 
-  await openProductCategory(page, productConfig);
+  await openProductCategory(ctx, productConfig);
 
   for (const search of searchCandidates) {
     await searchInput.fill('');
@@ -248,7 +280,7 @@ async function selectProductInCatalog(page, productConfig) {
     await searchInput.press('Enter').catch(() => {});
     await randomDelay(1500, 2500);
 
-    if (await clickProductResult(page, productConfig)) {
+    if (await clickProductResult(ctx, productConfig)) {
       await randomDelay();
       logInfo('Produit Deciplus trouvé dans le catalogue UI', { search, name });
       return true;
@@ -257,7 +289,7 @@ async function selectProductInCatalog(page, productConfig) {
     logWarn('Recherche produit Deciplus sans résultat', {
       search,
       name,
-      visible: await listVisibleProducts(page),
+      visible: await listVisibleProducts(ctx),
     });
   }
 
@@ -1684,13 +1716,37 @@ async function togglePaiementComptantOff(page) {
 }
 
 async function openSaleFlow(page, productConfig, gymConfig, saleKind) {
+  await closeGreyboxIfOpen(page);
+  await dismissJqueryUiOverlay(page).catch(() => {});
+
   const buttonKey = saleKind === 'carte' ? 'member_check.achat_carte' : 'member_check.achat_abonnement';
-  await clickFirst(page, sel(buttonKey));
+  const clicked = await clickFirst(page, sel(buttonKey));
+  if (!clicked) {
+    throw new Error(`Bouton vente Deciplus introuvable (${buttonKey}) — url=${page.url()}`);
+  }
+
   await page.waitForURL(/nextgen|vente|choose-zone/, { timeout: 20000 }).catch(() => {});
   await randomDelay(800, 1500);
+
+  // Critical : sans sortir de choose-zone, le champ « Rechercher un produit » n'existe pas
   await ensureDeciplusSaleZone(page, gymConfig);
+
+  if (await isChooseZoneScreen(page)) {
+    throw new Error(
+      `Catalogue vente bloqué sur choose-zone (salle=${gymConfig.deciplus_label || gymConfig.label || '?'}, url=${page.url()})`
+    );
+  }
+
   await page.waitForURL(/vente/, { timeout: 20000 }).catch(() => {});
   await randomDelay(1000, 2000);
+
+  const catalogCtx = await resolveVenteCatalogContext(page, { timeoutMs: 25000 });
+  if (!catalogCtx) {
+    throw new Error(
+      `Catalogue Deciplus (recherche produit) introuvable après ouverture vente — url=${page.url()}`
+    );
+  }
+
   await selectProductInCatalog(page, productConfig);
 }
 
@@ -1777,7 +1833,9 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
   }
 
   await closeGreyboxIfOpen(page);
+  await dismissJqueryUiOverlay(page).catch(() => {});
   await openMemberCheck(page, memberId);
+  await dismissJqueryUiOverlay(page).catch(() => {});
   await annotateMember(page, order, productConfig);
 
   let result;
