@@ -163,7 +163,6 @@ async function navigateToMembers(page) {
     await gotoDeciplus(page, 'select.php').catch(() => {});
   });
   await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await randomDelay();
   await dismissJqueryUiOverlay(page);
 }
@@ -193,7 +192,6 @@ async function searchMember(page, query) {
   }
 
   await page.keyboard.press('Enter').catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
   await randomDelay();
   await dismissJqueryUiOverlay(page);
 
@@ -328,7 +326,6 @@ async function openNewMemberFormViaUrl(page, customer) {
   if (customer.email) params.set('jemail', customer.email);
 
   await gotoDeciplus(page, `joueurs.php?${params}`);
-  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await randomDelay();
   await dismissJqueryUiOverlay(page);
 
@@ -561,13 +558,11 @@ async function submitMemberForm(page) {
     }
   }
 
-  await Promise.race([
-    page.waitForURL(
-      /check\.php|idjnew=\d+|joueurs\.php\?[^#]*idj=\d+|legacy\?path=.*idj/i,
-      { timeout: navTimeout() }
-    ),
-    page.waitForLoadState('networkidle', { timeout: navTimeout() }),
-  ]).catch(() => {});
+  await page.waitForURL(
+    /check\.php|idjnew=\d+|joueurs\.php\?[^#]*idj=\d+|legacy\?path=.*idj/i,
+    { timeout: navTimeout() }
+  ).catch(() => {});
+  await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
   await randomDelay(800, 1500);
   await dismissJqueryUiOverlay(page);
 
@@ -640,6 +635,39 @@ async function findOrCreateMember(page, order, gymConfig) {
   return { member_id: memberId, action: 'created' };
 }
 
+/**
+ * Tentative best-effort d'upload photo membre (input file Deciplus).
+ */
+async function uploadMemberPhoto(page, photoPath) {
+  const fs = require('fs');
+  if (!photoPath || !fs.existsSync(photoPath)) {
+    return { ok: false, reason: 'missing_file' };
+  }
+  const selectors = [
+    'input[type="file"][name*="photo" i]',
+    'input[type="file"][id*="photo" i]',
+    'input[type="file"][name*="image" i]',
+    'input[type="file"][accept*="image"]',
+    '#photo input[type="file"]',
+    'input[type="file"]',
+  ];
+  for (const sel of selectors) {
+    const input = page.locator(sel).first();
+    if ((await input.count()) === 0) continue;
+    const visible = await input.isVisible().catch(() => false);
+    // file inputs are often hidden — still settable
+    try {
+      await input.setInputFiles(photoPath);
+      await randomDelay(300, 600);
+      logInfo('Photo membre envoyée (input file)', { selector: sel });
+      return { ok: true, selector: sel };
+    } catch (err) {
+      logWarn('Échec setInputFiles photo', { selector: sel, error: err.message });
+    }
+  }
+  return { ok: false, reason: 'no_file_input' };
+}
+
 module.exports = {
   navigateToMembers,
   searchMember,
@@ -654,4 +682,5 @@ module.exports = {
   detectDuplicateError,
   phoneForDeciplus,
   resetMemberSearchContext,
+  uploadMemberPhoto,
 };

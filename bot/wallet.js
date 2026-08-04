@@ -356,8 +356,6 @@ async function saveMemberAddressViaUi(page, memberId, addr) {
   if (!updated) {
     await ctx.evaluate(() => document.querySelector('form[name="db1_form"]')?.submit()).catch(() => {});
   }
-
-  await page.waitForLoadState('networkidle', { timeout: 20000 }).catch(() => {});
   await randomDelay(800, 1500);
   await dismissJqueryUiOverlay(page).catch(() => {});
 
@@ -547,8 +545,6 @@ async function submitRibForm(ctx, page) {
       if (form) form.submit();
     });
   }
-
-  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
   await randomDelay(800, 1500);
 }
 

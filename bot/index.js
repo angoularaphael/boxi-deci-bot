@@ -6,7 +6,7 @@ require('dotenv').config();
 
 const { login, isMfaAuthError } = require('./auth');
 const { runWithSession, closeBrowser } = require('./browser-pool');
-const { findOrCreateMember, resetMemberSearchContext } = require('./member');
+const { findOrCreateMember, resetMemberSearchContext, uploadMemberPhoto } = require('./member');
 const { recordSale } = require('./sale');
 const { setMemberIban } = require('./wallet');
 const { isValidFrenchIban } = require('../lib/iban');
@@ -35,6 +35,18 @@ const { maybeKeepSessionAlive, touchKeepAliveClock } = require('./session-keepal
 const MAX_RETRIES = Number(process.env.BOT_MAX_RETRIES || 3);
 const POLL_MS = Number(process.env.BOT_POLL_MS || 5000);
 const CATALOG_PUSH_MS = Number(process.env.BOT_CATALOG_PUSH_MS || 6 * 60 * 60 * 1000);
+const CATALOG_TTL_MS = Number(process.env.BOT_CATALOG_TTL_MS || 10 * 60 * 1000);
+
+let catalogCache = { at: 0, data: null };
+
+async function getCachedCatalog(page) {
+  if (catalogCache.data && Date.now() - catalogCache.at < CATALOG_TTL_MS) {
+    return catalogCache.data;
+  }
+  const data = await fetchDeciplusCatalog(page);
+  catalogCache = { at: Date.now(), data };
+  return data;
+}
 
 async function maybePushCatalog() {
   if (String(process.env.BOT_CATALOG_PUSH_ENABLED || 'true').toLowerCase() === 'false') return;
@@ -68,7 +80,11 @@ async function processCancelJob(_page, order) {
 }
 
 async function processSaleJob(page, order) {
-  const catalog = await fetchDeciplusCatalog(page);
+  const t0 = Date.now();
+  const mark = (label) => logInfo(`Timing bot · ${label}`, { order_id: order.order_id, ms: Date.now() - t0 });
+
+  const catalog = await getCachedCatalog(page);
+  mark('catalog');
   const productConfig = applyBillingPlanToProductConfig(
     resolveProductConfig(order, catalog),
     order
@@ -91,6 +107,7 @@ async function processSaleJob(page, order) {
   }
 
   const memberResult = await findOrCreateMember(page, order, gymConfig);
+  mark('member');
 
   if (memberResult.duplicate) {
     await sendAlert(`Doublon Deciplus — commande ${order.order_id}`, {
@@ -111,6 +128,21 @@ async function processSaleJob(page, order) {
       error: 'member_id Deciplus manquant après création — membre non visible / non finalisé',
       member_action: memberResult.action,
     };
+  }
+
+  let photoResult = null;
+  if (order.photo_path) {
+    photoResult = await uploadMemberPhoto(page, order.photo_path).catch((err) => ({
+      ok: false,
+      reason: err.message,
+    }));
+    mark('photo');
+    if (!photoResult?.ok) {
+      logWarn('Photo non uploadée dans Deciplus', {
+        order_id: order.order_id,
+        reason: photoResult?.reason,
+      });
+    }
   }
 
   let saleResult = { sale_id: null };
@@ -135,6 +167,7 @@ async function processSaleJob(page, order) {
     }
     if (memberId) {
       await setMemberIban(page, memberId, iban, order.customer, gymConfig);
+      mark('iban');
     }
   } else if (iban && memberId) {
     if (!isValidFrenchIban(iban)) {
@@ -145,12 +178,14 @@ async function processSaleJob(page, order) {
       };
     }
     await setMemberIban(page, memberId, iban, order.customer, gymConfig);
+    mark('iban');
   }
 
   if (productConfig.requires_payment !== false && order.payment.status === 'paid') {
     saleResult = await recordSale(page, order, productConfig, memberId, gymConfig, {
       badgeProductConfig,
     });
+    mark('sale');
   } else if (productConfig.sale_type === 'none') {
     saleResult = { action: 'trial_only' };
   }
@@ -162,6 +197,7 @@ async function processSaleJob(page, order) {
     logWarn('Retour select.php après job ignoré', { order_id: order.order_id, error: err.message });
   });
 
+  mark('done');
   return {
     status: finalStatus,
     action: 'sale',
@@ -171,6 +207,7 @@ async function processSaleJob(page, order) {
     sale_action: saleResult.action,
     badge_action: saleResult.badge_action || null,
     badge_error: saleResult.badge_error || null,
+    photo_uploaded: Boolean(photoResult?.ok),
   };
 }
 
