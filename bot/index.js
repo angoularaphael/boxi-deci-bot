@@ -4,8 +4,8 @@
  */
 require('dotenv').config();
 
-const { login, isMfaAuthError } = require('./auth');
-const { runWithSession, closeBrowser } = require('./browser-pool');
+const { login, isMfaAuthError, isSessionRecoverableError } = require('./auth');
+const { runWithSession, closeBrowser, sessionFileChanged } = require('./browser-pool');
 const { findOrCreateMember, resetMemberSearchContext, uploadMemberPhoto } = require('./member');
 const { recordSale } = require('./sale');
 const { setMemberIban } = require('./wallet');
@@ -36,6 +36,7 @@ const MAX_RETRIES = Number(process.env.BOT_MAX_RETRIES || 3);
 const POLL_MS = Number(process.env.BOT_POLL_MS || 5000);
 const CATALOG_PUSH_MS = Number(process.env.BOT_CATALOG_PUSH_MS || 6 * 60 * 60 * 1000);
 const CATALOG_TTL_MS = Number(process.env.BOT_CATALOG_TTL_MS || 10 * 60 * 1000);
+const STALE_PROCESSING_MS = Number(process.env.BOT_STALE_PROCESSING_MS || 15 * 60 * 1000);
 
 let catalogCache = { at: 0, data: null };
 
@@ -79,9 +80,22 @@ async function processCancelJob(_page, order) {
   };
 }
 
-async function processSaleJob(page, order) {
+async function processSaleJob(page, order, jobMeta = {}) {
   const t0 = Date.now();
   const mark = (label) => logInfo(`Timing bot · ${label}`, { order_id: order.order_id, ms: Date.now() - t0 });
+  const filePath = jobMeta.file || null;
+  const checkpoint = jobMeta.checkpoint || order.checkpoint || {};
+
+  const saveCheckpoint = (patch) => {
+    if (!filePath) return;
+    try {
+      const next = { ...(checkpoint || {}), ...patch, at: new Date().toISOString() };
+      Object.assign(checkpoint, next);
+      updateJob(filePath, { checkpoint: next });
+    } catch (err) {
+      logWarn('Checkpoint job non enregistré', { order_id: order.order_id, error: err.message });
+    }
+  };
 
   const catalog = await getCachedCatalog(page);
   mark('catalog');
@@ -109,32 +123,44 @@ async function processSaleJob(page, order) {
     }
   }
 
-  const memberResult = await findOrCreateMember(page, order, gymConfig);
-  mark('member');
+  let memberId = checkpoint.deciplus_member_id || null;
+  let memberResult = {
+    member_id: memberId,
+    action: memberId ? 'checkpoint_resume' : null,
+  };
 
-  if (memberResult.duplicate) {
-    await sendAlert(`Doublon Deciplus — commande ${order.order_id}`, {
-      order_id: order.order_id,
-      message: memberResult.message,
-    });
-    return {
-      status: STATUS.MANUAL_REVIEW,
-      error: memberResult.message,
-      deciplus_member_id: memberResult.member_id || null,
-    };
-  }
-
-  const memberId = memberResult.member_id;
   if (!memberId) {
-    return {
-      status: STATUS.MANUAL_REVIEW,
-      error: 'member_id Deciplus manquant après création — membre non visible / non finalisé',
-      member_action: memberResult.action,
-    };
+    memberResult = await findOrCreateMember(page, order, gymConfig);
+    mark('member');
+
+    if (memberResult.duplicate) {
+      await sendAlert(`Doublon Deciplus — commande ${order.order_id}`, {
+        order_id: order.order_id,
+        message: memberResult.message,
+      });
+      return {
+        status: STATUS.MANUAL_REVIEW,
+        error: memberResult.message,
+        deciplus_member_id: memberResult.member_id || null,
+      };
+    }
+
+    memberId = memberResult.member_id;
+    if (!memberId) {
+      return {
+        status: STATUS.MANUAL_REVIEW,
+        error: 'member_id Deciplus manquant après création — membre non visible / non finalisé',
+        member_action: memberResult.action,
+      };
+    }
+    saveCheckpoint({ step: 'member', deciplus_member_id: memberId });
+  } else {
+    logInfo('Reprise job — membre déjà créé', { order_id: order.order_id, member_id: memberId });
+    mark('member_resume');
   }
 
   let photoResult = null;
-  if (order.photo_path || order.photo_base64) {
+  if (!checkpoint.photo_done && (order.photo_path || order.photo_base64)) {
     photoResult = await uploadMemberPhoto(
       page,
       order.photo_path,
@@ -150,52 +176,76 @@ async function processSaleJob(page, order) {
         order_id: order.order_id,
         reason: photoResult?.reason,
       });
+    } else {
+      saveCheckpoint({ step: 'photo', deciplus_member_id: memberId, photo_done: true });
     }
   }
 
-  let saleResult = { sale_id: null };
+  let saleResult = { sale_id: checkpoint.deciplus_sale_id || null };
 
   const needsIban = productConfig.requires_iban === true;
   const iban = order.payment.iban;
 
-  if (needsIban && productConfig.sale_type !== 'none') {
-    if (!iban) {
-      return {
-        status: STATUS.MANUAL_REVIEW,
-        error: 'IBAN requis pour cette offre',
-        deciplus_member_id: memberId,
-      };
-    }
-    if (!isValidFrenchIban(iban)) {
-      return {
-        status: STATUS.MANUAL_REVIEW,
-        error: 'IBAN français invalide',
-        deciplus_member_id: memberId,
-      };
-    }
-    if (memberId) {
+  if (!checkpoint.iban_done) {
+    if (needsIban && productConfig.sale_type !== 'none') {
+      if (!iban) {
+        return {
+          status: STATUS.MANUAL_REVIEW,
+          error: 'IBAN requis pour cette offre',
+          deciplus_member_id: memberId,
+        };
+      }
+      if (!isValidFrenchIban(iban)) {
+        return {
+          status: STATUS.MANUAL_REVIEW,
+          error: 'IBAN français invalide',
+          deciplus_member_id: memberId,
+        };
+      }
+      if (memberId) {
+        await setMemberIban(page, memberId, iban, order.customer, gymConfig);
+        mark('iban');
+        saveCheckpoint({ step: 'iban', deciplus_member_id: memberId, iban_done: true });
+      }
+    } else if (iban && memberId) {
+      if (!isValidFrenchIban(iban)) {
+        return {
+          status: STATUS.MANUAL_REVIEW,
+          error: 'IBAN français invalide',
+          deciplus_member_id: memberId,
+        };
+      }
       await setMemberIban(page, memberId, iban, order.customer, gymConfig);
       mark('iban');
+      saveCheckpoint({ step: 'iban', deciplus_member_id: memberId, iban_done: true });
     }
-  } else if (iban && memberId) {
-    if (!isValidFrenchIban(iban)) {
-      return {
-        status: STATUS.MANUAL_REVIEW,
-        error: 'IBAN français invalide',
-        deciplus_member_id: memberId,
-      };
-    }
-    await setMemberIban(page, memberId, iban, order.customer, gymConfig);
-    mark('iban');
   }
 
-  if (productConfig.requires_payment !== false && order.payment.status === 'paid') {
+  if (checkpoint.sale_done) {
+    logInfo('Reprise job — vente déjà enregistrée', {
+      order_id: order.order_id,
+      sale_id: checkpoint.deciplus_sale_id || null,
+    });
+    saleResult = {
+      sale_id: checkpoint.deciplus_sale_id || null,
+      action: 'checkpoint_resume',
+      badge_action: checkpoint.badge_action || null,
+    };
+  } else if (productConfig.requires_payment !== false && order.payment.status === 'paid') {
     saleResult = await recordSale(page, order, productConfig, memberId, gymConfig, {
       badgeProductConfig,
     });
     mark('sale');
+    saveCheckpoint({
+      step: 'sale',
+      deciplus_member_id: memberId,
+      sale_done: true,
+      deciplus_sale_id: saleResult.sale_id || null,
+      badge_action: saleResult.badge_action || null,
+    });
   } else if (productConfig.sale_type === 'none') {
     saleResult = { action: 'trial_only' };
+    saveCheckpoint({ step: 'sale', deciplus_member_id: memberId, sale_done: true });
   }
 
   const finalStatus =
@@ -215,7 +265,7 @@ async function processSaleJob(page, order) {
     sale_action: saleResult.action,
     badge_action: saleResult.badge_action || null,
     badge_error: saleResult.badge_error || null,
-    photo_uploaded: Boolean(photoResult?.ok),
+    photo_uploaded: Boolean(photoResult?.ok || checkpoint.photo_done),
   };
 }
 
@@ -235,7 +285,10 @@ async function processJob(page, job) {
     return processCancelJob(page, order);
   }
 
-  return processSaleJob(page, order);
+  return processSaleJob(page, order, {
+    file: job.file,
+    checkpoint: job.checkpoint || {},
+  });
 }
 
 function rejectJob(job, filePath, error) {
@@ -266,7 +319,7 @@ async function processOneJob(job) {
     return { ok: false, rejected: true, error: validationErrors.join(', ') };
   }
 
-  updateJob(filePath, { status: STATUS.PROCESSING, attempts: (job.attempts || 0) + 1 });
+  updateJob(filePath, { status: STATUS.PROCESSING, started_at: new Date().toISOString() });
 
   try {
     if (!order.gym) {
@@ -280,6 +333,11 @@ async function processOneJob(job) {
       gym: order.gym,
       site: siteLabel,
     });
+
+    if (sessionFileChanged()) {
+      logWarn('Session changée avant job — rechargement navigateur');
+      await closeBrowser();
+    }
 
     const outcome = await runWithSession('job', async (page) => {
       await login(page, { siteLabel });
@@ -304,8 +362,11 @@ async function processOneJob(job) {
       return { ok: false, rejected: true, error: err.message };
     }
 
-    const attempts = (job.attempts || 0) + 1;
-    const noRetry = isMfaAuthError(err.message);
+    const sessionErr = isSessionRecoverableError(err.message);
+    const browserGone = /browser has been closed|Target page, context or browser/i.test(err.message);
+    // Session / navigateur : reprendre sans consommer les tentatives MFA
+    const attempts = sessionErr || browserGone ? job.attempts || 0 : (job.attempts || 0) + 1;
+    const noRetry = isMfaAuthError(err.message) && !sessionErr;
     const status = noRetry || attempts >= MAX_RETRIES ? STATUS.MANUAL_REVIEW : STATUS.ERROR;
 
     updateJob(filePath, {
@@ -321,14 +382,20 @@ async function processOneJob(job) {
         action: job.action,
         error: err.message,
       });
-      markProcessed(jobId, { status, error: err.message, action: job.action || 'sale' });
+      markProcessed(jobId, {
+        status,
+        error: err.message,
+        action: job.action || 'sale',
+        deciplus_member_id: job.checkpoint?.deciplus_member_id || null,
+        deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
+      });
       removeJob(filePath);
     }
 
     logError('Erreur traitement job', { job_id: jobId, order_id: job.order_id, error: err.message });
 
-    if (/browser has been closed|Target page, context or browser/i.test(err.message)) {
-      logWarn('Navigateur fermé — session réinitialisée pour le prochain job');
+    if (sessionErr || browserGone) {
+      logWarn('Session / navigateur — reset pour reprendre le job avec la nouvelle session');
       await closeBrowser();
     }
 
@@ -363,6 +430,14 @@ async function runLoop(once = false) {
   if (keepaliveTimer.unref) keepaliveTimer.unref();
 
   do {
+    // Jobs restés « processing » (crash, kill, changement session) → reprise
+    requeueInterruptedJobs(STALE_PROCESSING_MS);
+
+    if (sessionFileChanged()) {
+      logWarn('storage-state.json modifié — fermeture navigateur pour charger la nouvelle session');
+      await closeBrowser();
+    }
+
     const pending = listPending();
     if (pending.length === 0) {
       if (once) break;
@@ -372,7 +447,12 @@ async function runLoop(once = false) {
     }
 
     const job = pending[0];
-    logInfo('Traitement job', { job_id: job.job_id, order_id: job.order_id, action: job.action || 'sale' });
+    logInfo('Traitement job', {
+      job_id: job.job_id,
+      order_id: job.order_id,
+      action: job.action || 'sale',
+      checkpoint: job.checkpoint?.step || null,
+    });
     try {
       await processOneJob(job);
     } catch (err) {

@@ -1,10 +1,12 @@
 /**
  * Une seule session Playwright Deciplus à la fois (évite double connexion).
+ * Recharge le navigateur si storage-state.json change (nouvelle session uploadée).
  */
-const { launchBrowser, saveSession } = require('./auth');
+const { launchBrowser, saveSession, getStorageMtimeMs } = require('./auth');
 const { logInfo, logWarn } = require('../lib/logger');
 
 let session = null;
+let loadedStorageMtimeMs = 0;
 let lock = Promise.resolve();
 
 async function withBrowserLock(owner, fn) {
@@ -24,17 +26,32 @@ async function withBrowserLock(owner, fn) {
   }
 }
 
+function sessionFileChanged() {
+  const disk = getStorageMtimeMs();
+  return disk > 0 && disk > loadedStorageMtimeMs + 50;
+}
+
 async function ensureBrowser() {
   if (session?.browser && session.browser.isConnected()) {
-    return session;
+    if (sessionFileChanged()) {
+      logWarn('Nouveau storage-state détecté — rechargement navigateur (session changée)');
+      await closeBrowser();
+    } else {
+      return session;
+    }
   }
 
   if (session?.browser) {
     await session.browser.close().catch(() => {});
+    session = null;
   }
 
   session = await launchBrowser();
-  logInfo('Session Playwright Deciplus ouverte (unique)');
+  loadedStorageMtimeMs =
+    session.loadedStorageMtimeMs != null ? session.loadedStorageMtimeMs : getStorageMtimeMs();
+  logInfo('Session Playwright Deciplus ouverte (unique)', {
+    storage_mtime: loadedStorageMtimeMs || null,
+  });
   return session;
 }
 
@@ -47,8 +64,13 @@ async function closeBrowser() {
 
 async function runWithSession(owner, fn) {
   return withBrowserLock(owner, async ({ page, context }) => {
+    const mtimeAtStart = loadedStorageMtimeMs;
     const result = await fn(page, context);
-    await saveSession(context);
+    // Si un nouvel export a été déposé pendant le job, ne pas l'écraser
+    const saveResult = await saveSession(context, { loadedMtimeMs: mtimeAtStart });
+    if (!saveResult?.skipped) {
+      loadedStorageMtimeMs = getStorageMtimeMs();
+    }
     return result;
   });
 }
@@ -63,4 +85,5 @@ module.exports = {
   closeBrowser,
   runWithSession,
   hasActiveBrowser,
+  sessionFileChanged,
 };
