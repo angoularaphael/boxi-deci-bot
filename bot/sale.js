@@ -5,7 +5,6 @@
 const path = require('path');
 const { randomDelay, ensureDir, timestamp } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
-const { buildInternalNote } = require('../lib/normalize');
 const { openMemberCheck, clickFirst, fillFirst, sel, closeGreyboxIfOpen } = require('./wallet');
 const { cancelSale } = require('./cancel-sale');
 const { ensureDeciplusSaleZone, isChooseZoneScreen } = require('./deciplus-zone');
@@ -2009,15 +2008,10 @@ async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
 }
 
 async function annotateMember(page, order, productConfig) {
-  const note = [
-    buildInternalNote(order),
-    `Offre: ${productConfig.label}`,
-    `Montant PrestaShop: ${order.payment.amount} €`,
-    `Mode: ${order.payment.method}`,
-  ].join(' | ');
-
-  await fillFirst(page, 'textarea[name="info_compta"]', note);
-  await clickFirst(page, sel('member_detail.update_button'));
+  // Plus d'annotation technique (Source / Produit / Montant / Mode) sur la fiche
+  void page;
+  void order;
+  void productConfig;
 }
 
 async function recordSale(page, order, productConfig, memberId, gymConfig = {}, options = {}) {

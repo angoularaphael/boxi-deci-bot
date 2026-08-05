@@ -1,6 +1,5 @@
 const { randomDelay, loadJson } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
-const { buildInternalNote } = require('../lib/normalize');
 const { gotoDeciplus } = require('./auth');
 const { dismissJqueryUiOverlay } = require('./ui');
 const {
@@ -370,7 +369,6 @@ async function startNewMemberFromSelect(page, customer) {
 
 async function fillMemberForm(page, customer, gymConfig, order) {
   const sel = getSelectors().member_form_selectors || {};
-  const internalNote = buildInternalNote(order);
   const ctx = await getMemberFormContext(page);
   const phone = phoneForDeciplus(customer.phone);
   const lastName = customer.last_name || customer.first_name || 'CLIENT';
@@ -404,9 +402,6 @@ async function fillMemberForm(page, customer, gymConfig, order) {
   if (order.utm?.campaign) {
     await fillFirst(ctx, sel.utm_campaign || 'input[name="utm_campaign"]', order.utm.campaign);
   }
-
-  await fillFirst(ctx, sel.info_compta || 'input[name="info_compta"]', `Commande ${order.order_id}`);
-  await fillFirst(ctx, sel.info_admin || 'textarea[name="info_admin"]', internalNote);
 
   await setMemberZone(ctx, gymConfig);
 }
