@@ -20,6 +20,7 @@ const {
   STATUS,
   getQueueStats,
   requeueInterruptedJobs,
+  finalizeExhaustedJobs,
 } = require('../lib/queue');
 const {
   normalizeOrder,
@@ -387,11 +388,34 @@ function rejectJob(job, filePath, error) {
 async function processOneJob(job) {
   const filePath = job.file;
   const jobId = job.job_id || job.order_id;
+  const priorAttempts = Number(job.attempts || 0);
 
   if (isProcessed(jobId)) {
     removeJob(filePath);
     logWarn('Fichier orphelin supprimé (job déjà traité)', { job_id: jobId });
     return { ok: true, skipped: true };
+  }
+
+  if (priorAttempts >= MAX_RETRIES) {
+    const error =
+      job.last_error && /impossible à traiter/i.test(job.last_error)
+        ? job.last_error
+        : `Job impossible à traiter après ${priorAttempts} tentatives${job.last_error ? ` — ${job.last_error}` : ''}`;
+    markProcessed(jobId, {
+      status: STATUS.MANUAL_REVIEW,
+      error,
+      action: job.action || 'sale',
+      deciplus_member_id: job.checkpoint?.deciplus_member_id || null,
+      deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
+    });
+    removeJob(filePath);
+    logWarn('Job impossible à traiter — stop', { job_id: jobId, attempts: priorAttempts });
+    await sendAlert(`Job impossible à traiter après ${priorAttempts} tentatives — ${jobId}`, {
+      job_id: jobId,
+      order_id: job.order_id,
+      error,
+    });
+    return { ok: false, impossible: true, error };
   }
 
   const order = normalizeOrder(job);
@@ -444,29 +468,31 @@ async function processOneJob(job) {
       return { ok: false, rejected: true, error: err.message };
     }
 
-    const sessionErr = isSessionRecoverableError(err.message);
-    const browserGone = /browser has been closed|Target page, context or browser/i.test(err.message);
-    // Session / navigateur : reprendre sans consommer les tentatives MFA
-    const attempts = sessionErr || browserGone ? job.attempts || 0 : (job.attempts || 0) + 1;
-    const noRetry = isMfaAuthError(err.message) && !sessionErr;
-    const status = noRetry || attempts >= MAX_RETRIES ? STATUS.MANUAL_REVIEW : STATUS.ERROR;
+    // Toute tentative compte (y compris session) — max 3 puis stop
+    const attempts = priorAttempts + 1;
+    const noRetry = isMfaAuthError(err.message);
+    const exhausted = noRetry || attempts >= MAX_RETRIES;
+    const status = exhausted ? STATUS.MANUAL_REVIEW : STATUS.ERROR;
+    const lastError = exhausted
+      ? `Job impossible à traiter après ${attempts} tentatives — ${err.message}`
+      : err.message;
 
     updateJob(filePath, {
       status,
-      last_error: err.message,
+      last_error: lastError,
       attempts,
     });
 
     if (status === STATUS.MANUAL_REVIEW) {
-      await sendAlert(`Échec Deciplus après ${attempts} tentatives — ${jobId}`, {
+      await sendAlert(`Job impossible à traiter après ${attempts} tentatives — ${jobId}`, {
         job_id: jobId,
         order_id: job.order_id,
         action: job.action,
-        error: err.message,
+        error: lastError,
       });
       markProcessed(jobId, {
         status,
-        error: err.message,
+        error: lastError,
         action: job.action || 'sale',
         deciplus_member_id: job.checkpoint?.deciplus_member_id || null,
         deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
@@ -474,14 +500,16 @@ async function processOneJob(job) {
       removeJob(filePath);
     }
 
-    logError('Erreur traitement job', { job_id: jobId, order_id: job.order_id, error: err.message });
+    logError('Erreur traitement job', { job_id: jobId, order_id: job.order_id, error: lastError });
 
+    const sessionErr = isSessionRecoverableError(err.message);
+    const browserGone = /browser has been closed|Target page, context or browser/i.test(err.message);
     if (sessionErr || browserGone) {
       logWarn('Session / navigateur — reset pour reprendre le job avec la nouvelle session');
       await closeBrowser();
     }
 
-    return { ok: false, error: err.message };
+    return { ok: false, error: lastError, impossible: exhausted };
   }
 }
 
@@ -494,6 +522,11 @@ async function runLoop(once = false) {
   });
   if (recovered) {
     logInfo('Jobs non terminés repris au démarrage', { count: recovered });
+  }
+
+  const exhausted = finalizeExhaustedJobs(MAX_RETRIES);
+  if (exhausted) {
+    logWarn('Jobs impossibles à traiter finalisés', { count: exhausted });
   }
 
   logInfo('Bot Deciplus démarré', getQueueStats());

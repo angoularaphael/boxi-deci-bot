@@ -171,18 +171,34 @@ async function resetMemberSearchContext(page) {
   await navigateToMembers(page);
 }
 
+async function clearMemberSearchFields(page) {
+  for (const field of ['#i_nom', '#i_prenom', '#i_email', '#i_tel', '#i_code']) {
+    const el = page.locator(field).first();
+    if ((await el.count()) > 0) await el.fill('').catch(() => {});
+  }
+}
+
+async function readSearchHit(page) {
+  const fromUrl = extractMemberIdFromUrl(page.url());
+  if (fromUrl) {
+    logInfo('Membre Deciplus trouvé', { member_id: fromUrl });
+    return { found: true, member_id: fromUrl };
+  }
+  const fromLink = await clickFirstMemberResult(page);
+  if (fromLink) {
+    logInfo('Membre Deciplus trouvé (liste)', { member_id: fromLink });
+    return { found: true, member_id: fromLink };
+  }
+  return { found: false };
+}
+
 async function searchMember(page, query) {
   if (!query) return { found: false };
   logInfo('Recherche membre Deciplus', { query: query.includes('@') ? query : '***phone***' });
 
   const sel = getSelectors();
   await navigateToMembers(page);
-
-  // Reset champs pour éviter un filtre résiduel (ex. nom "bora")
-  for (const field of ['#i_nom', '#i_prenom', '#i_email', '#i_tel', '#i_code']) {
-    const el = page.locator(field).first();
-    if ((await el.count()) > 0) await el.fill('').catch(() => {});
-  }
+  await clearMemberSearchFields(page);
 
   if (query.includes('@')) {
     await fillFirst(page, sel.quick_search_selectors?.email || '#i_email', query);
@@ -191,23 +207,34 @@ async function searchMember(page, query) {
   }
 
   await page.keyboard.press('Enter').catch(() => {});
-  await randomDelay();
+  await randomDelay(600, 1200);
   await dismissJqueryUiOverlay(page);
 
-  const fromUrl = extractMemberIdFromUrl(page.url());
-  if (fromUrl) {
-    logInfo('Membre Deciplus trouvé', { member_id: fromUrl });
-    return { found: true, member_id: fromUrl };
+  const hit = await readSearchHit(page);
+  if (!hit.found) {
+    logInfo('Membre Deciplus introuvable', { via: query.includes('@') ? 'email' : 'phone' });
   }
+  return hit;
+}
 
-  const fromLink = await clickFirstMemberResult(page);
-  if (fromLink) {
-    logInfo('Membre Deciplus trouvé (liste)', { member_id: fromLink });
-    return { found: true, member_id: fromLink };
-  }
+async function searchMemberByName(page, lastName, firstName) {
+  if (!lastName && !firstName) return { found: false };
+  logInfo('Recherche membre Deciplus', { via: 'name', last_name: lastName || null });
 
-  logInfo('Membre Deciplus introuvable', { via: query.includes('@') ? 'email' : 'phone' });
-  return { found: false };
+  const sel = getSelectors();
+  await navigateToMembers(page);
+  await clearMemberSearchFields(page);
+
+  if (lastName) await fillFirst(page, sel.quick_search_selectors?.nom || '#i_nom', lastName);
+  if (firstName) await fillFirst(page, sel.quick_search_selectors?.prenom || '#i_prenom', firstName);
+
+  await page.keyboard.press('Enter').catch(() => {});
+  await randomDelay(600, 1200);
+  await dismissJqueryUiOverlay(page);
+
+  const hit = await readSearchHit(page);
+  if (!hit.found) logInfo('Membre Deciplus introuvable', { via: 'name' });
+  return hit;
 }
 
 function normalizePerson(value) {
@@ -307,10 +334,13 @@ async function extractMemberId(page) {
 }
 
 async function resolveCreatedMemberId(page, customer) {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
     const id = await extractMemberId(page);
     if (id) return id;
-    await page.waitForTimeout(800);
+    // Parfois Deciplus redirige via check.php?idjnew= puis select.php
+    const urlId = extractMemberIdFromUrl(page.url());
+    if (urlId) return urlId;
+    await page.waitForTimeout(700);
   }
 
   if (customer?.email) {
@@ -320,6 +350,10 @@ async function resolveCreatedMemberId(page, customer) {
   if (customer?.phone) {
     const byPhone = await searchMember(page, customer.phone);
     if (byPhone.found) return byPhone.member_id;
+  }
+  if (customer?.last_name || customer?.first_name) {
+    const byName = await searchMemberByName(page, customer.last_name, customer.first_name);
+    if (byName.found) return byName.member_id;
   }
   return null;
 }
@@ -550,6 +584,19 @@ async function prepareMemberFormSubmit(ctx, isNew) {
   }, { createMode: isNew });
 }
 
+async function clickValidateButton(ctx, selectors, opts = {}) {
+  const list = String(selectors).split(',').map((s) => s.trim()).filter(Boolean);
+  for (const sel of list) {
+    const el = ctx.locator(sel).first();
+    if ((await el.count()) === 0) continue;
+    if (!(await el.isVisible().catch(() => false))) continue;
+    await el.click(opts);
+    await randomDelay(200, 400);
+    return true;
+  }
+  return false;
+}
+
 async function submitMemberForm(page) {
   const cfg = getSelectors();
   const ctx = await getMemberFormContext(page);
@@ -582,7 +629,12 @@ async function submitMemberForm(page) {
     .join(', ');
 
   const submitSelectors = isNew ? validateSelectors : `${updateSelectors}, ${validateSelectors}`;
-  let clicked = await clickFirst(ctx, submitSelectors, { force: true });
+
+  const navPromise = page
+    .waitForNavigation({ waitUntil: 'domcontentloaded', timeout: navTimeout() })
+    .catch(() => null);
+
+  let clicked = await clickValidateButton(ctx, submitSelectors, { force: true });
 
   if (!clicked && isNew) {
     // Repli : forcer le submit HTML avec alde_submit=valider
@@ -593,6 +645,8 @@ async function submitMemberForm(page) {
       if (aldeSubmit) aldeSubmit.value = 'valider';
       const demandeMaj = form.querySelector('input[name="demande_maj"]');
       if (demandeMaj) demandeMaj.value = '0';
+      const aldeMode = form.querySelector('input[name="alde_mode"]');
+      if (aldeMode) aldeMode.value = 'new';
       form.submit();
       return true;
     }).catch(() => false);
@@ -602,23 +656,51 @@ async function submitMemberForm(page) {
     const form = ctx.locator('form[name="db1_form"]').first();
     if ((await form.count()) > 0) {
       await prepareMemberFormSubmit(ctx, isNew);
-      await form.evaluate((f) => f.submit());
+      await form.evaluate((f) => {
+        const aldeSubmit = f.querySelector('input[name="alde_submit"]');
+        if (aldeSubmit) aldeSubmit.value = 'valider';
+        f.submit();
+      });
       clicked = true;
     } else {
       throw new Error(`Bouton Valider membre introuvable (${page.url()})`);
     }
   }
 
-  await page.waitForURL(
-    /check\.php|idjnew=\d+|joueurs\.php\?[^#]*idj=\d+|legacy\?path=.*idj/i,
-    { timeout: navTimeout() }
-  ).catch(() => {});
+  await navPromise;
+  await page
+    .waitForURL(
+      /check\.php|idjnew=\d+|joueurs\.php\?[^#]*idj=\d+|select\.php|legacy\?path=/i,
+      { timeout: 20000 }
+    )
+    .catch(() => {});
   await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
   await randomDelay(800, 1500);
   await dismissJqueryUiOverlay(page);
 
+  // Dialogue confirmation éventuel après Valider
+  const confirmBtn = page
+    .locator(
+      '.ui-dialog-buttonpane button:has-text("OK"), .ui-dialog-buttonpane button:has-text("Valider"), .ui-dialog-buttonpane button:has-text("Oui")'
+    )
+    .first();
+  if ((await confirmBtn.count()) > 0 && (await confirmBtn.isVisible().catch(() => false))) {
+    await confirmBtn.click().catch(() => {});
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+    await randomDelay(500, 900);
+    await dismissJqueryUiOverlay(page);
+  }
+
   const afterUrl = page.url();
   logInfo('Après soumission membre', { url: afterUrl, member_id: extractMemberIdFromUrl(afterUrl) });
+
+  // Toujours sur le formulaire new → validation probablement échouée
+  if (isNewMemberUrl(afterUrl) || /idj=new/i.test(afterUrl)) {
+    const validationError = await detectFormValidationError(page);
+    if (validationError) {
+      throw new Error(`Création membre Deciplus refusée: ${validationError}`);
+    }
+  }
 }
 
 async function detectDuplicateError(page) {
@@ -671,10 +753,14 @@ async function findOrCreateMember(page, order, gymConfig) {
 
   if (!memberId) {
     const hint = validationError ? ` — ${validationError}` : '';
+    const bodySnippet = ((await page.locator('body').innerText().catch(() => '')) || '')
+      .replace(/\s+/g, ' ')
+      .slice(0, 240);
     logWarn('Création membre sans ID récupérable', {
       order_id: order.order_id,
       url: page.url(),
       validation: validationError || null,
+      snippet: bodySnippet || null,
     });
     throw new Error(
       `Création membre Deciplus: ID introuvable après Valider${hint}. ` +
