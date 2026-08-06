@@ -399,6 +399,19 @@ async function badgeDomEvaluate(ctx, operation, value = null) {
         return !sw.classList.contains('is-checked');
       }
 
+      function turnOnElSwitch(sw) {
+        if (!sw) return false;
+        if (sw.classList.contains('is-checked')) return true;
+        const core = sw.querySelector('.el-switch__core');
+        if (core) core.click();
+        else {
+          const input = sw.querySelector('input.el-switch__input, input[role="switch"]');
+          if (input) input.click();
+          else sw.click();
+        }
+        return sw.classList.contains('is-checked');
+      }
+
       function findBadgeDateInputs() {
         const editors = deepQueryAll(
           document.body,
@@ -449,6 +462,7 @@ async function badgeDomEvaluate(ctx, operation, value = null) {
 
       if (op === 'readText') return deepText(document.body).replace(/\s+/g, ' ');
       if (op === 'turnOffComptant') return turnOffElSwitch(findPaiementComptantSwitch());
+      if (op === 'turnOnComptant') return turnOnElSwitch(findPaiementComptantSwitch());
       if (op === 'isComptantOn') {
         const sw = findPaiementComptantSwitch();
         return Boolean(sw && sw.classList.contains('is-checked'));
@@ -564,9 +578,30 @@ async function clickPaiementComptantToggleOff(scope) {
   return badgeDomEvaluate(scope, 'turnOffComptant');
 }
 
+async function clickPaiementComptantToggleOn(scope) {
+  if (typeof scope.evaluate !== 'function') return false;
+  return badgeDomEvaluate(scope, 'turnOnComptant');
+}
+
 async function isElSwitchComptantOn(page) {
   const ctx = await resolveDeciplusWorkPage(page);
   return badgeDomEvaluate(ctx, 'isComptantOn');
+}
+
+async function ensurePaiementComptantOn(page, { strict = false } = {}) {
+  const ctx = await resolveDeciplusWorkPage(page);
+  for (let pass = 0; pass < 5; pass += 1) {
+    await clickPaiementComptantToggleOn(ctx);
+    await randomDelay(400, 700);
+    if (await isElSwitchComptantOn(page)) {
+      logInfo('Paiement Comptant — activé (el-switch)');
+      return true;
+    }
+  }
+  const msg = 'Paiement Comptant non activé';
+  if (strict) throw new Error(msg);
+  logWarn(msg);
+  return false;
 }
 
 async function ensurePaiementComptantOff(page, { strict = false } = {}) {
@@ -1714,16 +1749,34 @@ async function waitForModifierDateFinPopup(page, validityDays = 30, { attempts =
   return false;
 }
 
-async function dismissPostApplyDialogs(page) {
-  await clickFirst(page, sel('sale_config_modal.ignorer_continuer'));
-  await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
+async function dismissPostApplyDialogs(page, { allowRib = false } = {}) {
+  await handleBadgeModifierDateFinDialog(page).catch(() => false);
+  await clickFirst(page, sel('sale_config_modal.ignorer_continuer')).catch(() => {});
+  if (allowRib) {
+    await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
+  }
   await randomDelay(400, 700);
 }
 
 async function finalizeBadgePayment(page) {
+  await dismissPostApplyDialogs(page, { allowRib: false });
+  await randomDelay(600, 1000);
+
+  // Après Appliquer différé, Deciplus peut exiger un mode de paiement avant Clôturer
+  await clickFirst(page, sel('payment_finalize.virement')).catch(() => {});
+  await randomDelay(400, 700);
+
   let clotured = await clickVenteFooterAction(page, /Cl[ôo]turer(\s+la\s+note)?/i);
   if (!clotured) {
     clotured = await clickFirst(page, sel('payment_finalize.cloturer'));
+  }
+  if (!clotured) {
+    // Repli : bouton visible dans footer / barre
+    clotured = await clickFirst(
+      page,
+      'button:has-text("Clôturer"), button:has-text("Cloturer"), input[value*="Clôturer"], input[value*="Cloturer"]',
+      { force: true }
+    );
   }
   if (!clotured) {
     throw new Error('Badge — « Clôturer la note » introuvable');
@@ -1862,8 +1915,9 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   }
 
   await waitForBadgeModalClosed(page);
-  await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
-  await randomDelay(800, 1200);
+  // Ne jamais ouvrir « Saisir le RIB » sur le badge différé — bloque Clôturer
+  await dismissPostApplyDialogs(page, { allowRib: false });
+  await randomDelay(600, 1000);
 
   const deferredOk = immediate
     ? true
@@ -1958,17 +2012,24 @@ async function applyConfigModal(page, productConfig, memberId = null) {
     .waitFor({ state: 'visible', timeout: 15000 })
     .catch(() => {});
 
-  if (productConfig.paiement_comptant === false) {
+  if (productConfig.paiement_comptant === true) {
+    // Offre déjà payée Stripe : laisser / forcer Paiement Comptant ON, pas de RIB
+    await ensurePaiementComptantOn(page, { strict: false });
+  } else if (productConfig.paiement_comptant === false) {
     await ensurePaiementComptantOff(page);
   }
 
-  if (productConfig.requires_iban && !productConfig.skip_rib_prompt) {
+  if (
+    productConfig.requires_iban &&
+    !productConfig.skip_rib_prompt &&
+    productConfig.paiement_comptant !== true
+  ) {
     await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
   }
 
   await clickFirst(page, sel('sale_config_modal.appliquer'));
   await randomDelay(600, 1000);
-  await clickFirst(page, sel('sale_config_modal.ignorer_continuer'));
+  await clickFirst(page, sel('sale_config_modal.ignorer_continuer')).catch(() => {});
 }
 
 async function finalizePayment(page, productConfig) {
@@ -1977,6 +2038,15 @@ async function finalizePayment(page, productConfig) {
 
   if (badge) {
     await finalizeBadgePayment(page);
+    return;
+  }
+
+  // Comptant Stripe : Deciplus est déjà soldé via Paiement Comptant — Clôturer / Terminer
+  if (productConfig.paiement_comptant === true) {
+    await clickFirst(page, sel('payment_finalize.cloturer')).catch(() => {});
+    await randomDelay(600, 1000);
+    await clickFirst(page, sel('payment_finalize.terminer')).catch(() => {});
+    logInfo('Paiement finalisé Deciplus', { mode: 'comptant', badge_differe: false });
     return;
   }
 

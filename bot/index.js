@@ -8,7 +8,7 @@ const { login, isMfaAuthError, isSessionRecoverableError } = require('./auth');
 const { runWithSession, closeBrowser, sessionFileChanged } = require('./browser-pool');
 const { findOrCreateMember, resetMemberSearchContext, uploadMemberPhoto } = require('./member');
 const { recordSale } = require('./sale');
-const { setMemberIban } = require('./wallet');
+const { setMemberIban, openMemberCheck } = require('./wallet');
 const { isValidFrenchIban } = require('../lib/iban');
 const {
   listPending,
@@ -234,6 +234,10 @@ async function processSaleJob(page, order, jobMeta = {}) {
 
   let photoResult = null;
   if (!checkpoint.photo_done && (order.photo_path || order.photo_base64)) {
+    // Revenir sur la fiche membre pour token staff + affichage photo
+    if (memberId) {
+      await openMemberCheck(page, memberId).catch(() => {});
+    }
     photoResult = await uploadMemberPhoto(
       page,
       order.photo_path,
@@ -248,15 +252,20 @@ async function processSaleJob(page, order, jobMeta = {}) {
       logWarn('Photo non uploadée dans Deciplus', {
         order_id: order.order_id,
         reason: photoResult?.reason,
+        body: photoResult?.body,
       });
     } else {
       saveCheckpoint({ step: 'photo', deciplus_member_id: memberId, photo_done: true });
+      if (memberId) {
+        await openMemberCheck(page, memberId).catch(() => {});
+      }
     }
   }
 
   let saleResult = { sale_id: checkpoint.deciplus_sale_id || null };
 
-  const needsIban = productConfig.requires_iban === true;
+  const needsIban =
+    productConfig.requires_iban === true && productConfig.paiement_comptant !== true;
   const iban = order.payment.iban;
 
   if (!checkpoint.iban_done) {

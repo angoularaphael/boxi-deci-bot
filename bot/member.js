@@ -778,17 +778,43 @@ async function uploadMemberPhotoViaApi(page, memberId, dataUrl) {
       'x-access-token': token,
       'Deciplus-Client-Type': 'manager',
       'Content-Type': 'application/json',
+      Accept: 'application/json, text/plain, */*',
     },
     data: { photo: normalized },
   });
   const status = res.status();
   const text = await res.text().catch(() => '');
-  if (status >= 200 && status < 300) {
-    logInfo('Photo membre uploadée (API Deciplus)', { member_id: memberId, status });
-    return { ok: true, via: 'api', status };
+  if (status < 200 || status >= 300) {
+    logWarn('Échec upload photo API', { member_id: memberId, status, body: String(text).slice(0, 200) });
+    return { ok: false, reason: `api_${status}`, body: String(text).slice(0, 200) };
   }
-  logWarn('Échec upload photo API', { member_id: memberId, status, body: String(text).slice(0, 200) });
-  return { ok: false, reason: `api_${status}`, body: String(text).slice(0, 200) };
+
+  // Vérifier que Deciplus a bien stocké la photo
+  const check = await page.context().request.get(
+    `https://api.deciplus.pro/staff/v1/member/${memberId}`,
+    {
+      headers: {
+        'x-access-token': token,
+        'Deciplus-Client-Type': 'manager',
+        Accept: 'application/json',
+      },
+    }
+  );
+  let hasPhoto = false;
+  try {
+    const body = await check.json();
+    hasPhoto = Boolean(
+      body?.photo || body?.member?.photo || body?.data?.photo || body?.picture || body?.avatar
+    );
+  } catch {
+    hasPhoto = check.ok();
+  }
+  logInfo('Photo membre uploadée (API Deciplus)', {
+    member_id: memberId,
+    status,
+    verified: hasPhoto,
+  });
+  return { ok: true, via: 'api', status, verified: hasPhoto };
 }
 
 /** Repli legacy : Greybox photo_upload.php via bouton openUpload. */
