@@ -32,6 +32,31 @@ const { logInfo, logError, logWarn, sendAlert } = require('../lib/logger');
 const { sleep } = require('../lib/utils');
 const { maybeKeepSessionAlive, touchKeepAliveClock } = require('./session-keepalive');
 
+async function notifyBoutiqueNewMember(order, memberId) {
+  const base = (process.env.BOXPLUS_STORE_URL || process.env.STORE_URL || '').replace(/\/$/, '');
+  const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+  if (!base || !secret) return;
+  const res = await fetch(`${base}/api/internal/new-member-alert`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-sync-secret': secret,
+    },
+    body: JSON.stringify({
+      order_id: order.order_id,
+      member_id: memberId,
+      email: order.customer?.email || order.email,
+      first_name: order.customer?.first_name,
+      last_name: order.customer?.last_name,
+      gym: order.gym,
+      product_name: order.product_name,
+    }),
+  });
+  if (!res.ok) {
+    logWarn('Alerte nouveau membre boutique échouée', { status: res.status });
+  }
+}
+
 const MAX_RETRIES = Number(process.env.BOT_MAX_RETRIES || 3);
 const POLL_MS = Number(process.env.BOT_POLL_MS || 5000);
 const CATALOG_PUSH_MS = Number(process.env.BOT_CATALOG_PUSH_MS || 6 * 60 * 60 * 1000);
@@ -66,17 +91,54 @@ async function maybePushCatalog() {
   }
 }
 
-async function processCancelJob(_page, order) {
-  logWarn('Annulation / résiliation — traitement manuel dans Deciplus', {
-    order_id: order.order_id,
-    cancel_reason: order.cancel_reason,
-  });
+async function processCancelJob(page, order) {
+  const { cancelSale } = require('./cancel-sale');
+  const { findMemberByIdentity, searchMember } = require('./member');
+
+  let memberId = order.deciplus_member_id || null;
+  if (!memberId && (order.customer?.first_name || order.first_name)) {
+    const match = await findMemberByIdentity(page, {
+      first_name: order.customer?.first_name || order.first_name,
+      last_name: order.customer?.last_name || order.last_name,
+      birthdate: order.customer?.birthdate || order.birthdate,
+      phone: order.customer?.phone || order.phone,
+      email: order.customer?.email || order.email,
+    });
+    if (!match.found) {
+      return {
+        status: STATUS.MANUAL_REVIEW,
+        action: 'cancel',
+        error:
+          'Nous n\'avons pas pu trouver d\'abonnement correspondant à ces informations (nom, prénom, date de naissance, téléphone).',
+        cancel_reason: order.cancel_reason,
+      };
+    }
+    memberId = match.member_id;
+  }
+  if (!memberId && (order.customer?.email || order.email)) {
+    const byEmail = await searchMember(page, order.customer?.email || order.email);
+    if (byEmail.found) memberId = byEmail.member_id;
+  }
+  if (!memberId && (order.customer?.phone || order.phone)) {
+    const byPhone = await searchMember(page, order.customer?.phone || order.phone);
+    if (byPhone.found) memberId = byPhone.member_id;
+  }
+  if (!memberId) {
+    return {
+      status: STATUS.MANUAL_REVIEW,
+      action: 'cancel',
+      error: 'Membre Deciplus introuvable pour la résiliation',
+      cancel_reason: order.cancel_reason,
+    };
+  }
+
+  const result = await cancelSale(page, memberId);
   return {
-    status: STATUS.MANUAL_REVIEW,
+    status: STATUS.SUCCESS,
     action: 'cancel',
-    error: 'Annulation ou résiliation : effectuer manuellement dans Deciplus',
-    deciplus_member_id: order.deciplus_member_id || getProcessedRecord(order.order_id)?.deciplus_member_id || null,
+    deciplus_member_id: memberId,
     cancel_reason: order.cancel_reason,
+    ...result,
   };
 }
 
@@ -154,6 +216,17 @@ async function processSaleJob(page, order, jobMeta = {}) {
       };
     }
     saveCheckpoint({ step: 'member', deciplus_member_id: memberId });
+    if (memberResult.action === 'created') {
+      await sendAlert(`Nouveau membre Deciplus créé — ${order.order_id}`, {
+        order_id: order.order_id,
+        member_id: memberId,
+        email: order.customer?.email || order.email,
+        name: `${order.customer?.first_name || ''} ${order.customer?.last_name || ''}`.trim(),
+        gym: order.gym,
+        type: 'new_member',
+      }).catch(() => {});
+      await notifyBoutiqueNewMember(order, memberId).catch(() => {});
+    }
   } else {
     logInfo('Reprise job — membre déjà créé', { order_id: order.order_id, member_id: memberId });
     mark('member_resume');
@@ -407,9 +480,11 @@ async function runLoop(once = false) {
   const { startBotServer } = require('./server');
   startBotServer();
 
-  const recovered = requeueInterruptedJobs(Number(process.env.BOT_REQUEUE_MS || 0));
+  const recovered = requeueInterruptedJobs(Number(process.env.BOT_REQUEUE_MS || 0), {
+    includeSessionErrors: true,
+  });
   if (recovered) {
-    logInfo('Jobs interrompus remis en file', { count: recovered });
+    logInfo('Jobs non terminés repris au démarrage', { count: recovered });
   }
 
   logInfo('Bot Deciplus démarré', getQueueStats());

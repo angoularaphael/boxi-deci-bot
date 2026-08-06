@@ -66,13 +66,19 @@ async function runWithSession(owner, fn) {
   return withBrowserLock(owner, async ({ page, context }) => {
     const mtimeAtStart = loadedStorageMtimeMs;
     const result = await fn(page, context);
-    // Si un nouvel export a été déposé pendant le job, ne pas l'écraser
     const saveResult = await saveSession(context, { loadedMtimeMs: mtimeAtStart });
-    if (!saveResult?.skipped) {
-      loadedStorageMtimeMs = getStorageMtimeMs();
-    }
+    // Toujours aligner l’horloge locale (y compris skip) pour éviter la boucle
+    // « storage-state modifié → fermeture navigateur ».
+    loadedStorageMtimeMs =
+      saveResult?.mtimeMs != null ? saveResult.mtimeMs : getStorageMtimeMs();
     return result;
   });
+}
+
+/** Marque le mtime courant comme déjà chargé (après reload externe volontaire). */
+function syncLoadedStorageMtime() {
+  loadedStorageMtimeMs = getStorageMtimeMs();
+  return loadedStorageMtimeMs;
 }
 
 function hasActiveBrowser() {
@@ -86,4 +92,5 @@ module.exports = {
   runWithSession,
   hasActiveBrowser,
   sessionFileChanged,
+  syncLoadedStorageMtime,
 };

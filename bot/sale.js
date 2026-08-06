@@ -638,27 +638,35 @@ function resolveBadgePrelevementDelayDays(productConfig = {}) {
   return Math.min(hi, Math.max(lo, delay));
 }
 
-/** Validité contrat Badge Deciplus = 1 mois (pas la fenêtre de prélèvement ~72h). */
-function resolveBadgeValidityDays(productConfig = {}) {
+/** Validité badge : date de paiement (J+72h) + 3 jours (pas 1 mois). */
+function resolveBadgeValidityExtraDays(productConfig = {}) {
   const raw = Number(
-    productConfig.badge_validity_days ||
-      process.env.BADGE_VALIDITY_DAYS ||
-      30
+    productConfig.badge_validity_extra_days ||
+      process.env.BADGE_VALIDITY_EXTRA_DAYS ||
+      3
   );
-  return Number.isFinite(raw) && raw > 0 ? raw : 30;
+  return Number.isFinite(raw) && raw >= 0 ? raw : 3;
 }
 
-function badgeValidityDates(validityDays = 30) {
+function badgeScheduleDates(delayDays = 3, extraDays = 3) {
   const startDate = new Date();
-  const endDate = new Date(startDate);
-  endDate.setDate(endDate.getDate() + validityDays);
+  const payDate = new Date(startDate);
+  payDate.setDate(payDate.getDate() + delayDays);
+  const endDate = new Date(payDate);
+  endDate.setDate(endDate.getDate() + extraDays);
   return {
     startDate,
+    payDate,
     endDate,
     startStr: formatFrDate(startDate),
+    payStr: formatFrDate(payDate),
     endStr: formatFrDate(endDate),
-    isoEnd: endDate.toISOString().slice(0, 10),
   };
+}
+
+/** @deprecated — utiliser badgeScheduleDates (fin = paiement + 3j). */
+function badgeValidityDates(validityDays = 6) {
+  return badgeScheduleDates(3, Math.max(0, validityDays - 3));
 }
 
 function badgePaymentDateParts(delayDays = 3) {
@@ -667,17 +675,14 @@ function badgePaymentDateParts(delayDays = 3) {
   return { date, str: formatFrDate(date) };
 }
 
-/** @deprecated préférer badgeValidityDates + badgePaymentDateParts */
+/** @deprecated préférer badgeScheduleDates */
 function badgeContractDates(delayDays = 3) {
-  // Historique : confondait fin de validité et date de paiement.
-  // Conservé pour appels legacy → validité 1 mois + paiement J+delay exposé via endStr paiement? Non.
-  // On expose la VALIDITÉ 1 mois ; le paiement se calcule à part.
-  return badgeValidityDates(resolveBadgeValidityDays());
+  return badgeScheduleDates(delayDays, 3);
 }
 
-function badgeEndDate(validityDays = 30) {
-  const { endDate, endStr, isoEnd: iso } = badgeValidityDates(validityDays);
-  return { endDate, endStr, iso };
+function badgeEndDate(extraDays = 3) {
+  const { endDate, endStr } = badgeScheduleDates(3, extraDays);
+  return { endDate, endStr, iso: endDate.toISOString().slice(0, 10) };
 }
 
 function parseFrDate(str) {
@@ -1656,12 +1661,11 @@ async function verifyBadgeDeferredSetup(page, delayDays = 7) {
   return verifyVentePageBadgeDeferred(page, delayDays);
 }
 
-async function fillBadgeDatesInConfigModal(page, delayDays = 3, validityDays = 30) {
+async function fillBadgeDatesInConfigModal(page, delayDays = 3, extraDays = 3) {
   await waitForBadgeConfigModal(page, 15000);
 
   const ctx = await resolveDeciplusWorkPage(page);
-  const { startStr, endStr } = badgeValidityDates(validityDays);
-  const payStr = badgePaymentDateParts(delayDays).str;
+  const { startStr, endStr, payStr } = badgeScheduleDates(delayDays, extraDays);
 
   await badgeDomEvaluate(ctx, 'fillDu', startStr);
   let filledAu = await badgeDomEvaluate(ctx, 'fillAu', endStr);
@@ -1778,12 +1782,13 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   }
 
   const delayDays = resolveBadgePrelevementDelayDays(productConfig);
-  const validityDays = resolveBadgeValidityDays(productConfig);
+  const extraDays = resolveBadgeValidityExtraDays(productConfig);
   const timing = String(productConfig.badge_timing || 'deferred').toLowerCase();
   const immediate = timing === 'immediate' || productConfig.paiement_comptant === true;
-  const { startStr, endStr } = badgeValidityDates(validityDays);
-  // Paiement ~72h ≠ fin de validité (1 mois)
-  const payStr = immediate ? startStr : badgePaymentDateParts(delayDays).str;
+  const schedule = badgeScheduleDates(delayDays, extraDays);
+  const startStr = schedule.startStr;
+  const endStr = schedule.endStr;
+  const payStr = immediate ? startStr : schedule.payStr;
 
   if (immediate) {
     logInfo('Badge — paiement immédiat (Comptant)', {
@@ -1824,20 +1829,10 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   let payDateOk = false;
 
   if (!immediate) {
-    // Validité 1 mois si Deciplus ouvre le panneau Modifier — PAS J+3
-    dateFinOk = await configureBadgeDeferredDates(page, validityDays).catch((err) => {
-      logWarn('Badge — ajustement validité', { error: err.message });
-      return false;
-    });
-    if (!dateFinOk) {
-      dateFinOk = await handleBadgeModifierDateFinDialog(page);
-    }
-
-    // Forcer Date de paiement = J+3 (défaut Deciplus = souvent fin de mois / 5 du mois suivant)
     for (let attempt = 0; attempt < 4; attempt += 1) {
-      const text = (await readBadgeConfigModalText(page).catch(() => '')) || '';
+      const textModal = (await readBadgeConfigModalText(page).catch(() => '')) || '';
       const venteText =
-        text ||
+        textModal ||
         ((await page.locator('body').innerText().catch(() => '')) || '').slice(0, 4000);
       const payDate = extractBadgePaymentDate(venteText);
       const minPay = minBadgePaymentDate(delayDays);
@@ -1848,17 +1843,22 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
       const inWindow = parsed && parsed >= minPay && parsed <= maxPay;
       if (inWindow) {
         payDateOk = true;
+        dateFinOk = true;
         break;
       }
       if (!(await isBadgeConfigModalOpen(page))) {
         await reopenBadgeConfigModal(page).catch(() => false);
       }
+      const ctx2 = await resolveDeciplusWorkPage(page);
+      await badgeDomEvaluate(ctx2, 'fillDu', startStr).catch(() => false);
+      await badgeDomEvaluate(ctx2, 'fillAu', endStr).catch(() => false);
       await fillBadgePaymentDate(page, payStr);
       await clickBadgeModalAppliquer(page).catch(() => false);
       await randomDelay(600, 1000);
     }
   } else {
     payDateOk = true;
+    dateFinOk = true;
   }
 
   await waitForBadgeModalClosed(page);
@@ -1872,10 +1872,10 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
   logInfo(
     immediate
       ? 'Badge — Configuration appliquée (paiement immédiat)'
-      : 'Badge — Configuration appliquée (validité 1 mois, prélèvement ~72h)',
+      : 'Badge — Configuration appliquée (échéance J+72h, validité échéance+3j)',
     {
       delay_days: immediate ? 0 : delayDays,
-      validity_days: validityDays,
+      extra_days: extraDays,
       date_debut: startStr,
       date_fin: endStr,
       date_paiement: payStr,

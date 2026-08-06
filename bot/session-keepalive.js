@@ -1,19 +1,22 @@
 /**
  * Maintient la session Deciplus active (token ~4h) via ping périodique.
  */
-const { login, gotoDeciplus, getAccessToken } = require('./auth');
+const { login, gotoDeciplus, getAccessToken, isAuthBlocked } = require('./auth');
 const { runWithSession } = require('./browser-pool');
 const { listPending } = require('../lib/queue');
 const { logInfo, logWarn } = require('../lib/logger');
 
 const API_BASE = 'https://api.deciplus.pro/staff/v1';
-const KEEPALIVE_MS = Number(process.env.BOT_SESSION_KEEPALIVE_MS || 2.5 * 60 * 60 * 1000);
+// Token Deciplus ~4h — ping avant expiration (défaut 90 min)
+const KEEPALIVE_MS = Number(process.env.BOT_SESSION_KEEPALIVE_MS || 90 * 60 * 1000);
+const KEEPALIVE_RETRY_MS = Number(process.env.BOT_SESSION_KEEPALIVE_RETRY_MS || 15 * 60 * 1000);
 
-let lastKeepAliveAt = Date.now();
+let lastKeepAliveSuccessAt = Date.now();
+let lastKeepAliveAttemptAt = 0;
 let inFlight = false;
 
 function touchKeepAliveClock() {
-  lastKeepAliveAt = Date.now();
+  lastKeepAliveSuccessAt = Date.now();
 }
 
 async function pingDeciplusApi(page, token) {
@@ -30,34 +33,45 @@ async function pingDeciplusApi(page, token) {
   return response.ok();
 }
 
+async function refreshSessionIfNeeded(page) {
+  await gotoDeciplus(page, 'nextgen/home');
+  let token = await getAccessToken(page);
+  if (token && (await pingDeciplusApi(page, token))) {
+    return token;
+  }
+
+  await login(page);
+  await gotoDeciplus(page, 'nextgen/home');
+  token = await getAccessToken(page);
+  if (!token) return null;
+  if (await pingDeciplusApi(page, token)) return token;
+  return null;
+}
+
 async function maybeKeepSessionAlive() {
   if (inFlight) return;
-  if (Date.now() - lastKeepAliveAt < KEEPALIVE_MS) return;
+  if (isAuthBlocked()) return;
   if (listPending().length > 0) return;
 
+  const sinceSuccess = Date.now() - lastKeepAliveSuccessAt;
+  if (sinceSuccess < KEEPALIVE_MS) return;
+
+  const sinceAttempt = Date.now() - lastKeepAliveAttemptAt;
+  if (sinceAttempt < KEEPALIVE_RETRY_MS) return;
+
   inFlight = true;
+  lastKeepAliveAttemptAt = Date.now();
   try {
-    await runWithSession('keepalive', async (page) => {
-      await login(page);
-      await gotoDeciplus(page, 'nextgen/home');
+    const token = await runWithSession('keepalive', async (page) => refreshSessionIfNeeded(page));
+    if (!token) {
+      logWarn('Keepalive — session Deciplus non rafraîchie');
+      return;
+    }
 
-      const token = await getAccessToken(page);
-      if (!token) {
-        logWarn('Keepalive — token absent après login');
-        return;
-      }
-
-      const ok = await pingDeciplusApi(page, token);
-      if (!ok) {
-        logWarn('Keepalive — ping API Deciplus en échec');
-        return;
-      }
-
-      logInfo('Session Deciplus maintenue (keepalive)', {
-        interval_min: Math.round(KEEPALIVE_MS / 60000),
-      });
+    logInfo('Session Deciplus maintenue (keepalive)', {
+      interval_min: Math.round(KEEPALIVE_MS / 60000),
     });
-    touchKeepAliveClock();
+    lastKeepAliveSuccessAt = Date.now();
   } catch (err) {
     logWarn('Keepalive session échoué', { error: err.message });
   } finally {
@@ -69,4 +83,5 @@ module.exports = {
   maybeKeepSessionAlive,
   touchKeepAliveClock,
   KEEPALIVE_MS,
+  KEEPALIVE_RETRY_MS,
 };

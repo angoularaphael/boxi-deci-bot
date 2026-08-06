@@ -210,6 +210,61 @@ async function searchMember(page, query) {
   return { found: false };
 }
 
+function normalizePerson(value) {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function birthdateToDeciplus(value) {
+  const raw = String(value || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+    const [y, m, d] = raw.split('-');
+    return `${d}/${m}/${y}`;
+  }
+  return raw;
+}
+
+/**
+ * Match bloquant résiliation : nom + prénom + date de naissance + téléphone.
+ */
+async function findMemberByIdentity(page, identity = {}) {
+  const phone = identity.phone;
+  if (!phone) return { found: false, reason: 'missing_phone' };
+
+  const hit = await searchMember(page, phone);
+  if (!hit.found) return { found: false, reason: 'not_found' };
+
+  const ctx = await getMemberFormContext(page);
+  const sel = getSelectors().member_form_selectors || {};
+  const lastName = await ctx.locator(sel.nom || 'input[name="nom"]').first().inputValue().catch(() => '');
+  const firstName = await ctx.locator(sel.prenom || 'input[name="prenom"]').first().inputValue().catch(() => '');
+  const birth = await ctx
+    .locator(sel.date_naissance || 'input[name="date_naissance"]')
+    .first()
+    .inputValue()
+    .catch(() => '');
+
+  const expectedBirth = birthdateToDeciplus(identity.birthdate);
+  const nameOk =
+    normalizePerson(lastName) === normalizePerson(identity.last_name) &&
+    normalizePerson(firstName) === normalizePerson(identity.first_name);
+  const birthOk = !expectedBirth || String(birth).replace(/\s/g, '') === String(expectedBirth).replace(/\s/g, '');
+
+  if (!nameOk || !birthOk) {
+    logWarn('Identité membre Deciplus non concordante', {
+      member_id: hit.member_id,
+      name_ok: nameOk,
+      birth_ok: birthOk,
+    });
+    return { found: false, reason: 'identity_mismatch' };
+  }
+
+  return { found: true, member_id: hit.member_id };
+}
+
 async function extractMemberIdFromForm(page) {
   const ctx = await getMemberFormContext(page);
   const candidates = [
@@ -410,6 +465,8 @@ async function fillMemberForm(page, customer, gymConfig, order) {
  * Force la zone Deciplus du formulaire membre selon la salle choisie en boutique.
  * Ne force jamais une salle par défaut : utilise gymConfig de la commande.
  */
+const { siteLabelsMatch } = require('./deciplus-zone');
+
 async function setMemberZone(ctx, gymConfig = {}) {
   const selectSel = (getSelectors().member_form_selectors || {}).idz || 'select[name="idz"]';
   const select = ctx.locator(selectSel).first();
@@ -438,11 +495,10 @@ async function setMemberZone(ctx, gymConfig = {}) {
 
     const options = select.locator('option');
     const count = await options.count();
-    const pattern = new RegExp(String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
     for (let i = 0; i < count; i += 1) {
       const opt = options.nth(i);
       const text = ((await opt.textContent().catch(() => '')) || '').trim();
-      if (!pattern.test(text)) continue;
+      if (!siteLabelsMatch(text, label)) continue;
       const value = await opt.getAttribute('value');
       if (value == null || value === '') continue;
       await select.selectOption(value);
@@ -847,6 +903,7 @@ async function uploadMemberPhoto(page, photoPath, photoBase64 = null, memberId =
 module.exports = {
   navigateToMembers,
   searchMember,
+  findMemberByIdentity,
   startNewMemberFromSelect,
   openNewMemberForm,
   fillMemberForm,

@@ -7,11 +7,36 @@ const { isChooseZoneScreen, selectSiteInPicker, clickSellOnSite } = require('./d
 
 const SESSION_DIR = process.env.BOT_SESSION_DIR || path.join(ROOT, 'data', 'session');
 const STORAGE_FILE = path.join(SESSION_DIR, 'storage-state.json');
+const AUTH_COOLDOWN_MS = Number(process.env.BOT_AUTH_COOLDOWN_MS || 10 * 60 * 1000);
+
+let loginInFlight = null;
+let authBlockedUntil = 0;
+
+function isAuthBlocked() {
+  return Date.now() < authBlockedUntil;
+}
+
+function getAuthBlockedMessage() {
+  const minutes = Math.ceil((authBlockedUntil - Date.now()) / 60000);
+  return `Connexion Deciplus en cooldown (${minutes} min) — évite les demandes de code email en rafale`;
+}
 
 function isMfaAuthError(message = '') {
-  return /code.*email|DECIPLUS_EMAIL_CODE|vérification|verification|otp|mfa|cooldown/i.test(
-    String(message || '')
-  );
+  return /code.*email|DECIPLUS_EMAIL_CODE|vérification|verification|otp|mfa|cooldown/i.test(message);
+}
+
+function blockAuthRetries(reason) {
+  authBlockedUntil = Date.now() + AUTH_COOLDOWN_MS;
+  logWarn('Connexion Deciplus en cooldown', {
+    reason,
+    cooldown_min: Math.round(AUTH_COOLDOWN_MS / 60000),
+  });
+}
+
+function assertAuthAllowed() {
+  if (isAuthBlocked()) {
+    throw new Error(getAuthBlockedMessage());
+  }
 }
 
 async function getAccessToken(page) {
@@ -150,10 +175,39 @@ function getStorageMtimeMs() {
   }
 }
 
+function hashStorageState(state) {
+  try {
+    const crypto = require('crypto');
+    const cookies = (state.cookies || [])
+      .map((c) => `${c.name}=${c.value}@${c.domain}`)
+      .sort()
+      .join('|');
+    const origins = (state.origins || [])
+      .map((o) => {
+        const auth = (o.localStorage || []).find((x) => x.name === 'auth');
+        return `${o.origin}:${auth?.value || ''}`;
+      })
+      .sort()
+      .join('|');
+    return crypto.createHash('sha256').update(`${cookies}::${origins}`).digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+function readDiskStorageHash() {
+  try {
+    if (!fs.existsSync(STORAGE_FILE)) return null;
+    return hashStorageState(JSON.parse(fs.readFileSync(STORAGE_FILE, 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Ne pas écraser un storage-state.json fraîchement uploadé (changement de session).
- * @param {import('playwright').BrowserContext} context
- * @param {{ loadedMtimeMs?: number|null }} [opts]
+ * Ne réécrit pas si le contenu auth est inchangé (évite boucle mtime / reload).
+ * Ne persiste pas une session morte (sans token) par-dessus un fichier valide.
  */
 async function saveSession(context, opts = {}) {
   ensureDir(SESSION_DIR);
@@ -163,12 +217,47 @@ async function saveSession(context, opts = {}) {
     logWarn('Session disque plus récente — pas d\'écrasement (export / changement session)');
     return { skipped: true, reason: 'newer_on_disk', mtimeMs: diskMtime };
   }
-  await context.storageState({ path: STORAGE_FILE });
+
+  const nextState = await context.storageState();
+  const nextHash = hashStorageState(nextState);
+  const diskHash = readDiskStorageHash();
+
+  const hasAuthToken = (state) => {
+    try {
+      for (const o of state.origins || []) {
+        const auth = (o.localStorage || []).find((x) => x.name === 'auth');
+        if (!auth?.value) continue;
+        const parsed = JSON.parse(auth.value);
+        if (parsed?.token) return true;
+      }
+    } catch {
+      /* ignore */
+    }
+    return false;
+  };
+
+  let diskHasToken = false;
+  try {
+    if (fs.existsSync(STORAGE_FILE)) {
+      diskHasToken = hasAuthToken(JSON.parse(fs.readFileSync(STORAGE_FILE, 'utf8')));
+    }
+  } catch {
+    diskHasToken = false;
+  }
+  if (opts.requireAuth !== false && diskHasToken && !hasAuthToken(nextState)) {
+    logWarn('Session navigateur sans token — conservation du storage-state disque');
+    return { skipped: true, reason: 'dead_session', mtimeMs: diskMtime };
+  }
+
+  if (nextHash && diskHash && nextHash === diskHash) {
+    return { skipped: true, reason: 'unchanged', mtimeMs: diskMtime || getStorageMtimeMs() };
+  }
+
+  fs.writeFileSync(STORAGE_FILE, JSON.stringify(nextState, null, 2), 'utf8');
   logInfo('Session Deciplus sauvegardée');
-  return { skipped: false, mtimeMs: getStorageMtimeMs() };
+  return { skipped: false, mtimeMs: getStorageMtimeMs(), hash: nextHash };
 }
 
-/** Erreurs de session / token — job à reprendre, pas à abandonner en MFA. */
 function isSessionRecoverableError(message = '') {
   return /session expir|token.*introuvable|relancer login|not logged|login\.php|Unauthorized|\b401\b|storage-state|connexion.*échou|Déconnexion|session Deciplus|déjà pas connect|auth.*expir|cookie/i.test(
     String(message || '')
@@ -261,7 +350,7 @@ async function submitLoginForm(page, user, pass) {
   await randomDelay(process.env.BOT_MIN_DELAY_MS, process.env.BOT_MAX_DELAY_MS);
 }
 
-async function login(page, options = {}) {
+async function performLogin(page, options = {}) {
   const url = process.env.DECIPLUS_URL;
   const user = process.env.DECIPLUS_USER;
   const pass = process.env.DECIPLUS_PASSWORD;
@@ -337,6 +426,26 @@ async function login(page, options = {}) {
   await handleChooseZone(page, options.siteLabel);
 }
 
+async function login(page, options = {}) {
+  assertAuthAllowed();
+  if (loginInFlight) return loginInFlight;
+
+  loginInFlight = (async () => {
+    try {
+      await performLogin(page, options);
+    } catch (err) {
+      if (isMfaAuthError(err.message)) {
+        blockAuthRetries(err.message);
+      }
+      throw err;
+    }
+  })().finally(() => {
+    loginInFlight = null;
+  });
+
+  return loginInFlight;
+}
+
 module.exports = {
   SESSION_DIR,
   STORAGE_FILE,
@@ -348,6 +457,7 @@ module.exports = {
   gotoDeciplus,
   getAccessToken,
   login,
+  isAuthBlocked,
   isMfaAuthError,
   isSessionRecoverableError,
   getStorageMtimeMs,
