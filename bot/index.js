@@ -96,40 +96,87 @@ async function processCancelJob(page, order) {
   const { cancelSale } = require('./cancel-sale');
   const { findMemberByIdentity, searchMember } = require('./member');
 
+  const identity = {
+    first_name: order.customer?.first_name || order.first_name,
+    last_name: order.customer?.last_name || order.last_name,
+    birthdate: order.customer?.birthdate || order.birthdate,
+    phone: order.customer?.phone || order.phone,
+    email: order.customer?.email || order.email,
+    address: order.customer?.address || order.address,
+    postal_code: order.customer?.postal_code || order.postal_code,
+    city: order.customer?.city || order.city,
+  };
+
+  const notifyMismatch = async (reason) => {
+    try {
+      const base = (process.env.BOXPLUS_STORE_URL || process.env.STORE_URL || '').replace(/\/$/, '');
+      const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+      let sent = false;
+      if (base && secret) {
+        const res = await fetch(`${base}/api/internal/cancel-mismatch`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-sync-secret': secret,
+          },
+          body: JSON.stringify({ ...identity, reason }),
+        });
+        sent = res.ok;
+        if (!res.ok) {
+          logWarn('Email mismatch résiliation boutique échoué', { status: res.status, reason });
+        }
+      }
+      if (!sent) {
+        try {
+          const { sendCancelMismatchEmail } = require('../storefront/lib/membership');
+          await sendCancelMismatchEmail(identity);
+          sent = true;
+        } catch (err) {
+          logWarn('Email mismatch résiliation local échoué', { error: err.message, reason });
+        }
+      }
+      if (!sent) {
+        logWarn('Email mismatch résiliation — aucun canal disponible', { reason });
+      }
+    } catch (err) {
+      logWarn('Email mismatch résiliation non envoyé', { error: err.message, reason });
+    }
+  };
+
   let memberId = order.deciplus_member_id || null;
-  if (!memberId && (order.customer?.first_name || order.first_name)) {
-    const match = await findMemberByIdentity(page, {
-      first_name: order.customer?.first_name || order.first_name,
-      last_name: order.customer?.last_name || order.last_name,
-      birthdate: order.customer?.birthdate || order.birthdate,
-      phone: order.customer?.phone || order.phone,
-      email: order.customer?.email || order.email,
-    });
+  if (!memberId && (identity.first_name || identity.last_name)) {
+    const match = await findMemberByIdentity(page, identity);
     if (!match.found) {
+      await notifyMismatch(match.reason || 'identity_mismatch');
       return {
         status: STATUS.MANUAL_REVIEW,
         action: 'cancel',
         error:
-          'Nous n\'avons pas pu trouver d\'abonnement correspondant à ces informations (nom, prénom, date de naissance, téléphone).',
+          'Les informations renseignées ne correspondent pas à la fiche adhérent. Un e-mail a été envoyé pour demander de vérifier les données.',
         cancel_reason: order.cancel_reason,
+        mismatch: true,
+        mismatch_reason: match.reason || 'identity_mismatch',
       };
     }
     memberId = match.member_id;
   }
-  if (!memberId && (order.customer?.email || order.email)) {
-    const byEmail = await searchMember(page, order.customer?.email || order.email);
+  if (!memberId && identity.email) {
+    const byEmail = await searchMember(page, identity.email);
     if (byEmail.found) memberId = byEmail.member_id;
   }
-  if (!memberId && (order.customer?.phone || order.phone)) {
-    const byPhone = await searchMember(page, order.customer?.phone || order.phone);
+  if (!memberId && identity.phone) {
+    const byPhone = await searchMember(page, identity.phone);
     if (byPhone.found) memberId = byPhone.member_id;
   }
   if (!memberId) {
+    await notifyMismatch('not_found');
     return {
       status: STATUS.MANUAL_REVIEW,
       action: 'cancel',
-      error: 'Membre Deciplus introuvable pour la résiliation',
+      error:
+        'Les informations renseignées ne correspondent pas à la fiche adhérent. Un e-mail a été envoyé pour demander de vérifier les données.',
       cancel_reason: order.cancel_reason,
+      mismatch: true,
     };
   }
 

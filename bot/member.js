@@ -255,7 +255,8 @@ function birthdateToDeciplus(value) {
 }
 
 /**
- * Match bloquant résiliation : nom + prénom + date de naissance + téléphone.
+ * Match bloquant résiliation : nom + prénom + naissance + téléphone
+ * (+ email / adresse / CP / ville s’ils sont fournis).
  */
 async function findMemberByIdentity(page, identity = {}) {
   const phone = identity.phone;
@@ -273,20 +274,44 @@ async function findMemberByIdentity(page, identity = {}) {
     .first()
     .inputValue()
     .catch(() => '');
+  const email = await ctx.locator(sel.email || 'input[name="email"]').first().inputValue().catch(() => '');
+  const adr1 = await ctx.locator(sel.adr1 || 'input[name="adr1"]').first().inputValue().catch(() => '');
+  const postal = await ctx.locator(sel.codepostal || 'input[name="codepostal"]').first().inputValue().catch(() => '');
+  const city = await ctx.locator(sel.ville || 'input[name="ville"]').first().inputValue().catch(() => '');
 
   const expectedBirth = birthdateToDeciplus(identity.birthdate);
   const nameOk =
     normalizePerson(lastName) === normalizePerson(identity.last_name) &&
     normalizePerson(firstName) === normalizePerson(identity.first_name);
-  const birthOk = !expectedBirth || String(birth).replace(/\s/g, '') === String(expectedBirth).replace(/\s/g, '');
+  const birthOk =
+    !expectedBirth || String(birth).replace(/\s/g, '') === String(expectedBirth).replace(/\s/g, '');
 
-  if (!nameOk || !birthOk) {
+  const emailOk =
+    !identity.email ||
+    String(email || '').trim().toLowerCase() === String(identity.email || '').trim().toLowerCase();
+
+  const addrOk =
+    !identity.address ||
+    normalizePerson(adr1).includes(normalizePerson(identity.address).slice(0, 12)) ||
+    normalizePerson(identity.address).includes(normalizePerson(adr1).slice(0, 12));
+
+  const postalOk =
+    !identity.postal_code ||
+    String(postal || '').replace(/\s/g, '') === String(identity.postal_code || '').replace(/\s/g, '');
+
+  const cityOk = !identity.city || normalizePerson(city) === normalizePerson(identity.city);
+
+  if (!nameOk || !birthOk || !emailOk || !addrOk || !postalOk || !cityOk) {
     logWarn('Identité membre Deciplus non concordante', {
       member_id: hit.member_id,
       name_ok: nameOk,
       birth_ok: birthOk,
+      email_ok: emailOk,
+      addr_ok: addrOk,
+      postal_ok: postalOk,
+      city_ok: cityOk,
     });
-    return { found: false, reason: 'identity_mismatch' };
+    return { found: false, reason: 'identity_mismatch', member_id: hit.member_id };
   }
 
   return { found: true, member_id: hit.member_id };
