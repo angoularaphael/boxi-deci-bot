@@ -1,10 +1,20 @@
 /**
- * Annulation vente Deciplus — flux coach :
- * prestation → Consulter → Annuler la vente → Virement → Appliquer et Quitter → Confirmer
+ * Annulation / résiliation Deciplus — abo + badge.
+ * Flux : fiche membre → #prestation_XXXX → Consulter → Annuler la vente|Résilier
+ *        → Virement → Appliquer et Quitter → Confirmer
+ * Boucle jusqu'à plus aucun contrat actif.
  */
 const { randomDelay } = require('../lib/utils');
-const { logInfo } = require('../lib/logger');
+const { logInfo, logWarn } = require('../lib/logger');
 const { openMemberCheck, clickFirst, sel, closeGreyboxIfOpen } = require('./wallet');
+
+function deciplusBase() {
+  return (process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/').replace(/\/?$/, '/');
+}
+
+function contractUrl(idc) {
+  return new URL(`nextgen/contract?idc=${idc}`, deciplusBase()).href;
+}
 
 function getScopes(page) {
   const scopes = [page, ...(page.frames?.() || [])];
@@ -17,216 +27,324 @@ function getScopes(page) {
   });
 }
 
-async function findActiveContractBlocks(page) {
-  await page
-    .waitForSelector(
-      'div.og-product-wrapper, div.og-product-item, table.tb-prestation input[value="Consulter"]',
-      { timeout: 12000 }
-    )
-    .catch(() => {});
+/**
+ * Liste les contrats actifs via #prestation_XXXX (structure Deciplus réelle).
+ */
+async function findActiveContracts(page) {
+  // Attendre le chargement legacy/iframe fiche membre
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    let ready = false;
+    for (const ctx of getScopes(page)) {
+      try {
+        if ((await ctx.locator('div.og-product-item[id^="prestation_"]').count()) > 0) {
+          ready = true;
+          break;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    if (ready) break;
+    await page.waitForTimeout(500);
+  }
 
-  const blocks = [];
+  // Déplier éventuelles sections Cartes / Abonnements
   for (const ctx of getScopes(page)) {
     try {
-      const wrappers = ctx.locator('div.og-product-wrapper');
-      const wrapperCount = await wrappers.count();
-      for (let w = 0; w < wrapperCount; w += 1) {
-        const wrapper = wrappers.nth(w);
-        if (!(await wrapper.isVisible().catch(() => false))) continue;
+      await ctx.evaluate(() => {
+        window.scrollTo(0, document.body.scrollHeight / 2);
+      }).catch(() => {});
+    } catch {
+      /* ignore */
+    }
+  }
+  await page.waitForTimeout(600);
 
-        const item = wrapper.locator('div.og-product-item[id^="prestation_"], div.og-product-item').first();
-        const consulter = wrapper
-          .locator(
-            'input.fichemembre_button_grey[value="Consulter"], input[value="Consulter"], button:has-text("Consulter")'
-          )
-          .first();
+  const found = [];
+  const seen = new Set();
 
-        if ((await item.count()) === 0 || (await consulter.count()) === 0) continue;
-        if (!(await consulter.isVisible().catch(() => false))) continue;
-
-        blocks.push({ ctx, item, consulter, wrapper });
-      }
-
-      if (blocks.length > 0) continue;
-
-      const consulters = ctx.locator(
-        'table.tb-prestation input[value="Consulter"], table.prestacontrat input[value="Consulter"]'
-      );
-      const count = await consulters.count();
+  for (const ctx of getScopes(page)) {
+    try {
+      const items = ctx.locator('div.og-product-item[id^="prestation_"]');
+      const count = await items.count();
       for (let i = 0; i < count; i += 1) {
-        const consulter = consulters.nth(i);
-        if (!(await consulter.isVisible().catch(() => false))) continue;
-        const table = consulter.locator('xpath=ancestor::table[1]');
-        const item = table
-          .locator('xpath=preceding::div[contains(@class,"og-product-item")][1]')
+        const item = items.nth(i);
+        if (!(await item.isVisible().catch(() => false))) continue;
+        const idAttr = (await item.getAttribute('id').catch(() => '')) || '';
+        const idc = (idAttr.match(/prestation_(\d+)/i) || [])[1];
+        if (!idc || seen.has(idc)) continue;
+
+        const label = ((await item.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+        if (!label) continue;
+
+        let consulter = item
+          .locator('xpath=ancestor::div[contains(@class,"og-product-wrapper")][1]')
+          .locator('input[value="Consulter"], button:has-text("Consulter")')
           .first();
-        blocks.push({
+        if ((await consulter.count()) === 0) {
+          consulter = item
+            .locator('xpath=ancestor::tr[1]/following::tr[1]//input[@value="Consulter"]')
+            .first();
+        }
+        if ((await consulter.count()) === 0) {
+          consulter = item.locator('xpath=ancestor::table[1]//input[@value="Consulter"]').first();
+        }
+
+        seen.add(idc);
+        found.push({
           ctx,
-          item: (await item.count()) > 0 ? item : table,
-          consulter,
+          item,
+          consulter: (await consulter.count()) > 0 ? consulter : null,
+          idc,
+          label: label.slice(0, 160) || `prestation_${idc}`,
+          isBadge: /badge|carte/i.test(label),
         });
       }
     } catch {
       /* frame détachée */
     }
   }
-  return blocks;
+
+  found.sort((a, b) => Number(a.isBadge) - Number(b.isBadge));
+  return found;
 }
 
-async function waitForActionPanel(page, timeoutMs = 20000) {
+async function openContractPage(page, contract) {
+  const target = contractUrl(contract.idc);
+  logInfo('Ouverture contrat Deciplus', {
+    idc: contract.idc,
+    url: target,
+    label: contract.label?.slice(0, 80),
+  });
+
+  await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+  await randomDelay(1200, 2000);
+
+  if (/nextgen\/contract|contract\?idc=/i.test(page.url())) {
+    return true;
+  }
+
+  // Repli : Consulter depuis la fiche
+  if (contract.consulter) {
+    await contract.item.click({ force: true }).catch(() => {});
+    await randomDelay(400, 700);
+    await Promise.all([
+      page.waitForURL(/nextgen\/contract|contract\?idc=/i, { timeout: 20000 }).catch(() => null),
+      contract.consulter.click({ force: true }),
+    ]);
+    await randomDelay(1000, 1600);
+  }
+
+  return /nextgen\/contract|contract\?idc=/i.test(page.url());
+}
+
+async function waitActionPanel(page, timeoutMs = 20000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    for (const ctx of getScopes(page)) {
-      try {
-        const panel = ctx.getByText(/Action souhaitée/i).first();
-        if ((await panel.count()) > 0 && (await panel.isVisible().catch(() => false))) {
-          return ctx;
-        }
-      } catch {
-        /* ignore */
-      }
+    const panel = page.getByText(/Action souhaitée/i).first();
+    if ((await panel.count()) > 0 && (await panel.isVisible().catch(() => false))) {
+      return true;
     }
     await page.waitForTimeout(400);
   }
-  return null;
+  return false;
 }
 
-async function clickAnnulerLaVente(ctx) {
-  const candidates = [
-    ctx.getByText('Annuler la vente').first(),
-    ctx.locator('[aria-label="Annuler la vente"]').first(),
-    ctx.locator('text=Annuler la vente').first(),
-  ];
-  for (const el of candidates) {
-    if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
-    await el.click({ force: true });
-    return true;
+async function clickActionTile(page, names) {
+  const patterns = Array.isArray(names) ? names : [names];
+  for (const name of patterns) {
+    const re = name instanceof RegExp ? name : new RegExp(`^${name}$`, 'i');
+    // Tuiles iconify (structure Deciplus nextgen)
+    const tile = page.locator('div.iconify.ari-cursor-pointer, div.ari-flex.niceRow div.item').filter({ hasText: re }).first();
+    if ((await tile.count()) > 0 && (await tile.isVisible().catch(() => false))) {
+      await tile.click({ force: true });
+      return String(name);
+    }
+    const byText = page.getByText(re).first();
+    if ((await byText.count()) > 0 && (await byText.isVisible().catch(() => false))) {
+      await byText.click({ force: true });
+      return String(name);
+    }
   }
-  return clickFirst(ctx, sel('contract_actions.annuler_vente'));
+
+  // Repli JS exact
+  return page.evaluate((labels) => {
+    const nodes = [...document.querySelectorAll('div.iconify, div.item, div, button, a, span')];
+    for (const label of labels) {
+      const re = new RegExp(`^${label}$`, 'i');
+      for (const el of nodes) {
+        const t = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (re.test(t)) {
+          el.click();
+          return label;
+        }
+      }
+    }
+    return null;
+  }, patterns.map((p) => (p instanceof RegExp ? p.source.replace(/^\^|\$$/g, '') : String(p))));
 }
 
-async function selectVirementPayment(ctx) {
-  const candidates = [
-    ctx.getByText(/^Virement$/i).first(),
-    ctx.locator('text=Virement').first(),
-  ];
-  for (const el of candidates) {
-    if ((await el.count()) === 0 || !(await el.isVisible().catch(() => false))) continue;
-    await el.click({ force: true });
-    return true;
-  }
-  return clickFirst(ctx, sel('payment_finalize.virement'));
+async function selectVirement(page) {
+  const hit = await clickActionTile(page, [/^Virement$/i]);
+  if (hit) return true;
+  return clickFirst(page, sel('payment_finalize.virement'));
 }
 
-async function clickAppliquerEtQuitter(ctx) {
-  const btn = ctx
+async function clickAppliquerQuitter(page) {
+  const btn = page
     .locator('button.ari-button-filled:has-text("Appliquer et Quitter"), button:has-text("Appliquer et Quitter")')
     .first();
   if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
     await btn.click({ force: true });
     return true;
   }
-  return clickFirst(ctx, sel('contract_actions.appliquer_quitter'));
+  const apply = page.locator('button:has-text("Appliquer")').first();
+  if ((await apply.count()) > 0 && (await apply.isVisible().catch(() => false))) {
+    await apply.click({ force: true });
+    return true;
+  }
+  return page.evaluate(() => {
+    const hit = [...document.querySelectorAll('button')].find((b) =>
+      /Appliquer et Quitter|^Appliquer$/i.test(String(b.textContent || '').trim())
+    );
+    if (!hit) return false;
+    hit.click();
+    return true;
+  });
 }
 
-async function confirmCancelSaleModal(page) {
+async function confirmModal(page) {
   for (const ctx of getScopes(page)) {
     try {
-      const btn = ctx
-        .locator('button:has-text("Confirmer"), button.ari-button:has-text("Confirmer")')
-        .filter({ hasText: /^Confirmer$/i })
-        .first();
+      const btn = ctx.getByRole('button', { name: /^Confirmer$/i }).first();
       if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
         await btn.click({ force: true });
-        return true;
-      }
-      const textBtn = ctx.getByRole('button', { name: /^Confirmer$/i }).first();
-      if ((await textBtn.count()) > 0 && (await textBtn.isVisible().catch(() => false))) {
-        await textBtn.click({ force: true });
         return true;
       }
     } catch {
       /* ignore */
     }
   }
-  return clickFirst(page, sel('contract_actions.confirmer_annulation'));
+  return page.evaluate(() => {
+    const b = [...document.querySelectorAll('button')].find((el) =>
+      /^Confirmer$/i.test(String(el.textContent || '').trim())
+    );
+    if (!b) return false;
+    b.click();
+    return true;
+  });
 }
 
-async function cancelOneContract(page, block) {
-  const { item, consulter } = block;
+async function cancelOneContract(page, contract) {
+  const opened = await openContractPage(page, contract);
+  if (!opened) {
+    logWarn('Navigation contrat échouée', { idc: contract.idc, url: page.url() });
+    return { cancelled: false, reason: 'contract_nav_failed', idc: contract.idc };
+  }
 
-  await item.scrollIntoViewIfNeeded().catch(() => {});
-  await item.click({ force: true });
-  await randomDelay(500, 800);
+  if (!(await waitActionPanel(page))) {
+    logWarn('Panneau Action souhaitée introuvable', { idc: contract.idc, url: page.url() });
+    return { cancelled: false, reason: 'action_panel_missing', idc: contract.idc };
+  }
 
-  await consulter.scrollIntoViewIfNeeded().catch(() => {});
-  await consulter.click({ force: true });
-  await randomDelay(1500, 2200);
+  // Préférer Annuler la vente ; sinon Résilier
+  let mode = await clickActionTile(page, [/Annuler la vente/i, /^Annuler la ver/i]);
+  if (!mode) {
+    mode = await clickActionTile(page, [/^Résilier$/i]);
+    if (mode) mode = 'resilier';
+  } else {
+    mode = 'annuler_vente';
+  }
 
-  const actionCtx = (await waitForActionPanel(page)) || page;
-
-  const annuler = await clickAnnulerLaVente(actionCtx);
-  if (!annuler) {
-    await closeGreyboxIfOpen(page);
-    return { cancelled: false, reason: 'annuler_vente_missing' };
+  if (!mode) {
+    logWarn('Annuler/Résilier introuvable', { idc: contract.idc, url: page.url() });
+    return { cancelled: false, reason: 'annuler_vente_missing', idc: contract.idc };
   }
   await randomDelay(800, 1200);
 
-  const virement = await selectVirementPayment(actionCtx);
-  if (!virement) {
-    await closeGreyboxIfOpen(page);
-    return { cancelled: false, reason: 'virement_missing' };
+  if (mode === 'annuler_vente') {
+    const virement = await selectVirement(page);
+    if (!virement) {
+      return { cancelled: false, reason: 'virement_missing', idc: contract.idc };
+    }
+    await randomDelay(600, 1000);
   }
-  await randomDelay(600, 1000);
 
-  const applied = await clickAppliquerEtQuitter(actionCtx);
+  const applied = await clickAppliquerQuitter(page);
   if (!applied) {
-    await closeGreyboxIfOpen(page);
-    return { cancelled: false, reason: 'appliquer_quitter_missing' };
+    return { cancelled: false, reason: 'appliquer_quitter_missing', idc: contract.idc };
   }
   await randomDelay(800, 1200);
 
-  const confirmed = await confirmCancelSaleModal(page);
-  if (!confirmed) {
-    await closeGreyboxIfOpen(page);
-    return { cancelled: false, reason: 'confirmer_missing' };
+  if (mode === 'annuler_vente') {
+    await confirmModal(page);
   }
 
   await randomDelay(1500, 2200);
   await closeGreyboxIfOpen(page);
-  return { cancelled: true, reason: 'ok' };
-}
 
-async function memberHasActiveContracts(page) {
-  const blocks = await findActiveContractBlocks(page);
-  return blocks.length > 0;
-}
-
-async function cancelNextMemberSale(page, memberId) {
-  await openMemberCheck(page, memberId);
-  await randomDelay(800, 1200);
-
-  const blocks = await findActiveContractBlocks(page);
-  if (blocks.length === 0) {
-    return { cancelled: false, reason: 'no_active_sale' };
-  }
-
-  const result = await cancelOneContract(page, blocks[0]);
-  if (result.cancelled) {
-    logInfo('Vente test annulée', { member_id: memberId });
-  }
-  return result;
+  logInfo('Vente annulée Deciplus', {
+    idc: contract.idc,
+    mode,
+    label: contract.label?.slice(0, 80),
+  });
+  return {
+    cancelled: true,
+    reason: 'ok',
+    mode,
+    idc: contract.idc,
+    label: contract.label,
+  };
 }
 
 async function cancelAllMemberSales(page, memberId, { maxSales = 15 } = {}) {
   let total = 0;
   const details = [];
+  const doneIds = new Set();
 
   for (let i = 0; i < maxSales; i += 1) {
-    const result = await cancelNextMemberSale(page, memberId);
+    await openMemberCheck(page, memberId);
+    await randomDelay(1200, 1800);
+
+    let contracts = await findActiveContracts(page);
+    contracts = contracts.filter((c) => !doneIds.has(c.idc));
+
+    logInfo('Contrats actifs à résilier', {
+      member_id: memberId,
+      count: contracts.length,
+      labels: contracts.map((c) => `${c.idc}:${c.label?.slice(0, 50)}`),
+      already_done: [...doneIds],
+    });
+
+    if (contracts.length === 0) {
+      if (total === 0) details.push({ cancelled: false, reason: 'no_active_sale' });
+      break;
+    }
+
+    const result = await cancelOneContract(page, contracts[0]);
     details.push(result);
-    if (!result.cancelled) break;
-    total += 1;
+    doneIds.add(contracts[0].idc);
+
+    if (result.cancelled) {
+      total += 1;
+      await randomDelay(800, 1400);
+      continue;
+    }
+
+    // Contrat déjà annulé / panneau absent → passer au suivant
+    if (
+      result.reason === 'action_panel_missing' ||
+      result.reason === 'annuler_vente_missing' ||
+      result.reason === 'contract_nav_failed'
+    ) {
+      logWarn('Contrat sauté — tentative suivante', {
+        idc: contracts[0].idc,
+        reason: result.reason,
+      });
+      await randomDelay(600, 1000);
+      continue;
+    }
+    break;
   }
 
   return { member_id: memberId, cancelled_count: total, details };
@@ -234,19 +352,27 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15 } = {}) {
 
 async function cancelSale(page, memberId) {
   if (!memberId) throw new Error('member_id requis pour annuler la vente');
-  const outcome = await cancelAllMemberSales(page, memberId, { maxSales: 1 });
+  const outcome = await cancelAllMemberSales(page, memberId, { maxSales: 15 });
   if (outcome.cancelled_count === 0) {
     throw new Error(`Annulation vente impossible — ${outcome.details[0]?.reason || 'inconnu'}`);
   }
-  logInfo('Vente annulée Deciplus', { member_id: memberId });
-  return { action: 'sale_cancelled', sale_type: 'cancel' };
+  logInfo('Résiliation Deciplus terminée', {
+    member_id: memberId,
+    cancelled_count: outcome.cancelled_count,
+    labels: (outcome.details || []).filter((d) => d.cancelled).map((d) => d.label || d.idc),
+  });
+  return {
+    action: 'sale_cancelled',
+    sale_type: 'cancel',
+    cancelled_count: outcome.cancelled_count,
+    details: outcome.details,
+  };
 }
 
 module.exports = {
-  findActiveContractBlocks,
-  memberHasActiveContracts,
+  findActiveContracts,
+  findActiveContractBlocks: findActiveContracts,
   cancelOneContract,
-  cancelNextMemberSale,
   cancelAllMemberSales,
   cancelSale,
 };
