@@ -262,8 +262,14 @@ async function findMemberByIdentity(page, identity = {}) {
   const phone = identity.phone;
   if (!phone) return { found: false, reason: 'missing_phone' };
 
-  const hit = await searchMember(page, phone);
-  if (!hit.found) return { found: false, reason: 'not_found' };
+  let hit = await searchMember(page, phone);
+  let phoneMatched = hit.found;
+  if (!hit.found && (identity.last_name || identity.first_name)) {
+    // Téléphone introuvable → tenter par nom pour identifier le champ fautif
+    hit = await searchMemberByName(page, identity.last_name, identity.first_name);
+    phoneMatched = false;
+  }
+  if (!hit.found) return { found: false, reason: 'not_found', mismatch_fields: ['phone', 'last_name', 'first_name'] };
 
   const ctx = await getMemberFormContext(page);
   const sel = getSelectors().member_form_selectors || {};
@@ -280,38 +286,52 @@ async function findMemberByIdentity(page, identity = {}) {
   const city = await ctx.locator(sel.ville || 'input[name="ville"]').first().inputValue().catch(() => '');
 
   const expectedBirth = birthdateToDeciplus(identity.birthdate);
-  const nameOk =
-    normalizePerson(lastName) === normalizePerson(identity.last_name) &&
-    normalizePerson(firstName) === normalizePerson(identity.first_name);
+  const lastNameOk = normalizePerson(lastName) === normalizePerson(identity.last_name);
+  const firstNameOk = normalizePerson(firstName) === normalizePerson(identity.first_name);
   const birthOk =
     !expectedBirth || String(birth).replace(/\s/g, '') === String(expectedBirth).replace(/\s/g, '');
 
+  // Champs INFORMATIFS (non bloquants) — loggés seulement
   const emailOk =
     !identity.email ||
     String(email || '').trim().toLowerCase() === String(identity.email || '').trim().toLowerCase();
-
   const addrOk =
     !identity.address ||
     normalizePerson(adr1).includes(normalizePerson(identity.address).slice(0, 12)) ||
     normalizePerson(identity.address).includes(normalizePerson(adr1).slice(0, 12));
-
   const postalOk =
     !identity.postal_code ||
     String(postal || '').replace(/\s/g, '') === String(identity.postal_code || '').replace(/\s/g, '');
-
   const cityOk = !identity.city || normalizePerson(city) === normalizePerson(identity.city);
 
-  if (!nameOk || !birthOk || !emailOk || !addrOk || !postalOk || !cityOk) {
-    logWarn('Identité membre Deciplus non concordante', {
+  // BLOQUANTS : nom, prénom, téléphone, date de naissance
+  const mismatchFields = [];
+  if (!lastNameOk) mismatchFields.push('last_name');
+  if (!firstNameOk) mismatchFields.push('first_name');
+  if (!birthOk) mismatchFields.push('birthdate');
+  if (!phoneMatched) mismatchFields.push('phone');
+
+  if (!emailOk || !addrOk || !postalOk || !cityOk) {
+    logInfo('Résiliation — champs informatifs non concordants (non bloquant)', {
       member_id: hit.member_id,
-      name_ok: nameOk,
-      birth_ok: birthOk,
       email_ok: emailOk,
       addr_ok: addrOk,
       postal_ok: postalOk,
       city_ok: cityOk,
     });
-    return { found: false, reason: 'identity_mismatch', member_id: hit.member_id };
+  }
+
+  if (mismatchFields.length) {
+    logWarn('Identité membre Deciplus non concordante', {
+      member_id: hit.member_id,
+      mismatch_fields: mismatchFields,
+    });
+    return {
+      found: false,
+      reason: 'identity_mismatch',
+      member_id: hit.member_id,
+      mismatch_fields: mismatchFields,
+    };
   }
 
   return { found: true, member_id: hit.member_id };
@@ -537,6 +557,13 @@ async function setMemberZone(ctx, gymConfig = {}) {
   const label = gymConfig.deciplus_label || gymConfig.label;
   const zoneId = gymConfig.deciplus_zone_id != null ? String(gymConfig.deciplus_zone_id) : null;
 
+  // Les options du select idz peuvent charger après le rendu du formulaire
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const optCount = await select.locator('option').count().catch(() => 0);
+    if (optCount > 1) break;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+
   if (zoneId) {
     const byValue = await select.selectOption(zoneId).then(() => true).catch(() => false);
     if (byValue) {
@@ -554,16 +581,46 @@ async function setMemberZone(ctx, gymConfig = {}) {
 
     const options = select.locator('option');
     const count = await options.count();
+    const available = [];
     for (let i = 0; i < count; i += 1) {
       const opt = options.nth(i);
       const text = ((await opt.textContent().catch(() => '')) || '').trim();
-      if (!siteLabelsMatch(text, label)) continue;
       const value = await opt.getAttribute('value');
+      if (text) available.push({ text, value });
+      if (!siteLabelsMatch(text, label)) continue;
       if (value == null || value === '') continue;
       await select.selectOption(value);
       logInfo('Zone membre Deciplus', { site: text, zone_id: value });
       return true;
     }
+
+    // Dernier recours : correspondance sur un mot significatif du label
+    // (ex. "cyprien" dans "TOULOUSE ST CYPRIEN — Salle 2")
+    const tokens = String(label)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((t) => t.length >= 4 && !['boxing', 'center'].includes(t));
+    for (const { text, value } of available) {
+      const norm = text
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+      if (value && tokens.some((t) => norm.includes(t))) {
+        await select.selectOption(value);
+        logInfo('Zone membre Deciplus (token)', { site: text, zone_id: value });
+        return true;
+      }
+    }
+
+    logWarn('Impossible de sélectionner la salle Deciplus sur le formulaire membre', {
+      gym: gymConfig.key || null,
+      site: label || null,
+      zone_id: zoneId,
+      options: available.map((o) => `${o.value}:${o.text}`).join(' | ') || 'aucune',
+    });
+    return false;
   }
 
   logWarn('Impossible de sélectionner la salle Deciplus sur le formulaire membre', {

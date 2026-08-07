@@ -519,6 +519,43 @@ async function badgeDomEvaluate(ctx, operation, value = null) {
         if (/Paiement imm[ée]diat/i.test(text) && /34[,.]99/.test(text)) return false;
         return /Pr[eé]l[eè]vement Automatique/i.test(text) && /Date de paiement/i.test(text);
       }
+      if (op === 'markPaymentDate') {
+        // Marque l'input « Date de paiement » pour saisie clavier Playwright
+        const mark = (input) => {
+          if (!input) return false;
+          const r = input.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          input.setAttribute('data-bc-paydate', '1');
+          return true;
+        };
+        const payLbl = deepQueryAll(document.body, 'span, label, div, b, strong, td, th, p').find((el) =>
+          /^Date de paiement$/i.test(String(el.textContent || '').replace(/\s+/g, ' ').trim())
+        );
+        if (payLbl) {
+          let parent = payLbl.parentElement;
+          for (let depth = 0; depth < 10 && parent; depth += 1) {
+            const near = deepQueryAll(
+              parent,
+              '.el-date-editor input, input.el-input__inner, input[type="text"], input:not([type])'
+            ).filter((input) => input.type !== 'checkbox' && input.type !== 'hidden');
+            for (const input of near) {
+              if (mark(input)) return true;
+            }
+            parent = parent.parentElement;
+          }
+        }
+        const eds = deepQueryAll(
+          document.body,
+          '.el-date-editor input.el-input__inner, .el-date-editor input, input.el-input__inner'
+        ).filter((input) => {
+          if (input.type === 'checkbox' || input.type === 'hidden') return false;
+          const r = input.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        });
+        if (eds.length >= 3) return mark(eds[2]);
+        if (eds.length === 2) return mark(eds[1]);
+        return false;
+      }
       if (op === 'fillPaymentDate') {
         const setInput = (input) => {
           if (!input) return false;
@@ -1861,7 +1898,40 @@ async function fillBadgePaymentDate(page, dateStr) {
   if (ok) {
     logInfo('Badge — Date de paiement forcée', { date_paiement: dateStr });
   }
-  return Boolean(ok);
+  // Saisie clavier réelle : le datepicker Element-UI ignore parfois la valeur DOM,
+  // le v-model ne se met à jour qu'avec une frappe + Enter.
+  const typed = await typeBadgePaymentDate(page, dateStr).catch(() => false);
+  return Boolean(ok || typed);
+}
+
+async function typeBadgePaymentDate(page, dateStr) {
+  const ctx = await resolveDeciplusWorkPage(page);
+  const marked = await badgeDomEvaluate(ctx, 'markPaymentDate');
+  if (!marked) return false;
+  try {
+    const input = ctx.locator('input[data-bc-paydate="1"]').first();
+    if ((await input.count()) === 0) return false;
+    await input.click({ force: true });
+    await input.press('Control+a').catch(() => {});
+    await input.fill('').catch(() => {});
+    await input.type(dateStr, { delay: 40 });
+    await input.press('Enter');
+    await randomDelay(300, 600);
+    const value = ((await input.inputValue().catch(() => '')) || '').trim();
+    const okTyped = value === dateStr;
+    if (okTyped) {
+      logInfo('Badge — Date de paiement saisie au clavier', { date_paiement: dateStr });
+    }
+    return okTyped;
+  } finally {
+    await ctx
+      .evaluate(() => {
+        document
+          .querySelectorAll('input[data-bc-paydate]')
+          .forEach((el) => el.removeAttribute('data-bc-paydate'));
+      })
+      .catch(() => {});
+  }
 }
 
 async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
@@ -2159,6 +2229,11 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
 
   if (productConfig.sale_type === 'carte') {
     result = await buyCarteBadge(page, productConfig, gymConfig, memberId);
+    const enforce = await enforceBadgeEcheance(page, memberId, productConfig).catch((err) => ({
+      ok: false,
+      reason: err.message,
+    }));
+    result.badge_echeance_ok = enforce.ok;
   } else if (productConfig.sale_type === 'abonnement') {
     result = await buyAbonnement(page, productConfig, gymConfig);
 
@@ -2170,6 +2245,10 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       try {
         const badgeResult = await buyCarteBadge(page, badgeProductConfig, gymConfig, memberId);
         result.badge_action = badgeResult.action;
+        const enforce = await enforceBadgeEcheance(page, memberId, badgeProductConfig).catch(
+          (err) => ({ ok: false, reason: err.message })
+        );
+        result.badge_echeance_ok = enforce.ok;
       } catch (err) {
         logWarn('Badge non créé — prélèvement différé requis', {
           order_id: order.order_id,
@@ -2195,12 +2274,139 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
   return { sale_id: null, ...result, member_id: memberId };
 }
 
+/**
+ * Vérification post-vente : ouvre le contrat badge et force l'échéance à J+delayDays
+ * via « Reporter » si Deciplus a gardé sa date par défaut (ex. fin de mois).
+ */
+async function enforceBadgeEcheance(page, memberId, badgeConfig = {}) {
+  const timing = String(badgeConfig.badge_timing || 'deferred').toLowerCase();
+  if (timing === 'immediate' || badgeConfig.paiement_comptant === true) {
+    return { ok: true, skipped: true };
+  }
+  const delayDays = resolveBadgePrelevementDelayDays(badgeConfig);
+  const schedule = badgeScheduleDates(delayDays, resolveBadgeValidityMonths(badgeConfig));
+  const expected = schedule.payStr;
+  const expectedIso = schedule.payDate.toISOString().slice(0, 10);
+
+  const { findActiveContracts, contractUrl } = require('./cancel-sale');
+  await closeGreyboxIfOpen(page);
+  await openMemberCheck(page, memberId);
+  await randomDelay(1000, 1600);
+
+  const contracts = await findActiveContracts(page).catch(() => []);
+  const badge = contracts.find((c) => c.isBadge);
+  if (!badge) {
+    logWarn('Badge — contrat introuvable pour vérification échéance', { member_id: memberId });
+    return { ok: false, reason: 'badge_contract_not_found' };
+  }
+
+  await page
+    .goto(contractUrl(badge.idc), { waitUntil: 'domcontentloaded', timeout: 45000 })
+    .catch(() => {});
+  await randomDelay(1500, 2500);
+
+  const readBody = async () =>
+    ((await page.locator('body').innerText().catch(() => '')) || '').replace(/\s+/g, ' ');
+
+  let bodyText = await readBody();
+  if (bodyText.includes(expected)) {
+    logInfo('Badge — échéance déjà correcte sur le contrat', {
+      member_id: memberId,
+      idc: badge.idc,
+      date_echeance: expected,
+    });
+    return { ok: true };
+  }
+
+  // Bouton « Reporter » sur la première échéance en attente
+  const reporter = page
+    .locator('button:has-text("Reporter"), a:has-text("Reporter"), input[value*="Reporter"]')
+    .first();
+  if ((await reporter.count()) === 0 || !(await reporter.isVisible().catch(() => false))) {
+    logWarn('Badge — bouton Reporter introuvable sur le contrat', {
+      member_id: memberId,
+      idc: badge.idc,
+      expected,
+    });
+    return { ok: false, reason: 'reporter_not_found' };
+  }
+  await reporter.click({ force: true }).catch(() => {});
+  await randomDelay(900, 1500);
+
+  // Renseigner la nouvelle date dans la popup (input date ISO ou texte JJ/MM/AAAA)
+  const filled = await page
+    .evaluate(
+      ({ fr, iso }) => {
+        const setVal = (el, value) => {
+          const proto = el instanceof HTMLInputElement ? HTMLInputElement.prototype : null;
+          const setter = proto && Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) setter.call(el, value);
+          else el.value = value;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        };
+        const dialogs = Array.from(
+          document.querySelectorAll('[role="dialog"], .modal, .el-dialog, .ari-modal, .greybox, body')
+        );
+        for (const scope of dialogs) {
+          const inputs = Array.from(scope.querySelectorAll('input')).filter((el) => {
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0 && !el.disabled && el.type !== 'hidden';
+          });
+          for (const el of inputs) {
+            const hint = `${el.type} ${el.placeholder || ''} ${el.name || ''} ${el.className || ''}`;
+            if (el.type === 'date') {
+              setVal(el, iso);
+              return true;
+            }
+            if (/date|jj\/mm|echeance|échéance/i.test(hint) || /\d{2}\/\d{2}\/\d{4}/.test(el.value)) {
+              setVal(el, fr);
+              return true;
+            }
+          }
+        }
+        return false;
+      },
+      { fr: expected, iso: expectedIso }
+    )
+    .catch(() => false);
+
+  if (!filled) {
+    logWarn('Badge — champ date Reporter introuvable', { member_id: memberId, idc: badge.idc });
+  }
+
+  await clickFirst(
+    page,
+    'button:has-text("Valider"), button:has-text("Confirmer"), button:has-text("Appliquer"), button:has-text("Enregistrer"), input[value*="Valider"]',
+    { force: true }
+  ).catch(() => {});
+  await randomDelay(1200, 2000);
+
+  bodyText = await readBody();
+  const ok = bodyText.includes(expected);
+  if (ok) {
+    logInfo('Badge — échéance reportée à J+' + delayDays, {
+      member_id: memberId,
+      idc: badge.idc,
+      date_echeance: expected,
+    });
+  } else {
+    logWarn('Badge — report échéance non confirmé', {
+      member_id: memberId,
+      idc: badge.idc,
+      expected,
+    });
+  }
+  return { ok, reason: ok ? null : 'not_confirmed' };
+}
+
 async function cancelSaleOnMember(page, memberId) {
   return cancelSale(page, memberId);
 }
 
 module.exports = {
   recordSale,
+  enforceBadgeEcheance,
   cancelSale: cancelSaleOnMember,
   buyAbonnement,
   buyCarteBadge,

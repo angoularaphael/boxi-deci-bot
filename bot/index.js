@@ -107,33 +107,71 @@ async function processCancelJob(page, order) {
     city: order.customer?.city || order.city,
   };
 
-  const notifyMismatch = async (reason) => {
+  const storeBase = (process.env.BOXPLUS_STORE_URL || process.env.STORE_URL || '').replace(/\/$/, '');
+  const storeSecret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+
+  const pushCancelStatus = async (status, { reason = null, mismatchFields = [], cancelledCount = null } = {}) => {
+    if (!storeBase || !storeSecret) return false;
     try {
-      const base = (process.env.BOXPLUS_STORE_URL || process.env.STORE_URL || '').replace(/\/$/, '');
-      const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
-      let sent = false;
-      if (base && secret) {
-        const res = await fetch(`${base}/api/internal/cancel-mismatch`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-sync-secret': secret,
+      const res = await fetch(`${storeBase}/api/internal/cancel-status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-sync-secret': storeSecret },
+        body: JSON.stringify({
+          order_id: order.order_id,
+          status,
+          reason,
+          mismatch_fields: mismatchFields,
+          cancelled_count: cancelledCount,
+          customer: identity,
+        }),
+      });
+      if (!res.ok) logWarn('Statut résiliation boutique échoué', { status: res.status });
+      return res.ok;
+    } catch (err) {
+      logWarn('Statut résiliation boutique non envoyé', { error: err.message });
+      return false;
+    }
+  };
+
+  // Fallback autonome (BotHosting n'a pas le module storefront)
+  const sendMismatchEmailDirect = async (mismatchFields = []) => {
+    const apiKey = String(process.env.BREVO_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+    if (!identity.email || !apiKey.startsWith('xkeysib-')) return false;
+    const labels = { last_name: 'Nom', first_name: 'Prénom', phone: 'Téléphone', birthdate: 'Date de naissance' };
+    const fields = mismatchFields.map((f) => labels[f]).filter(Boolean);
+    const html = `<p>Bonjour ${identity.first_name || ''},</p>
+      <p>Nous avons bien reçu votre demande de résiliation, mais <strong>les informations renseignées ne correspondent pas</strong> à celles enregistrées sur votre fiche adhérent Boxing Center.</p>
+      <p>Pour des raisons de sécurité, une seule information incorrecte (nom, prénom, téléphone ou date de naissance) empêche le traitement automatique.</p>
+      ${fields.length ? `<p>Champ(s) en cause : <strong>${fields.join(', ')}</strong>.</p>` : ''}
+      <p>Merci de vérifier vos informations puis de renouveler la demande depuis <a href="https://box-plus.vercel.app/gerer-abonnement">Gérer mon abonnement</a>.</p>
+      <p>Sportivement,<br/>Boxing Center</p>`;
+    try {
+      const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: { 'api-key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          sender: {
+            name: process.env.BREVO_SENDER_NAME || 'Boxing Center',
+            email: process.env.BREVO_SENDER_EMAIL || 'suzinabot@gmail.com',
           },
-          body: JSON.stringify({ ...identity, reason }),
-        });
-        sent = res.ok;
-        if (!res.ok) {
-          logWarn('Email mismatch résiliation boutique échoué', { status: res.status, reason });
-        }
-      }
+          to: [{ email: identity.email }],
+          subject: 'Résiliation — informations à vérifier — Boxing Center',
+          htmlContent: html,
+        }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  const notifyMismatch = async (reason, mismatchFields = []) => {
+    try {
+      // Le storefront envoie l'email + met à jour le statut (spinner front)
+      let sent = await pushCancelStatus('mismatch', { reason, mismatchFields });
       if (!sent) {
-        try {
-          const { sendCancelMismatchEmail } = require('../storefront/lib/membership');
-          await sendCancelMismatchEmail(identity);
-          sent = true;
-        } catch (err) {
-          logWarn('Email mismatch résiliation local échoué', { error: err.message, reason });
-        }
+        sent = await sendMismatchEmailDirect(mismatchFields);
+        if (sent) logInfo('Email mismatch résiliation envoyé (Brevo direct)', { email: identity.email });
       }
       if (!sent) {
         logWarn('Email mismatch résiliation — aucun canal disponible', { reason });
@@ -147,7 +185,7 @@ async function processCancelJob(page, order) {
   if (!memberId && (identity.first_name || identity.last_name)) {
     const match = await findMemberByIdentity(page, identity);
     if (!match.found) {
-      await notifyMismatch(match.reason || 'identity_mismatch');
+      await notifyMismatch(match.reason || 'identity_mismatch', match.mismatch_fields || []);
       return {
         status: STATUS.MANUAL_REVIEW,
         action: 'cancel',
@@ -156,6 +194,7 @@ async function processCancelJob(page, order) {
         cancel_reason: order.cancel_reason,
         mismatch: true,
         mismatch_reason: match.reason || 'identity_mismatch',
+        mismatch_fields: match.mismatch_fields || [],
       };
     }
     memberId = match.member_id;
@@ -169,7 +208,7 @@ async function processCancelJob(page, order) {
     if (byPhone.found) memberId = byPhone.member_id;
   }
   if (!memberId) {
-    await notifyMismatch('not_found');
+    await notifyMismatch('not_found', ['last_name', 'first_name', 'phone', 'birthdate']);
     return {
       status: STATUS.MANUAL_REVIEW,
       action: 'cancel',
@@ -181,6 +220,7 @@ async function processCancelJob(page, order) {
   }
 
   const result = await cancelSale(page, memberId);
+  await pushCancelStatus('done', { cancelledCount: result?.cancelled_count ?? null });
   return {
     status: STATUS.SUCCESS,
     action: 'cancel',

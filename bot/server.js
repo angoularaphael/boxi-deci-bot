@@ -20,7 +20,7 @@ function isAuthorized(req) {
 
 function createBotServer() {
   const app = express();
-  app.use(express.json({ limit: '1mb' }));
+  app.use(express.json({ limit: '6mb' }));
 
   app.get('/health', (_req, res) => {
     res.json({ ok: true, service: 'boxi-deci-bot', stats: getQueueStats() });

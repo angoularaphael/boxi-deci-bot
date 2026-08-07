@@ -11,6 +11,10 @@ function normalizeSiteLabel(value) {
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\bst\b/g, 'saint')
+    .replace(/\bste\b/g, 'sainte')
+    .replace(/\bboxing center\b/g, '')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
