@@ -56,23 +56,36 @@ async function clickFirst(ctx, selectors, opts = {}) {
   return false;
 }
 
+/** Fiche membre Deciplus — pas le formulaire de recherche (#i_nom / #i_prenom / #i_tel). */
+async function isDeciplusMemberForm(ctx) {
+  try {
+    if ((await ctx.locator('form[name="db1_form"]').count()) > 0) return true;
+    const hasMemberNom = (await ctx.locator('input[name="nom"]:not(#i_nom)').count()) > 0;
+    if (!hasMemberNom) return false;
+    const hasAdr = (await ctx.locator('input[name="adr1"]').count()) > 0;
+    const hasBirth = (await ctx.locator('input[name="date_naissance"]').count()) > 0;
+    const hasIdj = (await ctx.locator('input[name="idj"], input#idj').count()) > 0;
+    const hasTelSms = (await ctx.locator('input[name="telsms"]').count()) > 0;
+    return hasAdr || hasBirth || hasIdj || hasTelSms;
+  } catch {
+    return false;
+  }
+}
+
 async function getMemberFormContext(page, { waitMs = 15000 } = {}) {
   const deadline = Date.now() + Math.max(0, waitMs);
   do {
     try {
-      if ((await page.locator('form[name="db1_form"]').count()) > 0) return page;
-      if ((await page.locator('input[name="nom"], input[name="prenom"], input[name="adr1"]').count()) > 0) {
-        return page;
-      }
+      // Iframes d’abord : la recherche parent a aussi input[name="nom"] (#i_nom)
       for (const frame of page.frames()) {
         if (frame === page.mainFrame()) continue;
         try {
-          if ((await frame.locator('form[name="db1_form"]').count()) > 0) return frame;
-          if ((await frame.locator('input[name="adr1"], input[name="nom"]').count()) > 0) return frame;
+          if (await isDeciplusMemberForm(frame)) return frame;
         } catch {
           /* iframe nextgen en cours de chargement */
         }
       }
+      if (await isDeciplusMemberForm(page)) return page;
     } catch {
       /* navigation */
     }
@@ -260,38 +273,75 @@ function phonesMatch(a, b) {
   return Boolean(na && nb && na === nb);
 }
 
-/** Lit la fiche ouverte — attend que nom/prénom soient peuplés (évite faux mismatch). */
+/** Lit la fiche ouverte — jamais les champs recherche #i_* . */
 async function readMemberIdentityFields(page) {
-  const sel = getSelectors().member_form_selectors || {};
-  let last = { lastName: '', firstName: '', birth: '', phone: '' };
-  for (let attempt = 0; attempt < 8; attempt += 1) {
+  let last = { lastName: '', firstName: '', birth: '', phone: '', fromMemberForm: false };
+  for (let attempt = 0; attempt < 10; attempt += 1) {
     const ctx = await getMemberFormContext(page);
-    const lastName = await ctx
-      .locator(sel.nom || 'input[name="nom"]')
+    const onMember = await isDeciplusMemberForm(ctx);
+    if (!onMember) {
+      await page.waitForTimeout(400);
+      continue;
+    }
+    const scope =
+      (await ctx.locator('form[name="db1_form"]').count()) > 0
+        ? ctx.locator('form[name="db1_form"]').first()
+        : ctx;
+    const lastName = await scope
+      .locator('input[name="nom"]:not(#i_nom)')
       .first()
       .inputValue()
       .catch(() => '');
-    const firstName = await ctx
-      .locator(sel.prenom || 'input[name="prenom"]')
+    const firstName = await scope
+      .locator('input[name="prenom"]:not(#i_prenom)')
       .first()
       .inputValue()
       .catch(() => '');
-    const birth = await ctx
-      .locator(sel.date_naissance || 'input[name="date_naissance"]')
+    const birth = await scope
+      .locator('input[name="date_naissance"]')
       .first()
       .inputValue()
       .catch(() => '');
-    const phoneSel =
-      sel.telsms ||
-      sel.tel ||
-      sel.telephone ||
-      'input[name="telsms"], input[name="tel"], input[name="telephone"], input[name="mobile"]';
-    const phone = await ctx.locator(phoneSel).first().inputValue().catch(() => '');
-    last = { lastName, firstName, birth, phone };
+    let phone = await scope.locator('input[name="telsms"]').first().inputValue().catch(() => '');
+    if (!phone) {
+      phone = await scope
+        .locator('input[name="tel"]:not(#i_tel), input[name="telephone"], input[name="mobile"]')
+        .first()
+        .inputValue()
+        .catch(() => '');
+    }
+    last = { lastName, firstName, birth, phone, fromMemberForm: true };
     if (String(lastName || firstName).trim()) break;
     await page.waitForTimeout(350);
   }
   return last;
+}
+
+/** Compare identité saisie vs fiche — retourne uniquement les champs réellement faux. */
+function computeIdentityMismatches(form, identity = {}) {
+  const expectedBirth = birthdateToDeciplus(identity.birthdate);
+  const lastNameOk = normalizePerson(form.lastName) === normalizePerson(identity.last_name);
+  const firstNameOk = normalizePerson(form.firstName) === normalizePerson(identity.first_name);
+  const normBirth = (v) =>
+    String(v || '')
+      .trim()
+      .replace(/\s/g, '')
+      .replace(/-/g, '/');
+  const birthOk = !expectedBirth || normBirth(form.birth) === normBirth(expectedBirth);
+  const phoneOk = form.phone
+    ? phonesMatch(form.phone, identity.phone)
+    : Boolean(form.foundViaPhone);
+
+  // Champs en erreur = ceux qui ne matchent PAS (ne jamais inverser)
+  const mismatchFields = [];
+  if (!lastNameOk) mismatchFields.push('last_name');
+  if (!firstNameOk) mismatchFields.push('first_name');
+  if (!birthOk) mismatchFields.push('birthdate');
+  if (!phoneOk) mismatchFields.push('phone');
+  return {
+    mismatchFields,
+    checks: { lastNameOk, firstNameOk, birthOk, phoneOk },
+  };
 }
 
 /**
@@ -306,47 +356,40 @@ async function findMemberByIdentity(page, identity = {}) {
   let hit = await searchMember(page, phone);
   if (hit.found) {
     foundViaPhone = true;
-  } else if (identity.last_name || identity.first_name) {
-    // Téléphone introuvable → tenter par nom (casse Deciplus souvent tolérée)
+  }
+  if (!hit.found && identity.email) {
+    hit = await searchMember(page, identity.email);
+  }
+  if (!hit.found && (identity.last_name || identity.first_name)) {
     hit = await searchMemberByName(page, identity.last_name, identity.first_name);
   }
+  // Relancer par nom seul si prénom saisi ≠ fiche (casse / variante)
+  if (!hit.found && identity.last_name) {
+    hit = await searchMemberByName(page, identity.last_name, '');
+  }
   if (!hit.found) {
-    // Pas de fiche trouvée : on ne peut pas affirmer que nom/prénom sont faux
-    return { found: false, reason: 'not_found', mismatch_fields: ['phone'] };
+    // Ne pas colorier de champs au hasard — on n’a pas pu ouvrir de fiche
+    return { found: false, reason: 'not_found', mismatch_fields: [] };
   }
 
   const form = await readMemberIdentityFields(page);
-  if (!String(form.lastName || form.firstName).trim()) {
+  if (!form.fromMemberForm || !String(form.lastName || form.firstName).trim()) {
     logWarn('Fiche membre Deciplus illisible pour comparaison identité', {
       member_id: hit.member_id,
     });
     return { found: false, reason: 'form_unreadable', mismatch_fields: [] };
   }
 
-  const expectedBirth = birthdateToDeciplus(identity.birthdate);
-  const lastNameOk = normalizePerson(form.lastName) === normalizePerson(identity.last_name);
-  const firstNameOk = normalizePerson(form.firstName) === normalizePerson(identity.first_name);
-  const birthOk =
-    !expectedBirth ||
-    String(form.birth || '')
-      .replace(/\s/g, '')
-      .replace(/-/g, '/') ===
-      String(expectedBirth || '')
-        .replace(/\s/g, '')
-        .replace(/-/g, '/');
-  // Si la fiche a un tel : comparer. Sinon : OK seulement si la recherche téléphone a trouvé la fiche.
-  const phoneOk = form.phone ? phonesMatch(form.phone, identity.phone) : foundViaPhone;
-
-  const mismatchFields = [];
-  if (!lastNameOk) mismatchFields.push('last_name');
-  if (!firstNameOk) mismatchFields.push('first_name');
-  if (!birthOk) mismatchFields.push('birthdate');
-  if (!phoneOk) mismatchFields.push('phone');
+  const { mismatchFields, checks } = computeIdentityMismatches(
+    { ...form, foundViaPhone },
+    identity
+  );
 
   if (mismatchFields.length) {
     logWarn('Identité membre Deciplus non concordante', {
       member_id: hit.member_id,
       mismatch_fields: mismatchFields,
+      checks,
     });
     return {
       found: false,

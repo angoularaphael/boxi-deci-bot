@@ -283,7 +283,8 @@ async function processCancelJob(page, order) {
     if (byPhone.found) memberId = byPhone.member_id;
   }
   if (!memberId) {
-    await notifyMismatch('not_found', ['last_name', 'first_name', 'phone', 'birthdate']);
+    // Pas de champs ciblés : on n’a pas pu comparer à une fiche
+    await notifyMismatch('not_found', []);
     return {
       status: STATUS.MANUAL_REVIEW,
       action: 'cancel',
