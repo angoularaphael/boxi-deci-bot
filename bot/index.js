@@ -568,7 +568,7 @@ async function processJob(page, job) {
 
 /** Vérif identité seule (changement d’abo / pré-check) — même statut mismatch que résiliation. */
 async function processVerifyIdentityJob(page, order) {
-  const { findMemberByIdentity } = require('./member');
+  const { findMemberByIdentity, CHANGE_MATCH_FIELDS } = require('./member');
   const identity = {
     first_name: order.customer?.first_name || order.first_name,
     last_name: order.customer?.last_name || order.last_name,
@@ -605,7 +605,11 @@ async function processVerifyIdentityJob(page, order) {
     }
   };
 
-  const match = await findMemberByIdentity(page, identity);
+  const matchMode = String(order.verify_mode || order.match_mode || 'change').toLowerCase();
+  // Changement d’abo : nom + prénom + date de naissance (pas le téléphone)
+  const matchFields =
+    matchMode === 'cancel' || matchMode === 'full' ? undefined : CHANGE_MATCH_FIELDS;
+  const match = await findMemberByIdentity(page, identity, { matchFields });
   if (!match.found) {
     await pushStatus('mismatch', {
       mismatchFields: match.mismatch_fields || [],

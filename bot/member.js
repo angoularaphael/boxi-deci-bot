@@ -422,8 +422,13 @@ async function readMemberIdentityFields(page) {
   return last;
 }
 
+const DEFAULT_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate', 'phone'];
+/** Changement d’abo : nom + prénom + date de naissance uniquement. */
+const CHANGE_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate'];
+
 /** Compare identité saisie vs fiche — retourne uniquement les champs réellement faux. */
-function computeIdentityMismatches(form, identity = {}) {
+function computeIdentityMismatches(form, identity = {}, { fields = DEFAULT_MATCH_FIELDS } = {}) {
+  const check = (name) => fields.includes(name);
   const expectedBirth = birthdateToDeciplus(identity.birthdate);
   const lastNameOk = normalizePerson(form.lastName) === normalizePerson(identity.last_name);
   const firstNameOk = normalizePerson(form.firstName) === normalizePerson(identity.first_name);
@@ -439,10 +444,10 @@ function computeIdentityMismatches(form, identity = {}) {
 
   // Champs en erreur = ceux qui ne matchent PAS (ne jamais inverser)
   const mismatchFields = [];
-  if (!lastNameOk) mismatchFields.push('last_name');
-  if (!firstNameOk) mismatchFields.push('first_name');
-  if (!birthOk) mismatchFields.push('birthdate');
-  if (!phoneOk) mismatchFields.push('phone');
+  if (check('last_name') && !lastNameOk) mismatchFields.push('last_name');
+  if (check('first_name') && !firstNameOk) mismatchFields.push('first_name');
+  if (check('birthdate') && !birthOk) mismatchFields.push('birthdate');
+  if (check('phone') && !phoneOk) mismatchFields.push('phone');
   return {
     mismatchFields,
     checks: { lastNameOk, firstNameOk, birthOk, phoneOk },
@@ -450,12 +455,25 @@ function computeIdentityMismatches(form, identity = {}) {
 }
 
 /**
- * Match résiliation : nom + prénom + naissance + téléphone.
- * Comparaison insensible à la casse / accents. Ne signale que les champs réellement faux.
+ * Match identité Deciplus.
+ * - résiliation : nom + prénom + naissance + téléphone
+ * - changement d’abo (matchFields = CHANGE_MATCH_FIELDS) : nom + prénom + naissance
  */
-async function findMemberByIdentity(page, identity = {}) {
+async function findMemberByIdentity(page, identity = {}, options = {}) {
+  const matchFields = Array.isArray(options.matchFields) && options.matchFields.length
+    ? options.matchFields
+    : DEFAULT_MATCH_FIELDS;
   const phone = identity.phone;
-  if (!phone) return { found: false, reason: 'missing_phone', mismatch_fields: ['phone'] };
+  if (matchFields.includes('phone') && !phone) {
+    return { found: false, reason: 'missing_phone', mismatch_fields: ['phone'] };
+  }
+  if (!identity.last_name || !identity.first_name || !identity.birthdate) {
+    const missing = [];
+    if (!identity.last_name) missing.push('last_name');
+    if (!identity.first_name) missing.push('first_name');
+    if (!identity.birthdate) missing.push('birthdate');
+    return { found: false, reason: 'missing_identity', mismatch_fields: missing };
+  }
 
   // Email d’abord (plus unique) — stop dès le 1er hit (pas de recherches inutiles)
   let foundViaPhone = false;
@@ -489,7 +507,8 @@ async function findMemberByIdentity(page, identity = {}) {
 
   const { mismatchFields, checks } = computeIdentityMismatches(
     { ...form, foundViaPhone },
-    identity
+    identity,
+    { fields: matchFields }
   );
 
   if (mismatchFields.length) {
@@ -497,6 +516,7 @@ async function findMemberByIdentity(page, identity = {}) {
       member_id: hit.member_id,
       mismatch_fields: mismatchFields,
       checks,
+      match_fields: matchFields,
     });
     return {
       found: false,
@@ -1308,6 +1328,8 @@ module.exports = {
   searchMemberByName,
   findMemberByIdentity,
   computeIdentityMismatches,
+  DEFAULT_MATCH_FIELDS,
+  CHANGE_MATCH_FIELDS,
   startNewMemberFromSelect,
   openNewMemberForm,
   fillMemberForm,
