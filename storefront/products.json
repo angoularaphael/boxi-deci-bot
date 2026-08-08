@@ -4,21 +4,21 @@
     "category": "Abonnements",
     "name": "OFFRE A 29€",
     "tagline": "Offre DUO rentrée 2026",
-    "description": "Offre DUO rentrée : 29 € par personne toutes les 4 semaines, sans engagement. Accès aux 5 salles et à toutes les disciplines.",
+    "description": "Inscrivez-vous à deux : 29 € par personne toutes les 4 semaines, sans engagement. Accès aux 5 salles et à toutes les disciplines.",
     "price_cents": 2900,
     "price_label": "29,00 €",
     "deciplus_total_note": "Total contrat Deciplus : 419,86 € (échéances)",
     "badge": "Rentrée 2026",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "CB : 1er mois · suite par prélèvement IBAN"
+    "installments_note": "1ʳᵉ échéance par carte · ensuite prélèvement automatique"
   },
   {
     "id": "offre-promo-9",
     "category": "Abonnements",
     "name": "OFFRE PROMO 9€",
     "tagline": "Offre promo 9 €",
-    "description": "Offre promo : 9 € la première période, sans engagement. Accès aux 5 salles et à toutes les disciplines.",
+    "description": "Démarrez pour 9 € la première période, sans engagement. Accès aux 5 salles et à toutes les disciplines.",
     "price_cents": 900,
     "price_label": "9,00 €",
     "requires_iban": true,
@@ -35,7 +35,7 @@
     "deciplus_total_note": "Total contrat Deciplus : 545,86 €",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "1ère échéance CB · suivantes IBAN"
+    "installments_note": "1ʳᵉ échéance par carte · ensuite prélèvement automatique"
   },
   {
     "id": "offre-promo-etudiant",
@@ -48,14 +48,14 @@
     "deciplus_total_note": "Total contrat Deciplus : 489,86 €",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "1ère échéance CB · suivantes IBAN"
+    "installments_note": "1ʳᵉ échéance par carte · ensuite prélèvement automatique"
   },
   {
     "id": "offre-saison",
     "category": "Abonnements",
     "name": "OFFRE PROMO 12 MOIS",
     "tagline": "Saison 12 mois",
-    "description": "Offre promo saison : 259 € pour 12 mois d'accès illimité aux 5 salles et à toutes les disciplines. Paiement comptant (une fois) ou 4× sans frais — aucun IBAN, vente enregistrée en comptant sur Deciplus.",
+    "description": "12 mois d’accès illimité aux 5 salles et à toutes les disciplines pour 259 €. Payez en une fois ou en 4× sans frais — sans prélèvement mensuel.",
     "price_cents": 25900,
     "price_label": "259,00 €",
     "deciplus_total_note": "Deciplus affiche 295,00 € (12 mois)",
@@ -63,14 +63,14 @@
     "requires_iban": false,
     "requires_payment": true,
     "supports_installment_choice": true,
-    "installments_note": "Comptant (Stripe/PayPal) ou 4× sans frais (PayPlug/PayPal)"
+    "installments_note": "En une fois ou en 4× sans frais"
   },
   {
     "id": "boxe-educative",
     "category": "Abonnements",
     "name": "BOXE EDUCATIVE",
     "tagline": "Boxe éducative",
-    "description": "Boxe éducative enfants & ados : apprentissage technique et ludique, sans coups portés. Saison complète encadrée par nos coachs.",
+    "description": "Boxe éducative enfants & ados : apprentissage ludique et progressif, sans coups portés. Saison complète encadrée par nos coachs.",
     "price_cents": 29500,
     "price_label": "295,00 €",
     "requires_iban": true,
@@ -99,7 +99,7 @@
     "deciplus_total_note": "Total contrat Deciplus : 443,88 €",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "1ère échéance CB · suivantes IBAN"
+    "installments_note": "1ʳᵉ échéance par carte · ensuite prélèvement automatique"
   },
   {
     "id": "44-99-4-semaines",
@@ -112,7 +112,7 @@
     "deciplus_total_note": "Total contrat Deciplus : 539,88 €",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "1ère échéance CB · suivantes IBAN"
+    "installments_note": "1ʳᵉ échéance par carte · ensuite prélèvement automatique"
   },
   {
     "id": "comptant-12-mois",
@@ -124,7 +124,7 @@
     "price_label": "400,00 €",
     "requires_iban": false,
     "requires_payment": true,
-    "installments_note": "Paiement unique CB — comptant Deciplus"
+    "installments_note": "Paiement unique par carte ou PayPal"
   },
   {
     "id": "comptant-6-mois",
@@ -136,7 +136,7 @@
     "price_label": "250,00 €",
     "requires_iban": false,
     "requires_payment": true,
-    "installments_note": "Paiement unique CB"
+    "installments_note": "Paiement unique par carte ou PayPal"
   },
   {
     "id": "comptant-3-mois",
@@ -148,14 +148,14 @@
     "price_label": "150,00 €",
     "requires_iban": false,
     "requires_payment": true,
-    "installments_note": "Paiement unique CB"
+    "installments_note": "Paiement unique par carte ou PayPal"
   },
   {
     "id": "association",
     "category": "Abonnements",
     "name": "ASSOCIATION SPORTIVE BOXING CENTER",
     "tagline": "Cotisation association",
-    "description": "Adhésion association sportive.",
+    "description": "Adhésion à l’association sportive Boxing Center.",
     "price_cents": 5000,
     "price_label": "50,00 €",
     "requires_iban": true,
@@ -178,19 +178,19 @@
     "category": "Cartes",
     "name": "Badge",
     "tagline": "Carte d'accès (Badge)",
-    "description": "Badge Deciplus — catégorie Cartes, pas Abonnements.",
+    "description": "Votre badge d’accès au club — indispensable pour entrer en salle.",
     "price_cents": 3499,
     "price_label": "34,99 €",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "Prélèvement J+7 dans Deciplus"
+    "installments_note": "Prélèvement automatique sous quelques jours"
   },
   {
     "id": "seance-essai",
     "category": "Essai",
     "name": "Séance d'essai gratuite",
     "tagline": "Séance d'essai",
-    "description": "Une séance offerte — fiche membre Deciplus sans vente.",
+    "description": "Venez découvrir le club : une séance pour tester l’ambiance, les coachs et la discipline qui vous attire.",
     "price_cents": 0,
     "price_label": "Gratuit",
     "requires_iban": false,
