@@ -552,10 +552,72 @@ async function processJob(page, job) {
     return processCancelJob(page, order);
   }
 
+  if (order.action === 'verify_identity') {
+    return processVerifyIdentityJob(page, order);
+  }
+
   return processSaleJob(page, order, {
     file: job.file,
     checkpoint: job.checkpoint || {},
   });
+}
+
+/** Vérif identité seule (changement d’abo / pré-check) — même statut mismatch que résiliation. */
+async function processVerifyIdentityJob(page, order) {
+  const { findMemberByIdentity } = require('./member');
+  const identity = {
+    first_name: order.customer?.first_name || order.first_name,
+    last_name: order.customer?.last_name || order.last_name,
+    birthdate: order.customer?.birthdate || order.birthdate,
+    phone: order.customer?.phone || order.phone,
+    email: order.customer?.email || order.email,
+  };
+  const storeBase = (
+    order.status_callback_base ||
+    process.env.BOXPLUS_STORE_URL ||
+    process.env.STORE_URL ||
+    ''
+  ).replace(/\/$/, '');
+  const storeSecret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+
+  const pushStatus = async (status, mismatchFields = [], reason = null) => {
+    if (!storeBase || !storeSecret) return false;
+    try {
+      const res = await fetch(`${storeBase}/api/internal/cancel-status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-sync-secret': storeSecret },
+        body: JSON.stringify({
+          order_id: order.order_id,
+          status,
+          reason,
+          mismatch_fields: mismatchFields,
+          customer: identity,
+        }),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  };
+
+  const match = await findMemberByIdentity(page, identity);
+  if (!match.found) {
+    await pushStatus('mismatch', match.mismatch_fields || [], match.reason || 'identity_mismatch');
+    return {
+      status: STATUS.MANUAL_REVIEW,
+      action: 'verify_identity',
+      mismatch: true,
+      mismatch_reason: match.reason || 'identity_mismatch',
+      mismatch_fields: match.mismatch_fields || [],
+    };
+  }
+  await pushStatus('verified', [], null);
+  return {
+    status: STATUS.SUCCESS,
+    action: 'verify_identity',
+    deciplus_member_id: match.member_id,
+    verified: true,
+  };
 }
 
 function rejectJob(job, filePath, error) {
