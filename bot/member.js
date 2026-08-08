@@ -191,8 +191,45 @@ async function clearMemberSearchFields(page) {
   }
 }
 
-async function readSearchHit(page) {
+async function extractMemberIdFromAnyContext(page) {
   const fromUrl = extractMemberIdFromUrl(page.url());
+  if (fromUrl) return fromUrl;
+  for (const frame of page.frames()) {
+    try {
+      const id = extractMemberIdFromUrl(frame.url());
+      if (id) return id;
+    } catch {
+      /* frame détachée */
+    }
+  }
+  return null;
+}
+
+async function submitMemberSearch(page) {
+  const searchBtn = page
+    .locator(
+      'input[type="submit"][value*="Recherche" i], input[type="submit"][value*="Chercher" i], button:has-text("Rechercher"), #buttonSearch, input.albut_dw[type="submit"]'
+    )
+    .first();
+  if ((await searchBtn.count()) > 0 && (await searchBtn.isVisible().catch(() => false))) {
+    await searchBtn.click().catch(() => {});
+  } else {
+    await page.keyboard.press('Enter').catch(() => {});
+  }
+  await randomDelay(1000, 1800);
+  await page.waitForLoadState('domcontentloaded', { timeout: 12000 }).catch(() => {});
+  await dismissJqueryUiOverlay(page);
+  // Laisser le temps à un résultat unique de s’ouvrir (souvent en iframe)
+  for (let i = 0; i < 6; i += 1) {
+    const id = await extractMemberIdFromAnyContext(page);
+    if (id) return;
+    if ((await page.locator('a[href*="idj="], a[href*="idj%3D"]').count()) > 0) return;
+    await page.waitForTimeout(350);
+  }
+}
+
+async function readSearchHit(page) {
+  const fromUrl = await extractMemberIdFromAnyContext(page);
   if (fromUrl) {
     logInfo('Membre Deciplus trouvé', { member_id: fromUrl });
     return { found: true, member_id: fromUrl };
@@ -219,13 +256,14 @@ async function searchMember(page, query) {
     await fillFirst(page, sel.quick_search_selectors?.tel || '#i_tel', phoneForDeciplus(query));
   }
 
-  await page.keyboard.press('Enter').catch(() => {});
-  await randomDelay(600, 1200);
-  await dismissJqueryUiOverlay(page);
+  await submitMemberSearch(page);
 
   const hit = await readSearchHit(page);
   if (!hit.found) {
-    logInfo('Membre Deciplus introuvable', { via: query.includes('@') ? 'email' : 'phone' });
+    logInfo('Membre Deciplus introuvable', {
+      via: query.includes('@') ? 'email' : 'phone',
+      url: page.url(),
+    });
   }
   return hit;
 }
@@ -241,12 +279,10 @@ async function searchMemberByName(page, lastName, firstName) {
   if (lastName) await fillFirst(page, sel.quick_search_selectors?.nom || '#i_nom', lastName);
   if (firstName) await fillFirst(page, sel.quick_search_selectors?.prenom || '#i_prenom', firstName);
 
-  await page.keyboard.press('Enter').catch(() => {});
-  await randomDelay(600, 1200);
-  await dismissJqueryUiOverlay(page);
+  await submitMemberSearch(page);
 
   const hit = await readSearchHit(page);
-  if (!hit.found) logInfo('Membre Deciplus introuvable', { via: 'name' });
+  if (!hit.found) logInfo('Membre Deciplus introuvable', { via: 'name', url: page.url() });
   return hit;
 }
 
@@ -419,18 +455,47 @@ async function extractMemberIdFromForm(page) {
 }
 
 async function clickFirstMemberResult(page) {
-  const links = page.locator(
-    'a[href*="idj="], a[href*="check.php?idj="], a[href*="joueurs.php?idj="]'
-  );
-  const count = await links.count();
-  for (let i = 0; i < count; i += 1) {
-    const href = (await links.nth(i).getAttribute('href').catch(() => '')) || '';
-    const id = extractMemberIdFromUrl(href);
-    if (!id) continue;
-    await links.nth(i).click().catch(() => {});
-    await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
-    await randomDelay();
-    return extractMemberIdFromUrl(page.url()) || id;
+  const contexts = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
+  const linkSel =
+    'a[href*="idj="], a[href*="idj%3D"], a[href*="check.php"], a[href*="joueurs.php"], a[href*="select.php"][href*="idj"]';
+
+  for (const ctx of contexts) {
+    let links;
+    try {
+      links = ctx.locator(linkSel);
+    } catch {
+      continue;
+    }
+    const count = await links.count().catch(() => 0);
+    for (let i = 0; i < count; i += 1) {
+      const href = (await links.nth(i).getAttribute('href').catch(() => '')) || '';
+      const id = extractMemberIdFromUrl(href);
+      if (!id) continue;
+      await links.nth(i).click().catch(() => {});
+      await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+      await randomDelay(600, 1200);
+      return (await extractMemberIdFromAnyContext(page)) || id;
+    }
+  }
+
+  // Contenu HTML (lien encodé / onclick) dans la page ou les iframes
+  for (const ctx of contexts) {
+    const html = await ctx.content().catch(() => '');
+    const m =
+      html.match(/[?&]idj=(\d+)/i) ||
+      html.match(/idj%3D(\d+)/i) ||
+      html.match(/idjnew[=%]+(\d+)/i);
+    if (!m || m[1] === 'new') continue;
+    const id = m[1];
+    const origin = new URL(page.url()).origin;
+    await page
+      .goto(new URL(`check.php?idj=${id}`, origin).href, {
+        waitUntil: 'domcontentloaded',
+        timeout: navTimeout(),
+      })
+      .catch(() => {});
+    await randomDelay(600, 1200);
+    return (await extractMemberIdFromAnyContext(page)) || id;
   }
   return null;
 }

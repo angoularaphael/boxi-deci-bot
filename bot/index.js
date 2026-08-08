@@ -200,7 +200,13 @@ async function processCancelJob(page, order) {
           customer: identity,
         }),
       });
-      if (!res.ok) logWarn('Statut résiliation boutique échoué', { status: res.status });
+      if (!res.ok) {
+        const bodyText = await res.text().catch(() => '');
+        logWarn('Statut résiliation boutique échoué', {
+          status: res.status,
+          body: String(bodyText).slice(0, 240),
+        });
+      }
       return res.ok;
     } catch (err) {
       logWarn('Statut résiliation boutique non envoyé', { error: err.message });
