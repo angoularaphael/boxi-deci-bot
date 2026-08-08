@@ -5,7 +5,13 @@
 require('dotenv').config();
 
 const { login, isMfaAuthError, isSessionRecoverableError } = require('./auth');
-const { runWithSession, closeBrowser, sessionFileChanged } = require('./browser-pool');
+  const {
+    runWithSession,
+    closeBrowser,
+    sessionFileChanged,
+    syncLoadedStorageMtime,
+    hasActiveBrowser,
+  } = require('./browser-pool');
 const { findOrCreateMember, resetMemberSearchContext, uploadMemberPhoto } = require('./member');
 const { recordSale } = require('./sale');
 const { setMemberIban, openMemberCheck } = require('./wallet');
@@ -542,6 +548,7 @@ async function processOneJob(job) {
     if (sessionFileChanged()) {
       logWarn('Session changée avant job — rechargement navigateur');
       await closeBrowser();
+      syncLoadedStorageMtime();
     }
 
     const outcome = await runWithSession('job', async (page) => {
@@ -650,8 +657,12 @@ async function runLoop(once = false) {
     requeueInterruptedJobs(STALE_PROCESSING_MS);
 
     if (sessionFileChanged()) {
-      logWarn('storage-state.json modifié — fermeture navigateur pour charger la nouvelle session');
-      await closeBrowser();
+      if (hasActiveBrowser()) {
+        logWarn('storage-state.json modifié — fermeture navigateur pour charger la nouvelle session');
+        await closeBrowser();
+      }
+      // Aligner l'horloge même sans navigateur ouvert — sinon spam WARN à chaque poll
+      syncLoadedStorageMtime();
     }
 
     const pending = listPending();
