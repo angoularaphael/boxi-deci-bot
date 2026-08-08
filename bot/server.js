@@ -4,7 +4,7 @@
 require('dotenv').config();
 
 const express = require('express');
-const { enqueue, getQueueStats, STATUS } = require('../lib/queue');
+const { enqueue, getQueueStats, cancelJob, getProcessedRecord, findJobFile, STATUS } = require('../lib/queue');
 const { normalizeOrder, validateOrder } = require('../lib/normalize');
 const { logInfo, logError } = require('../lib/logger');
 
@@ -54,6 +54,30 @@ function createBotServer() {
       return res.status(401).json({ ok: false, error: 'unauthorized' });
     }
     res.json({ ok: true, ...getQueueStats(), STATUS });
+  });
+
+  app.get('/api/jobs/:id', (req, res) => {
+    if (!isAuthorized(req)) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    const record = getProcessedRecord(req.params.id);
+    res.json({ ok: true, job_id: req.params.id, processed: record || null });
+  });
+
+  app.post('/api/jobs/:id/cancel', (req, res) => {
+    if (!isAuthorized(req)) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    try {
+      const reason = String(req.body?.reason || 'cancelled_by_admin').slice(0, 200);
+      const result = cancelJob(req.params.id, reason);
+      if (!result.ok) return res.status(400).json(result);
+      logInfo('Job annulé via API', { job_id: result.job_id, reason });
+      res.json(result);
+    } catch (err) {
+      logError('Annulation job échouée', { error: err.message });
+      res.status(500).json({ ok: false, error: err.message });
+    }
   });
 
   return app;
