@@ -522,6 +522,18 @@ async function processSaleJob(page, order, jobMeta = {}) {
   const finalStatus =
     saleResult.manual_review ? STATUS.MANUAL_REVIEW : STATUS.SUCCESS;
 
+  if (
+    finalStatus === STATUS.SUCCESS &&
+    (order.notify_change_complete || order.raw?.notify_change_complete)
+  ) {
+    await notifyMembershipChangeComplete(order, memberId).catch((err) => {
+      logWarn('Notification fin changement abo échouée', {
+        order_id: order.order_id,
+        error: err.message,
+      });
+    });
+  }
+
   await resetMemberSearchContext(page).catch((err) => {
     logWarn('Retour select.php après job ignoré', { order_id: order.order_id, error: err.message });
   });
@@ -538,6 +550,68 @@ async function processSaleJob(page, order, jobMeta = {}) {
     badge_error: saleResult.badge_error || null,
     photo_uploaded: Boolean(photoResult?.ok || checkpoint.photo_done),
   };
+}
+
+/** E-mail client à la fin du job changement prélèvement → comptant. */
+async function notifyMembershipChangeComplete(order, memberId) {
+  const email = order.customer?.email || order.email;
+  if (!email || /@boxplus-test\.local$/i.test(String(email))) {
+    logInfo('Email changement abo ignoré (test / sans email)', { order_id: order.order_id });
+    return;
+  }
+  const productName =
+    order.change_product_name || order.product_name || order.raw?.change_product_name || 'abonnement comptant';
+  const payload = {
+    order_id: order.order_id,
+    member_id: memberId,
+    email,
+    first_name: order.customer?.first_name,
+    last_name: order.customer?.last_name,
+    product_name: productName,
+    gym: order.gym,
+  };
+
+  // 1) Brevo direct (BotHosting)
+  const apiKey = String(process.env.BREVO_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+  if (apiKey.startsWith('xkeysib-')) {
+    const html = `<p>Bonjour ${payload.first_name || ''},</p>
+      <p>Bonne nouvelle : votre passage en <strong>${productName}</strong> est <strong>bien enregistré et actif</strong>.</p>
+      <p>Votre ancien prélèvement a été coupé et le nouvel abonnement comptant est en place. Il peut mettre <strong>quelques minutes</strong> à apparaître partout côté club.</p>
+      <p>À bientôt sur le ring,<br/>Boxing Center</p>`;
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'api-key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        sender: {
+          name: process.env.BREVO_SENDER_NAME || 'Boxing Center',
+          email: process.env.BREVO_SENDER_EMAIL || 'suzinabot@gmail.com',
+        },
+        to: [{ email }],
+        subject: 'Votre abonnement comptant est actif — Boxing Center',
+        htmlContent: html,
+      }),
+    });
+    if (res.ok) {
+      logInfo('Email changement abo envoyé (Brevo direct)', { order_id: order.order_id });
+      return;
+    }
+    logWarn('Brevo direct changement abo échoué', { status: res.status });
+  }
+
+  // 2) Relais boutique
+  const base = (process.env.BOXPLUS_STORE_URL || process.env.STORE_URL || '').replace(/\/$/, '');
+  const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+  if (!base || !secret) return;
+  const res = await fetch(`${base}/api/internal/change-complete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-sync-secret': secret },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    logWarn('Relais email changement abo boutique échoué', { status: res.status });
+  } else {
+    logInfo('Email changement abo relayé via boutique', { order_id: order.order_id });
+  }
 }
 
 async function processJob(page, job) {
