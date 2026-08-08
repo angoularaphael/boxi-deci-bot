@@ -259,7 +259,7 @@ async function saveSession(context, opts = {}) {
 }
 
 function isSessionRecoverableError(message = '') {
-  return /session expir|token.*introuvable|relancer login|not logged|login\.php|Unauthorized|\b401\b|storage-state|connexion.*échou|Déconnexion|session Deciplus|déjà pas connect|auth.*expir|cookie/i.test(
+  return /session expir|token.*introuvable|relancer login|not logged|login\.php|Unauthorized|\b401\b|storage-state|connexion.*échou|Déconnexion|session Deciplus|déjà pas connect|auth.*expir|cookie|Execution context was destroyed|context.*destroyed|frame.*detached/i.test(
     String(message || '')
   );
 }
@@ -287,11 +287,33 @@ async function isLoggedIn(page) {
 }
 
 async function handleChooseZone(page, siteLabel) {
-  if (!(await isChooseZoneScreen(page))) return false;
+  const label =
+    String(siteLabel || '').trim() ||
+    String(process.env.DECIPLUS_DEFAULT_SITE || 'Minimes').trim();
 
-  logInfo('Écran choix de site Deciplus détecté');
-  await selectSiteInPicker(page, siteLabel);
-  await clickSellOnSite(page);
+  // Après login / reload session, l'écran zone peut arriver avec un léger délai
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (await isChooseZoneScreen(page)) break;
+    if (/choose-zone/i.test(page.url())) break;
+    await page.waitForTimeout(400);
+  }
+
+  if (!(await isChooseZoneScreen(page)) && !/choose-zone/i.test(page.url())) {
+    return false;
+  }
+
+  logInfo('Écran choix de site Deciplus détecté', { site: label });
+  const selected = await selectSiteInPicker(page, label);
+  if (!selected) {
+    logWarn('Sélection site Deciplus échouée sur l’écran zone', { site: label, url: page.url() });
+    return false;
+  }
+  const sold = await clickSellOnSite(page);
+  if (!sold) {
+    logWarn('Bouton « Vendre sur ce site » introuvable', { site: label });
+    return false;
+  }
+  logInfo('Site Deciplus prêt après choix de salle', { site: label });
   return true;
 }
 
@@ -355,6 +377,8 @@ async function performLogin(page, options = {}) {
   const user = process.env.DECIPLUS_USER;
   const pass = process.env.DECIPLUS_PASSWORD;
   const envToken = String(process.env.DECIPLUS_AUTH_TOKEN || '').trim();
+  const siteLabel =
+    options.siteLabel || process.env.DECIPLUS_DEFAULT_SITE || 'Minimes';
 
   if (!url || !user || !pass) {
     throw new Error('DECIPLUS_URL, DECIPLUS_USER et DECIPLUS_PASSWORD requis');
@@ -364,9 +388,15 @@ async function performLogin(page, options = {}) {
 
   if (hasStoredSession && !envToken) {
     await gotoDeciplus(page, 'nextgen/home');
+    // Parfois Deciplus renvoie directement sur choose-zone
+    if (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page))) {
+      logInfo('Session persistée — écran choix de salle');
+      await handleChooseZone(page, siteLabel);
+      if (await getAccessToken(page)) return;
+    }
     if (await getAccessToken(page)) {
       logInfo('Déjà connecté via session persistée');
-      await handleChooseZone(page, options.siteLabel);
+      await handleChooseZone(page, siteLabel);
       return;
     }
   }
@@ -378,7 +408,7 @@ async function performLogin(page, options = {}) {
     await gotoDeciplus(page, 'nextgen/home');
     if (await getAccessToken(page)) {
       logInfo('Connecté via DECIPLUS_AUTH_TOKEN');
-      await handleChooseZone(page, options.siteLabel);
+      await handleChooseZone(page, siteLabel);
       return;
     }
     logWarn('DECIPLUS_AUTH_TOKEN ignoré — token invalide ou expiré');
@@ -392,7 +422,7 @@ async function performLogin(page, options = {}) {
     const token = await getAccessToken(page);
     if (token) {
       logInfo('Déjà connecté via session persistée');
-      await handleChooseZone(page, options.siteLabel);
+      await handleChooseZone(page, siteLabel);
       return;
     }
     logInfo('Session sans token — reconnexion');
@@ -402,7 +432,7 @@ async function performLogin(page, options = {}) {
     await handleEmailVerification(page);
     if (await isLoggedIn(page)) {
       logInfo('Connexion Deciplus réussie (code email)');
-      await handleChooseZone(page, options.siteLabel);
+      await handleChooseZone(page, siteLabel);
       return;
     }
   }
@@ -423,7 +453,7 @@ async function performLogin(page, options = {}) {
   }
 
   logInfo('Connexion Deciplus réussie');
-  await handleChooseZone(page, options.siteLabel);
+  await handleChooseZone(page, siteLabel);
 }
 
 async function login(page, options = {}) {

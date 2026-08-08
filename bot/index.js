@@ -107,7 +107,12 @@ async function processCancelJob(page, order) {
     city: order.customer?.city || order.city,
   };
 
-  const storeBase = (process.env.BOXPLUS_STORE_URL || process.env.STORE_URL || '').replace(/\/$/, '');
+  const storeBase = (
+    order.status_callback_base ||
+    process.env.BOXPLUS_STORE_URL ||
+    process.env.STORE_URL ||
+    ''
+  ).replace(/\/$/, '');
   const storeSecret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
 
   const pushCancelStatus = async (status, { reason = null, mismatchFields = [], cancelledCount = null } = {}) => {
@@ -219,15 +224,22 @@ async function processCancelJob(page, order) {
     };
   }
 
-  const result = await cancelSale(page, memberId);
-  await pushCancelStatus('done', { cancelledCount: result?.cancelled_count ?? null });
-  return {
-    status: STATUS.SUCCESS,
-    action: 'cancel',
-    deciplus_member_id: memberId,
-    cancel_reason: order.cancel_reason,
-    ...result,
-  };
+  try {
+    const result = await cancelSale(page, memberId, {
+      cancelDate: order.cancel_date || order.effective_date || null,
+    });
+    await pushCancelStatus('done', { cancelledCount: result?.cancelled_count ?? null });
+    return {
+      status: STATUS.SUCCESS,
+      action: 'cancel',
+      deciplus_member_id: memberId,
+      cancel_reason: order.cancel_reason,
+      ...result,
+    };
+  } catch (err) {
+    await pushCancelStatus('error', { reason: err.message });
+    throw err;
+  }
 }
 
 async function processSaleJob(page, order, jobMeta = {}) {
@@ -322,10 +334,10 @@ async function processSaleJob(page, order, jobMeta = {}) {
 
   let photoResult = null;
   if (!checkpoint.photo_done && (order.photo_path || order.photo_base64)) {
-    // Revenir sur la fiche membre pour token staff + affichage photo
-    if (memberId) {
-      await openMemberCheck(page, memberId).catch(() => {});
-    }
+    // Attendre la fin des redirections de création membre avant l'appel API photo.
+    // Ne pas rouvrir la fiche ici : cela détruisait le contexte pendant page.evaluate.
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+    await page.waitForTimeout(600);
     photoResult = await uploadMemberPhoto(
       page,
       order.photo_path,

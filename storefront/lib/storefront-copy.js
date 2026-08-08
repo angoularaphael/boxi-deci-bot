@@ -3,7 +3,7 @@
 const BADGE_FEE_AMOUNT = '34,99 €';
 
 const BADGE_FEE_NOTICE =
-  `En souscrivant un abonnement, votre badge d'accès (${BADGE_FEE_AMOUNT}) sera prélevé automatiquement sur l'IBAN que vous indiquez, 72 heures après votre souscription. Le montant payé aujourd'hui par carte bancaire correspond à votre 1ère échéance d'abonnement.`;
+  `Badge d'accès (${BADGE_FEE_AMOUNT}) : choisissez le mode (carte ou IBAN) et le moment (immédiat ou ~72h) à l'étape paiement.`;
 
 function isStorefrontProduct(product) {
   if (!product) return false;

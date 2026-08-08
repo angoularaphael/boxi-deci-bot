@@ -87,8 +87,12 @@
     "modifier_date_fin_popup": "button.p-button:has-text(\"Modifier la date de fin\"), button[aria-label=\"Modifier la date de fin\"], button:has-text(\"Modifier la date de fin\")"
   },
   "contract_actions": {
-    "annuler_vente": "text=Annuler la vente, [aria-label=\"Annuler la vente\"]",
+    "resilier": "text=Résilier, div.iconify:has-text(\"Résilier\"), [aria-label=\"Résilier\"]",
+    "motif_ne_souhaite_pas_reconduire": "text=Ne souhaite pas reconduire, .el-select-dropdown__item:has-text(\"Ne souhaite pas reconduire\")",
     "appliquer_quitter": "button.ari-button-filled:has-text(\"Appliquer et Quitter\"), button:has-text(\"Appliquer et Quitter\"), text=Appliquer et Quitter",
-    "confirmer_annulation": "button:has-text(\"Confirmer\"), button.ari-button:has-text(\"Confirmer\"), text=Confirmer"
+    "envoyer_mail_resiliation": "text=Envoyer un mail de résiliation, label:has-text(\"Envoyer un mail de résiliation\")",
+    "confirmer_resiliation": "button:has-text(\"Confirmer\"), button.ari-button:has-text(\"Confirmer\"), text=Confirmer",
+    "resilier_envoyer_mail": "button:has-text(\"Résilier le contrat et envoyer le mail\"), text=Résilier le contrat et envoyer le mail",
+    "annuler_vente": "text=Annuler la vente, [aria-label=\"Annuler la vente\"]"
   }
 }

@@ -140,11 +140,28 @@ async function openMemberDetail(page, memberId) {
 
 async function openMemberCheck(page, memberId) {
   const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
-  await page.goto(new URL(`check.php?idj=${memberId}`, base).href, {
-    waitUntil: 'domcontentloaded',
-    timeout: 30000,
-  });
-  await randomDelay();
+  const target = new URL(`check.php?idj=${memberId}`, base).href;
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await page.goto(target, {
+        waitUntil: 'domcontentloaded',
+        timeout: 30000,
+      });
+      await randomDelay();
+      return;
+    } catch (err) {
+      lastErr = err;
+      // Après résiliation/mail, Deciplus abort parfois la navigation — retry
+      if (!/ERR_ABORTED|interrupted|destroyed/i.test(String(err.message || ''))) throw err;
+      await page.waitForTimeout(600 * (attempt + 1));
+      await page.goto(new URL('nextgen/home', base).href, {
+        waitUntil: 'domcontentloaded',
+        timeout: 20000,
+      }).catch(() => {});
+    }
+  }
+  throw lastErr || new Error(`openMemberCheck failed for ${memberId}`);
 }
 
 async function getMemberFormContext(page, { waitMs = 0 } = {}) {

@@ -1,6 +1,6 @@
 const { randomDelay, loadJson } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
-const { gotoDeciplus } = require('./auth');
+const { gotoDeciplus, getAccessToken } = require('./auth');
 const { dismissJqueryUiOverlay } = require('./ui');
 const {
   phoneForDeciplus,
@@ -255,8 +255,7 @@ function birthdateToDeciplus(value) {
 }
 
 /**
- * Match bloquant résiliation : nom + prénom + naissance + téléphone
- * (+ email / adresse / CP / ville s’ils sont fournis).
+ * Match résiliation : uniquement nom + prénom + naissance + téléphone.
  */
 async function findMemberByIdentity(page, identity = {}) {
   const phone = identity.phone;
@@ -280,46 +279,17 @@ async function findMemberByIdentity(page, identity = {}) {
     .first()
     .inputValue()
     .catch(() => '');
-  const email = await ctx.locator(sel.email || 'input[name="email"]').first().inputValue().catch(() => '');
-  const adr1 = await ctx.locator(sel.adr1 || 'input[name="adr1"]').first().inputValue().catch(() => '');
-  const postal = await ctx.locator(sel.codepostal || 'input[name="codepostal"]').first().inputValue().catch(() => '');
-  const city = await ctx.locator(sel.ville || 'input[name="ville"]').first().inputValue().catch(() => '');
-
   const expectedBirth = birthdateToDeciplus(identity.birthdate);
   const lastNameOk = normalizePerson(lastName) === normalizePerson(identity.last_name);
   const firstNameOk = normalizePerson(firstName) === normalizePerson(identity.first_name);
   const birthOk =
     !expectedBirth || String(birth).replace(/\s/g, '') === String(expectedBirth).replace(/\s/g, '');
 
-  // Champs INFORMATIFS (non bloquants) — loggés seulement
-  const emailOk =
-    !identity.email ||
-    String(email || '').trim().toLowerCase() === String(identity.email || '').trim().toLowerCase();
-  const addrOk =
-    !identity.address ||
-    normalizePerson(adr1).includes(normalizePerson(identity.address).slice(0, 12)) ||
-    normalizePerson(identity.address).includes(normalizePerson(adr1).slice(0, 12));
-  const postalOk =
-    !identity.postal_code ||
-    String(postal || '').replace(/\s/g, '') === String(identity.postal_code || '').replace(/\s/g, '');
-  const cityOk = !identity.city || normalizePerson(city) === normalizePerson(identity.city);
-
-  // BLOQUANTS : nom, prénom, téléphone, date de naissance
   const mismatchFields = [];
   if (!lastNameOk) mismatchFields.push('last_name');
   if (!firstNameOk) mismatchFields.push('first_name');
   if (!birthOk) mismatchFields.push('birthdate');
   if (!phoneMatched) mismatchFields.push('phone');
-
-  if (!emailOk || !addrOk || !postalOk || !cityOk) {
-    logInfo('Résiliation — champs informatifs non concordants (non bloquant)', {
-      member_id: hit.member_id,
-      email_ok: emailOk,
-      addr_ok: addrOk,
-      postal_ok: postalOk,
-      city_ok: cityOk,
-    });
-  }
 
   if (mismatchFields.length) {
     logWarn('Identité membre Deciplus non concordante', {
@@ -885,17 +855,19 @@ function fileToDataUrl(filePath) {
 }
 
 async function getStaffAccessToken(page) {
-  return page.evaluate(() => {
-    try {
-      return JSON.parse(localStorage.getItem('auth') || '{}').token || null;
-    } catch {
-      return null;
-    }
-  });
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const token = await getAccessToken(page).catch(() => null);
+    if (token) return token;
+    await page.waitForTimeout(350);
+  }
+  return null;
 }
 
 /** Upscale / downscale via canvas navigateur (min 200px côté Deciplus). */
 async function normalizePhotoDataUrl(page, dataUrl, { min = 200, max = 1000, quality = 0.9 } = {}) {
+  // Les photos caméra de la boutique sont déjà des JPEG 200–900 px.
+  // Évite page.evaluate pendant les redirections Deciplus qui détruisaient le contexte.
+  if (/^data:image\/jpeg;base64,/i.test(String(dataUrl || ''))) return dataUrl;
   return page.evaluate(
     async ({ src, minSize, maxSize, q }) => {
       const img = new Image();
@@ -958,31 +930,45 @@ async function uploadMemberPhotoViaApi(page, memberId, dataUrl) {
   }
 
   // Vérifier que Deciplus a bien stocké la photo
-  const check = await page.context().request.get(
-    `https://api.deciplus.pro/staff/v1/member/${memberId}`,
-    {
-      headers: {
-        'x-access-token': token,
-        'Deciplus-Client-Type': 'manager',
-        Accept: 'application/json',
-      },
-    }
-  );
   let hasPhoto = false;
-  try {
-    const body = await check.json();
-    hasPhoto = Boolean(
-      body?.photo || body?.member?.photo || body?.data?.photo || body?.picture || body?.avatar
+  for (let attempt = 0; attempt < 5 && !hasPhoto; attempt += 1) {
+    const check = await page.context().request.get(
+      `https://api.deciplus.pro/staff/v1/member/${memberId}`,
+      {
+        headers: {
+          'x-access-token': token,
+          'Deciplus-Client-Type': 'manager',
+          Accept: 'application/json',
+        },
+      }
     );
-  } catch {
-    hasPhoto = check.ok();
+    try {
+      const body = await check.json();
+      hasPhoto = Boolean(
+        body?.response?.photo ||
+          body?.photo ||
+          body?.member?.photo ||
+          body?.data?.photo ||
+          body?.picture ||
+          body?.avatar
+      );
+    } catch {
+      hasPhoto = false;
+    }
+    if (!hasPhoto) await page.waitForTimeout(500);
   }
   logInfo('Photo membre uploadée (API Deciplus)', {
     member_id: memberId,
     status,
     verified: hasPhoto,
   });
-  return { ok: true, via: 'api', status, verified: hasPhoto };
+  return {
+    ok: hasPhoto,
+    via: 'api',
+    status,
+    verified: hasPhoto,
+    reason: hasPhoto ? null : 'api_photo_not_visible_after_upload',
+  };
 }
 
 /** Repli legacy : Greybox photo_upload.php via bouton openUpload. */
@@ -990,54 +976,45 @@ async function uploadMemberPhotoViaLegacyUi(page, photoPath, memberId) {
   const fs = require('fs');
   if (!photoPath || !fs.existsSync(photoPath)) return { ok: false, reason: 'missing_file' };
 
-  const contexts = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
-  for (const ctx of contexts) {
-    const uploadBtn = ctx.locator(
-      'input.bouton_upload, input[onclick*="openUpload"], .bouton_upload, a[onclick*="openUpload"]'
-    ).first();
-    if ((await uploadBtn.count()) === 0) continue;
-    try {
-      await uploadBtn.click({ force: true });
-      await randomDelay(500, 900);
-      break;
-    } catch {
-      /* try next */
-    }
-  }
+  const clubUrl = new URL(process.env.DECIPLUS_URL || page.url());
+  const origin = clubUrl.origin;
+  const candidates = [
+    `${origin}/photo_upload.php?idj=${encodeURIComponent(memberId)}`,
+    `${origin}/nextgen/legacy?path=${encodeURIComponent(`/photo_upload.php?idj=${memberId}`)}`,
+  ];
 
-  // Ouvrir directement photo_upload.php si Greybox pas ouvert
-  const base = process.env.DECIPLUS_URL || page.url();
-  let uploadFrame = null;
-  for (let i = 0; i < 10; i += 1) {
-    for (const frame of page.frames()) {
-      const fu = frame.url() || '';
-      if (/photo_upload\.php/i.test(fu)) {
-        uploadFrame = frame;
-        break;
+  const uploadPage = await page.context().newPage();
+  try {
+    for (const url of candidates) {
+      await uploadPage
+        .goto(url, { waitUntil: 'domcontentloaded', timeout: navTimeout() })
+        .catch(() => {});
+      await randomDelay(500, 800);
+      const targets = [uploadPage, ...uploadPage.frames().filter((f) => f !== uploadPage.mainFrame())];
+      for (const target of targets) {
+        try {
+          const fileInput = target.locator('input[type="file"]').first();
+          if ((await fileInput.count()) === 0) continue;
+          await fileInput.setInputFiles(photoPath);
+          await randomDelay(300, 500);
+          const submitted = await clickFirst(
+            target,
+            'input[type="submit"], input[value="Valider"], input[value="Envoyer"], button[type="submit"]',
+            { force: true }
+          ).catch(() => false);
+          if (!submitted) continue;
+          await randomDelay(900, 1400);
+          logInfo('Photo membre envoyée (legacy photo_upload)', { member_id: memberId, url });
+          return { ok: true, via: 'legacy_ui', url };
+        } catch {
+          /* frame legacy remplacée pendant le chargement : essayer le contexte suivant */
+        }
       }
     }
-    if (uploadFrame) break;
-    if (i === 3 && memberId) {
-      await page.goto(new URL(`photo_upload.php?idj=${memberId}`, base).href, {
-        waitUntil: 'domcontentloaded',
-        timeout: navTimeout(),
-      }).catch(() => {});
-    }
-    await randomDelay(300, 500);
+    return { ok: false, reason: 'legacy_no_file_input' };
+  } finally {
+    await uploadPage.close().catch(() => {});
   }
-
-  const target = uploadFrame || page;
-  const fileInput = target.locator('input[type="file"]').first();
-  if ((await fileInput.count()) === 0) return { ok: false, reason: 'legacy_no_file_input' };
-  await fileInput.setInputFiles(photoPath);
-  await randomDelay(400, 700);
-  await clickFirst(
-    target,
-    'input[type="submit"], input[value="Valider"], input[value="Envoyer"], button[type="submit"]'
-  ).catch(() => false);
-  await randomDelay(800, 1200);
-  logInfo('Photo membre envoyée (legacy photo_upload)', { member_id: memberId });
-  return { ok: true, via: 'legacy_ui' };
 }
 
 /**
