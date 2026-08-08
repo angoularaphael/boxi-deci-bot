@@ -39,28 +39,92 @@ const { logInfo, logError, logWarn, sendAlert } = require('../lib/logger');
 const { sleep } = require('../lib/utils');
 const { maybeKeepSessionAlive, touchKeepAliveClock } = require('./session-keepalive');
 
-async function notifyBoutiqueNewMember(order, memberId) {
-  const base = (process.env.BOXPLUS_STORE_URL || process.env.STORE_URL || '').replace(/\/$/, '');
-  const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
-  if (!base || !secret) return;
-  const res = await fetch(`${base}/api/internal/new-member-alert`, {
+function isTestMemberEmail(email) {
+  return /@boxplus-test\.local$/i.test(String(email || ''));
+}
+
+/** Email admin direct (BotHosting) — ne dépend pas de Vercel. */
+async function sendNewMemberAlertDirect(payload) {
+  const apiKey = String(process.env.BREVO_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+  const adminTo = (
+    process.env.ADMIN_EMAIL ||
+    process.env.SUPER_ADMIN_EMAIL ||
+    process.env.ALERT_EMAIL ||
+    ''
+  ).trim();
+  if (!adminTo || !apiKey.startsWith('xkeysib-')) return false;
+  const html = `<p><strong>Nouveau membre créé dans Deciplus</strong></p>
+    <p>Commande : ${payload.order_id || '—'}</p>
+    <p>Membre Deciplus : ${payload.member_id || '—'}</p>
+    <p>Nom : ${payload.first_name || ''} ${payload.last_name || ''}</p>
+    <p>Email : ${payload.email || '—'}</p>
+    <p>Salle : ${payload.gym || '—'}</p>
+    <p>Offre : ${payload.product_name || '—'}</p>`;
+  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-sync-secret': secret,
-    },
+    headers: { 'api-key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify({
-      order_id: order.order_id,
-      member_id: memberId,
-      email: order.customer?.email || order.email,
-      first_name: order.customer?.first_name,
-      last_name: order.customer?.last_name,
-      gym: order.gym,
-      product_name: order.product_name,
+      sender: {
+        name: process.env.BREVO_SENDER_NAME || 'Boxing Center',
+        email: process.env.BREVO_SENDER_EMAIL || 'suzinabot@gmail.com',
+      },
+      to: [{ email: adminTo }],
+      subject: `[Nouveau membre] ${payload.first_name || ''} ${payload.last_name || ''} — ${payload.order_id || ''}`.trim(),
+      htmlContent: html,
     }),
   });
-  if (!res.ok) {
-    logWarn('Alerte nouveau membre boutique échouée', { status: res.status });
+  return res.ok;
+}
+
+async function notifyBoutiqueNewMember(order, memberId) {
+  const email = order.customer?.email || order.email;
+  if (isTestMemberEmail(email)) {
+    logInfo('Alerte nouveau membre ignorée (email test)', { order_id: order.order_id, email });
+    return;
+  }
+
+  const payload = {
+    order_id: order.order_id,
+    member_id: memberId,
+    email,
+    first_name: order.customer?.first_name,
+    last_name: order.customer?.last_name,
+    gym: order.gym,
+    product_name: order.product_name,
+  };
+
+  // 1) Direct Brevo depuis le bot (prod BotHosting)
+  let sent = false;
+  try {
+    sent = await sendNewMemberAlertDirect(payload);
+    if (sent) logInfo('Email nouveau membre envoyé (Brevo direct)', { order_id: order.order_id });
+  } catch (err) {
+    logWarn('Email nouveau membre Brevo direct échoué', { error: err.message });
+  }
+
+  // 2) Relais boutique Vercel (si configuré)
+  const base = (process.env.BOXPLUS_STORE_URL || process.env.STORE_URL || '').replace(/\/$/, '');
+  const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+  if (!base || !secret) {
+    if (!sent) logWarn('Alerte nouveau membre — STORE_URL/SYNC_SECRET manquants et Brevo non envoyé');
+    return;
+  }
+  try {
+    const res = await fetch(`${base}/api/internal/new-member-alert`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-sync-secret': secret,
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      logWarn('Alerte nouveau membre boutique échouée', { status: res.status });
+    } else if (!sent) {
+      logInfo('Email nouveau membre relayé via boutique', { order_id: order.order_id });
+    }
+  } catch (err) {
+    logWarn('Alerte nouveau membre boutique non envoyée', { error: err.message });
   }
 }
 
@@ -323,15 +387,23 @@ async function processSaleJob(page, order, jobMeta = {}) {
     }
     saveCheckpoint({ step: 'member', deciplus_member_id: memberId });
     if (memberResult.action === 'created') {
-      await sendAlert(`Nouveau membre Deciplus créé — ${order.order_id}`, {
-        order_id: order.order_id,
-        member_id: memberId,
-        email: order.customer?.email || order.email,
-        name: `${order.customer?.first_name || ''} ${order.customer?.last_name || ''}`.trim(),
-        gym: order.gym,
-        type: 'new_member',
-      }).catch(() => {});
-      await notifyBoutiqueNewMember(order, memberId).catch(() => {});
+      const memberEmail = order.customer?.email || order.email;
+      if (!isTestMemberEmail(memberEmail)) {
+        await sendAlert(`Nouveau membre Deciplus créé — ${order.order_id}`, {
+          order_id: order.order_id,
+          member_id: memberId,
+          email: memberEmail,
+          name: `${order.customer?.first_name || ''} ${order.customer?.last_name || ''}`.trim(),
+          gym: order.gym,
+          type: 'new_member',
+        }).catch(() => {});
+        await notifyBoutiqueNewMember(order, memberId).catch(() => {});
+      } else {
+        logInfo('Création membre test — pas d’alerte email admin', {
+          order_id: order.order_id,
+          member_id: memberId,
+        });
+      }
     }
   } else {
     logInfo('Reprise job — membre déjà créé', { order_id: order.order_id, member_id: memberId });
