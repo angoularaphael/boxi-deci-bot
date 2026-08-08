@@ -36,17 +36,33 @@ function isImapOtpConfigured() {
 }
 
 function extractOtpCode(text = '') {
-  const raw = String(text || '');
-  // Priorité : formulations type « code : 123456 »
-  const labeled = raw.match(
-    /(?:code|otp|validation|vérification|verification)\s*(?:de\s+vérification)?\s*[:\s]+(\d{4,8})\b/i
+  // Deciplus envoie souvent « 807 803 » avec espace fine (U+202F) entre les 3+3
+  const raw = String(text || '')
+    .replace(/[\u00A0\u202F\u2007\u2009]/g, ' ')
+    .replace(/\s+/g, ' ');
+
+  // Zone prioritaire : après « code unique » / « code suivant »
+  const afterHint = raw.match(
+    /code\s+unique[^0-9]{0,80}(\d{3}\s*\d{3}|\d{6}|\d{4,8})/i
   );
-  if (labeled?.[1]) return labeled[1];
-  // Sinon premier bloc de 6 chiffres isolé (le plus courant chez Deciplus)
-  const six = raw.match(/(?<!\d)(\d{6})(?!\d)/);
-  if (six?.[1]) return six[1];
-  const four = raw.match(/(?<!\d)(\d{4,8})(?!\d)/);
-  return four?.[1] || null;
+  if (afterHint?.[1]) return afterHint[1].replace(/\s+/g, '');
+
+  const labeled = raw.match(
+    /(?:code|otp|validation|vérification|verification)[^0-9]{0,40}(\d{3}\s*\d{3}|\d{6})\b/i
+  );
+  if (labeled?.[1]) return labeled[1].replace(/\s+/g, '');
+
+  // 3+3 avec espace (ex. 807 803)
+  const spaced = raw.match(/(?<!\d)(\d{3})\s+(\d{3})(?!\d)/);
+  if (spaced) return `${spaced[1]}${spaced[2]}`;
+
+  // 6 chiffres collés — ignorer années 20xx isolées
+  const sixes = [...raw.matchAll(/(?<!\d)(\d{6})(?!\d)/g)].map((m) => m[1]);
+  const notYear = sixes.find((c) => !/^20\d{2}/.test(c) && c !== '000000');
+  if (notYear) return notYear;
+  if (sixes[0]) return sixes[0];
+
+  return null;
 }
 
 function looksLikeDeciplusOtpMail({ subject = '', from = '', text = '' } = {}) {
@@ -60,7 +76,7 @@ function looksLikeDeciplusOtpMail({ subject = '', from = '', text = '' } = {}) {
 
 /**
  * Poll IMAP jusqu’à trouver un code récent.
- * @param {{ maxWaitMs?: number, pollMs?: number, sinceMs?: number }} opts
+ * @param {{ maxWaitMs?: number, pollMs?: number, sinceMs?: number, notBeforeMs?: number }} opts
  */
 async function fetchDeciplusEmailCode(opts = {}) {
   if (!isImapOtpConfigured()) {
@@ -83,6 +99,8 @@ async function fetchDeciplusEmailCode(opts = {}) {
   const maxWaitMs = Number(opts.maxWaitMs || process.env.DECIPLUS_OTP_WAIT_MS || 90000);
   const pollMs = Number(opts.pollMs || process.env.DECIPLUS_OTP_POLL_MS || 4000);
   const sinceMs = Number(opts.sinceMs || 15 * 60 * 1000);
+  // Ignore les mails antérieurs au login (évite de rejouer un vieux code)
+  const notBeforeMs = Number(opts.notBeforeMs || 0);
   const startedAt = Date.now();
   let attempt = 0;
 
@@ -135,10 +153,12 @@ async function fetchDeciplusEmailCode(opts = {}) {
             const text = [parsed.text, parsed.html ? String(parsed.html).replace(/<[^>]+>/g, ' ') : '']
               .filter(Boolean)
               .join('\n');
+            const mailAt = new Date(msg.internalDate || 0).getTime();
+            if (notBeforeMs && mailAt + 2000 < notBeforeMs) continue;
             if (!looksLikeDeciplusOtpMail({ subject, from, text })) continue;
             const code = extractOtpCode(`${subject}\n${text}`);
             if (!code) continue;
-            const ageSec = Math.round((Date.now() - new Date(msg.internalDate || 0).getTime()) / 1000);
+            const ageSec = Math.round((Date.now() - mailAt) / 1000);
             logInfo('Code email Deciplus trouvé via IMAP', {
               subject: subject.slice(0, 80),
               age_s: ageSec,

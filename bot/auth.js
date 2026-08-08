@@ -40,29 +40,98 @@ function assertAuthAllowed() {
 }
 
 async function getAccessToken(page) {
-  return page.evaluate(() => {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     try {
-      return JSON.parse(localStorage.getItem('auth') || '{}').token || null;
-    } catch {
-      return null;
+      await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
+      return await page.evaluate(() => {
+        try {
+          return JSON.parse(localStorage.getItem('auth') || '{}').token || null;
+        } catch {
+          return null;
+        }
+      });
+    } catch (err) {
+      if (!/Execution context was destroyed|navigation|Target closed/i.test(err.message)) {
+        return null;
+      }
+      await page.waitForTimeout(400);
     }
-  });
+  }
+  return null;
+}
+
+function isSessionExpiredUrl(url = '') {
+  const u = String(url || '').toLowerCase();
+  return (
+    u.includes('sessionexpired') ||
+    u.includes('session_expired') ||
+    /login\.php/i.test(u) ||
+    u.includes('/login') ||
+    u.includes('signin') ||
+    u.includes('connexion')
+  );
+}
+
+/** Ping API staff — seul vrai signal « session encore acceptée ». */
+async function isAccessTokenValid(page, token) {
+  if (!token) return false;
+  try {
+    const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
+    const referer = new URL('nextgen/home', base).href;
+    const response = await page.context().request.get(
+      'https://api.deciplus.pro/staff/v1/product/getAvailableProducts?all=true',
+      {
+        headers: {
+          Accept: 'application/json, text/plain, */*',
+          'x-access-token': token,
+          'Deciplus-Client-Type': 'manager',
+          Referer: referer,
+        },
+        timeout: 20000,
+      }
+    );
+    return response.ok();
+  } catch {
+    return false;
+  }
+}
+
+async function clearDeadAuth(page) {
+  await page
+    .evaluate(() => {
+      try {
+        localStorage.removeItem('auth');
+      } catch {
+        /* ignore */
+      }
+    })
+    .catch(() => {});
 }
 
 async function isVerificationScreen(page) {
   const url = page.url();
   if (/verif|validation|otp|2fa|mfa|authenticate/i.test(url)) return true;
 
+  // Deciplus affiche souvent le 2FA sur la même page login (pas d’URL dédiée)
+  const bodyText = await page
+    .locator('body')
+    .innerText()
+    .catch(() => '');
+  if (/V[ée]rifions votre identit|code envoy[ée].*adresse|renseigner.*code/i.test(bodyText)) {
+    return true;
+  }
+
   const hints = [
+    'text=/V[ée]rifions votre identit/i',
     'text=/code.*(e-?mail|mail|sms)/i',
     'text=/vérification/i',
     'text=/validation du code/i',
     'text=/saisissez.*code/i',
-    'input[name="code"]',
-    'input[name="otp"]',
-    'input[name="validationCode"]',
-    'input[autocomplete="one-time-code"]',
-    'input[inputmode="numeric"]',
+    'input[name="code"]:visible',
+    'input[name="otp"]:visible',
+    'input[name="validationCode"]:visible',
+    'input[autocomplete="one-time-code"]:visible',
+    'input[inputmode="numeric"]:visible',
   ];
 
   for (const sel of hints) {
@@ -70,6 +139,15 @@ async function isVerificationScreen(page) {
     if ((await loc.count()) > 0 && (await loc.isVisible().catch(() => false))) {
       return true;
     }
+  }
+  // Champ Deciplus souvent présent en hidden puis affiché — détecter le bouton Valider du 2FA
+  const validateOtp = page.locator('button:has-text("Valider"), input[value="Valider"]').first();
+  if (
+    /code envoy/i.test(bodyText) &&
+    (await validateOtp.count()) > 0 &&
+    (await validateOtp.isVisible().catch(() => false))
+  ) {
+    return true;
   }
   return false;
 }
@@ -103,7 +181,7 @@ async function injectAuthToken(page, token) {
   logInfo('Token Deciplus injecté depuis DECIPLUS_AUTH_TOKEN');
 }
 
-async function resolveEmailVerificationCode() {
+async function resolveEmailVerificationCode(opts = {}) {
   const manual = String(process.env.DECIPLUS_EMAIL_CODE || process.env.DECIPLUS_OTP || '').trim();
   if (manual) return { code: manual, source: 'env' };
 
@@ -117,7 +195,10 @@ async function resolveEmailVerificationCode() {
     );
   }
 
-  const code = await fetchDeciplusEmailCode();
+  const code = await fetchDeciplusEmailCode({
+    notBeforeMs: opts.notBeforeMs || Date.now() - 60_000,
+    maxWaitMs: opts.maxWaitMs,
+  });
   if (!code) {
     throw new Error(
       'Code email Deciplus introuvable dans la boîte IMAP — vérifier DECIPLUS_IMAP_USER/PASS ' +
@@ -127,41 +208,64 @@ async function resolveEmailVerificationCode() {
   return { code, source: 'imap' };
 }
 
-async function handleEmailVerification(page) {
-  const { code, source } = await resolveEmailVerificationCode();
+async function handleEmailVerification(page, opts = {}) {
+  const { code, source } = await resolveEmailVerificationCode(opts);
 
   logInfo('Saisie code vérification Deciplus…', { source });
-  const codeSelectors = [
-    'input[name="code"]',
-    'input[name="otp"]',
-    'input[name="validationCode"]',
-    'input[autocomplete="one-time-code"]',
-    'input[inputmode="numeric"]',
-    'input[type="tel"]',
-    'input[type="text"]',
-  ];
-  const submitSelectors = [
-    'button:has-text("Valider")',
-    'button:has-text("Vérifier")',
-    'button:has-text("Confirmer")',
-    'button:has-text("Continuer")',
-    'button[type="submit"]',
-  ];
 
-  const ok = await fillVisible(page, codeSelectors, code);
+  // Champ visible Deciplus = #userValidationCode ; hidden sync = #validationCode
+  const visibleCode = page.locator('#userValidationCode').first();
+  let ok = false;
+  if ((await visibleCode.count()) > 0) {
+    await visibleCode.click({ timeout: 5000 }).catch(() => {});
+    await visibleCode.fill('');
+    await visibleCode.fill(code);
+    ok = true;
+  }
   if (!ok) {
-    throw new Error('Champ code vérification Deciplus introuvable');
+    ok = await fillVisible(page, [
+      'input[name="code"]',
+      'input[name="otp"]',
+      'input[autocomplete="one-time-code"]',
+      'input[inputmode="numeric"]',
+    ], code);
+  }
+  // Toujours synchroniser le hidden Deciplus
+  const hidden = page.locator('input[name="validationCode"], #validationCode').first();
+  if ((await hidden.count()) > 0) {
+    await hidden.evaluate((el, value) => {
+      el.value = value;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    }, code);
+    ok = true;
+  }
+  if (!ok) {
+    throw new Error('Champ code vérification Deciplus introuvable (#userValidationCode)');
   }
 
-  for (const sel of submitSelectors) {
-    const btn = page.locator(sel).first();
-    if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
-      await btn.click();
-      break;
-    }
+  const validateBtn = page
+    .locator(
+      '.swal2-confirm, button:has-text("Valider"), button.swal2-confirm, input[value="Valider"]'
+    )
+    .first();
+  if ((await validateBtn.count()) > 0) {
+    await validateBtn.click({ noWaitAfter: true, timeout: 15000 }).catch(async () => {
+      await validateBtn.evaluate((el) => el.click()).catch(() => {});
+    });
   }
 
-  await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+  await Promise.race([
+    page.waitForURL(/choose-zone|nextgen|home|select\.php/i, { timeout: 45000 }),
+    page.waitForFunction(() => {
+      try {
+        return Boolean(JSON.parse(localStorage.getItem('auth') || '{}').token);
+      } catch {
+        return false;
+      }
+    }, { timeout: 45000 }),
+  ]).catch(() => {});
+  await page.waitForTimeout(1500);
   await randomDelay(process.env.BOT_MIN_DELAY_MS, process.env.BOT_MAX_DELAY_MS);
 }
 
@@ -284,22 +388,25 @@ async function isLoggedIn(page) {
   if (await isVerificationScreen(page)) return false;
 
   const url = page.url();
-  if (url.includes('login') || url.includes('signin') || url.includes('connexion')) return false;
+  if (isSessionExpiredUrl(url)) return false;
 
   const token = await getAccessToken(page);
-  if (token) return true;
-
-  const indicators = [
-    'text=Membres',
-    'text=Dashboard',
-    'text=Tableau de bord',
-    '[data-testid="dashboard"]',
-  ];
-  for (const sel of indicators) {
-    const loc = page.locator(sel).first();
-    if ((await loc.count()) > 0 && (await loc.isVisible().catch(() => false))) return true;
+  if (!token) {
+    const indicators = [
+      'text=Membres',
+      'text=Dashboard',
+      'text=Tableau de bord',
+      '[data-testid="dashboard"]',
+    ];
+    for (const sel of indicators) {
+      const loc = page.locator(sel).first();
+      if ((await loc.count()) > 0 && (await loc.isVisible().catch(() => false))) return true;
+    }
+    return false;
   }
-  return false;
+
+  // Token présent ≠ session valide (JWT mort reste souvent en localStorage)
+  return isAccessTokenValid(page, token);
 }
 
 async function handleChooseZone(page, siteLabel) {
@@ -351,7 +458,10 @@ async function gotoDeciplus(page, pathPart = '', options = {}) {
 }
 
 async function submitLoginForm(page, user, pass) {
+  // Deciplus manager = pseudo / passwd (pas username/password)
   const userSelectors = [
+    'input[name="pseudo"]',
+    '#pseudo',
     'input[name="username"]',
     'input[name="login"]',
     'input[name="user"]',
@@ -362,8 +472,16 @@ async function submitLoginForm(page, user, pass) {
     '#email',
     'input[type="text"]',
   ];
-  const passSelectors = ['input[name="password"]', 'input[type="password"]', '#password'];
+  const passSelectors = [
+    'input[name="passwd"]',
+    '#passwd',
+    'input[name="password"]',
+    'input[type="password"]',
+    '#password',
+  ];
   const submitSelectors = [
+    'button[name="submitLogin"]',
+    'button.login__submit',
     'button:has-text("Connexion")',
     'button:has-text("Se connecter")',
     'button[type="submit"]',
@@ -376,15 +494,29 @@ async function submitLoginForm(page, user, pass) {
     throw new Error('Formulaire de connexion Deciplus introuvable — page de vérification email ?');
   }
 
+  let clicked = false;
   for (const sel of submitSelectors) {
     const btn = page.locator(sel).first();
     if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
-      await btn.click();
+      await btn.click({ noWaitAfter: true, timeout: 15000 }).catch(async () => {
+        await btn.evaluate((el) => el.click()).catch(() => {});
+      });
+      clicked = true;
       break;
     }
   }
+  if (!clicked) {
+    await page
+      .locator('button[name="submitLogin"], input[name="submitLogin"]')
+      .first()
+      .click({ noWaitAfter: true, timeout: 10000 })
+      .catch(() => {});
+  }
 
-  await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+  await Promise.race([
+    page.waitForURL(/choose-zone|nextgen|verif|otp|code|home|select\.php/i, { timeout: 45000 }),
+    page.waitForLoadState('domcontentloaded', { timeout: 45000 }),
+  ]).catch(() => {});
   await randomDelay(process.env.BOT_MIN_DELAY_MS, process.env.BOT_MAX_DELAY_MS);
 }
 
@@ -408,12 +540,16 @@ async function performLogin(page, options = {}) {
     if (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page))) {
       logInfo('Session persistée — écran choix de salle');
       await handleChooseZone(page, siteLabel);
-      if (await getAccessToken(page)) return;
     }
-    if (await getAccessToken(page)) {
+    const storedToken = await getAccessToken(page);
+    if (storedToken && !isSessionExpiredUrl(page.url()) && (await isAccessTokenValid(page, storedToken))) {
       logInfo('Déjà connecté via session persistée');
       await handleChooseZone(page, siteLabel);
       return;
+    }
+    if (storedToken) {
+      logWarn('Session persistée expirée (token local encore présent) — reconnexion');
+      await clearDeadAuth(page);
     }
   }
 
@@ -422,30 +558,29 @@ async function performLogin(page, options = {}) {
   if (envToken) {
     await injectAuthToken(page, envToken);
     await gotoDeciplus(page, 'nextgen/home');
-    if (await getAccessToken(page)) {
+    const t = await getAccessToken(page);
+    if (t && (await isAccessTokenValid(page, t))) {
       logInfo('Connecté via DECIPLUS_AUTH_TOKEN');
       await handleChooseZone(page, siteLabel);
       return;
     }
     logWarn('DECIPLUS_AUTH_TOKEN ignoré — token invalide ou expiré');
+    await clearDeadAuth(page);
   }
 
   if (await isVerificationScreen(page)) {
-    await handleEmailVerification(page);
+    await handleEmailVerification(page, { notBeforeMs: Date.now() - 120_000 });
   }
 
   if (await isLoggedIn(page)) {
-    const token = await getAccessToken(page);
-    if (token) {
-      logInfo('Déjà connecté via session persistée');
-      await handleChooseZone(page, siteLabel);
-      return;
-    }
-    logInfo('Session sans token — reconnexion');
+    logInfo('Déjà connecté via session persistée');
+    await handleChooseZone(page, siteLabel);
+    return;
   }
+  logInfo('Session inactive — login Deciplus');
 
   if (await isVerificationScreen(page)) {
-    await handleEmailVerification(page);
+    await handleEmailVerification(page, { notBeforeMs: Date.now() - 120_000 });
     if (await isLoggedIn(page)) {
       logInfo('Connexion Deciplus réussie (code email)');
       await handleChooseZone(page, siteLabel);
@@ -453,16 +588,28 @@ async function performLogin(page, options = {}) {
     }
   }
 
+  const loginStartedAt = Date.now();
   await submitLoginForm(page, user, pass);
 
-  if (await isVerificationScreen(page)) {
-    await handleEmailVerification(page);
+  // Le bandeau 2FA peut mettre 1–5 s à apparaître sur la même page
+  let sawOtp = false;
+  for (let i = 0; i < 12; i += 1) {
+    if (await isVerificationScreen(page)) {
+      sawOtp = true;
+      break;
+    }
+    if (await getAccessToken(page)) break;
+    await page.waitForTimeout(500);
+  }
+
+  if (sawOtp) {
+    await handleEmailVerification(page, { notBeforeMs: loginStartedAt - 5_000 });
   }
 
   if (!(await isLoggedIn(page))) {
-    if (await isVerificationScreen(page)) {
+    if (await isVerificationScreen(page) || sawOtp) {
       throw new Error(
-        'Code email Deciplus requis — DECIPLUS_EMAIL_CODE dans .env ou session exportée (npm run session:export)'
+        'Code email Deciplus non validé — vérifier DECIPLUS_IMAP_* ou DECIPLUS_EMAIL_CODE'
       );
     }
     throw new Error('Échec connexion Deciplus — vérifier identifiants');
@@ -502,6 +649,8 @@ module.exports = {
   handleChooseZone,
   gotoDeciplus,
   getAccessToken,
+  isAccessTokenValid,
+  isSessionExpiredUrl,
   login,
   isAuthBlocked,
   isMfaAuthError,
