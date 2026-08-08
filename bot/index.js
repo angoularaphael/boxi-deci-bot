@@ -3,6 +3,10 @@
  * Phase 2 — Bot RPA Deciplus : traite la file d'attente BOXPLUS.
  */
 require('dotenv').config();
+// Mode rapide par défaut (vérif / résiliation / changement) — désactiver avec DECIPLUS_FAST=0
+if (process.env.DECIPLUS_FAST == null || process.env.DECIPLUS_FAST === '') {
+  process.env.DECIPLUS_FAST = '1';
+}
 
 const { login, isMfaAuthError, isSessionRecoverableError } = require('./auth');
   const {
@@ -580,7 +584,7 @@ async function processVerifyIdentityJob(page, order) {
   ).replace(/\/$/, '');
   const storeSecret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
 
-  const pushStatus = async (status, mismatchFields = [], reason = null) => {
+  const pushStatus = async (status, { mismatchFields = [], reason = null, memberId = null } = {}) => {
     if (!storeBase || !storeSecret) return false;
     try {
       const res = await fetch(`${storeBase}/api/internal/cancel-status`, {
@@ -591,6 +595,7 @@ async function processVerifyIdentityJob(page, order) {
           status,
           reason,
           mismatch_fields: mismatchFields,
+          deciplus_member_id: memberId,
           customer: identity,
         }),
       });
@@ -602,7 +607,11 @@ async function processVerifyIdentityJob(page, order) {
 
   const match = await findMemberByIdentity(page, identity);
   if (!match.found) {
-    await pushStatus('mismatch', match.mismatch_fields || [], match.reason || 'identity_mismatch');
+    await pushStatus('mismatch', {
+      mismatchFields: match.mismatch_fields || [],
+      reason: match.reason || 'identity_mismatch',
+      memberId: match.member_id || null,
+    });
     return {
       status: STATUS.MANUAL_REVIEW,
       action: 'verify_identity',
@@ -611,7 +620,7 @@ async function processVerifyIdentityJob(page, order) {
       mismatch_fields: match.mismatch_fields || [],
     };
   }
-  await pushStatus('verified', [], null);
+  await pushStatus('verified', { memberId: match.member_id });
   return {
     status: STATUS.SUCCESS,
     action: 'verify_identity',

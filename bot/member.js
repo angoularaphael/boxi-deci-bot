@@ -189,7 +189,7 @@ async function getMemberSearchContext(page, { waitMs = 20000 } = {}) {
 }
 
 async function navigateToMembers(page) {
-  const searchCtx = await getMemberSearchContext(page, { waitMs: 2500 });
+  const searchCtx = await getMemberSearchContext(page, { waitMs: 1200 });
   const already =
     (await searchCtx.locator('#i_nom, #i_tel').count().catch(() => 0)) > 0 &&
     !/idj=\d+/i.test(page.url()) &&
@@ -211,10 +211,10 @@ async function navigateToMembers(page) {
       })
       .catch(() => {});
   }
-  await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
-  await randomDelay();
+  await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+  await randomDelay(80, 180);
   await dismissJqueryUiOverlay(page);
-  await getMemberSearchContext(page, { waitMs: 15000 });
+  await getMemberSearchContext(page, { waitMs: 8000 });
 }
 
 async function resetMemberSearchContext(page) {
@@ -245,7 +245,7 @@ async function extractMemberIdFromAnyContext(page) {
 }
 
 async function submitMemberSearch(page) {
-  const ctx = await getMemberSearchContext(page);
+  const ctx = await getMemberSearchContext(page, { waitMs: 4000 });
   const searchBtn = ctx
     .locator(
       'input[type="submit"][value*="Recherche" i], input[type="submit"][value*="Chercher" i], button:has-text("Rechercher"), #buttonSearch, input.albut_dw[type="submit"]'
@@ -258,20 +258,19 @@ async function submitMemberSearch(page) {
     if ((await tel.count()) > 0) await tel.press('Enter').catch(() => {});
     else await page.keyboard.press('Enter').catch(() => {});
   }
-  await randomDelay(1000, 1800);
-  await page.waitForLoadState('domcontentloaded', { timeout: 12000 }).catch(() => {});
+  await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {});
   await dismissJqueryUiOverlay(page);
-  // Laisser le temps à un résultat unique de s’ouvrir (souvent en iframe)
-  for (let i = 0; i < 8; i += 1) {
+  // Sortie dès qu’un idj / lien apparaît (évite 3–4 s d’attente fixe)
+  const deadline = Date.now() + 2800;
+  while (Date.now() < deadline) {
     const id = await extractMemberIdFromAnyContext(page);
     if (id) return;
-    const frames = page.frames();
-    for (const frame of frames) {
+    for (const frame of page.frames()) {
       if ((await frame.locator('a[href*="idj="], a[href*="idj%3D"]').count().catch(() => 0)) > 0) {
         return;
       }
     }
-    await page.waitForTimeout(400);
+    await page.waitForTimeout(150);
   }
 }
 
@@ -359,33 +358,22 @@ function phonesMatch(a, b) {
   return Boolean(na && nb && na === nb);
 }
 
-/** Ouvre la fiche éditable joueurs.php (check.php seul ne suffit pas pour lire nom/prénom). */
+/** Ouvre la fiche éditable joueurs.php (chemin nextgen le plus fiable en premier). */
 async function openMemberEditForm(page, memberId) {
   if (!memberId) return false;
   const origin = new URL(page.url()).origin;
+  // Legacy d’abord (celui qui marche en prod) — évite 2 navigations inutiles
   const paths = [
-    `joueurs.php?idj=${encodeURIComponent(memberId)}`,
     `nextgen/legacy?path=${encodeURIComponent(`/joueurs.php?idj=${memberId}`)}`,
-    `check.php?idj=${encodeURIComponent(memberId)}`,
+    `joueurs.php?idj=${encodeURIComponent(memberId)}`,
   ];
   for (const rel of paths) {
     await page
-      .goto(new URL(rel, origin).href, { waitUntil: 'domcontentloaded', timeout: navTimeout() })
+      .goto(new URL(rel, origin).href, { waitUntil: 'domcontentloaded', timeout: Math.min(navTimeout(), 45000) })
       .catch(() => {});
-    await randomDelay(500, 900);
     await dismissJqueryUiOverlay(page);
-    const ctx = await getMemberFormContext(page, { waitMs: 8000 });
+    const ctx = await getMemberFormContext(page, { waitMs: 5000 });
     if (await isDeciplusMemberForm(ctx)) return true;
-    // Lien « Fiche détaillée » sur check.php
-    const detail = ctx
-      .locator('a:has-text("Fiche détaillée"), a:has-text("Fiche detaill"), text=Fiche détaillée')
-      .first();
-    if ((await detail.count()) > 0) {
-      await detail.click().catch(() => {});
-      await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
-      await randomDelay(500, 900);
-      if (await isDeciplusMemberForm(await getMemberFormContext(page, { waitMs: 8000 }))) return true;
-    }
   }
   return false;
 }
@@ -393,11 +381,11 @@ async function openMemberEditForm(page, memberId) {
 /** Lit la fiche ouverte — jamais les champs recherche #i_* . */
 async function readMemberIdentityFields(page) {
   let last = { lastName: '', firstName: '', birth: '', phone: '', fromMemberForm: false };
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    const ctx = await getMemberFormContext(page, { waitMs: 3000 });
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const ctx = await getMemberFormContext(page, { waitMs: 2000 });
     const onMember = await isDeciplusMemberForm(ctx);
     if (!onMember) {
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(200);
       continue;
     }
     const scope =
@@ -429,7 +417,7 @@ async function readMemberIdentityFields(page) {
     }
     last = { lastName, firstName, birth, phone, fromMemberForm: true };
     if (String(lastName || firstName).trim()) break;
-    await page.waitForTimeout(350);
+    await page.waitForTimeout(180);
   }
   return last;
 }
@@ -469,7 +457,7 @@ async function findMemberByIdentity(page, identity = {}) {
   const phone = identity.phone;
   if (!phone) return { found: false, reason: 'missing_phone', mismatch_fields: ['phone'] };
 
-  // Email d’abord (plus unique) — un même tel test peut matcher plusieurs fiches
+  // Email d’abord (plus unique) — stop dès le 1er hit (pas de recherches inutiles)
   let foundViaPhone = false;
   let hit = { found: false };
   if (identity.email) {
@@ -479,19 +467,19 @@ async function findMemberByIdentity(page, identity = {}) {
     hit = await searchMember(page, phone);
     if (hit.found) foundViaPhone = true;
   }
-  if (!hit.found && (identity.last_name || identity.first_name)) {
-    hit = await searchMemberByName(page, identity.last_name, identity.first_name);
-  }
   if (!hit.found && identity.last_name) {
-    hit = await searchMemberByName(page, identity.last_name, '');
+    hit = await searchMemberByName(page, identity.last_name, identity.first_name || '');
   }
   if (!hit.found) {
     return { found: false, reason: 'not_found', mismatch_fields: [] };
   }
 
-  // Forcer l’ouverture de joueurs.php pour lire nom / prénom / naissance / tel
-  await openMemberEditForm(page, hit.member_id);
-  const form = await readMemberIdentityFields(page);
+  // Si la fiche est déjà lisible après la recherche, pas de 2ᵉ navigation
+  let form = await readMemberIdentityFields(page);
+  if (!form.fromMemberForm || !String(form.lastName || form.firstName).trim()) {
+    await openMemberEditForm(page, hit.member_id);
+    form = await readMemberIdentityFields(page);
+  }
   if (!form.fromMemberForm || !String(form.lastName || form.firstName).trim()) {
     logWarn('Fiche membre Deciplus illisible pour comparaison identité', {
       member_id: hit.member_id,
@@ -555,8 +543,8 @@ async function clickFirstMemberResult(page) {
       const id = extractMemberIdFromUrl(href);
       if (!id) continue;
       await links.nth(i).click().catch(() => {});
-      await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
-      await randomDelay(600, 1200);
+      await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+      await randomDelay(150, 350);
       return (await extractMemberIdFromAnyContext(page)) || id;
     }
   }
@@ -577,7 +565,7 @@ async function clickFirstMemberResult(page) {
         timeout: navTimeout(),
       })
       .catch(() => {});
-    await randomDelay(600, 1200);
+    await randomDelay(150, 350);
     return (await extractMemberIdFromAnyContext(page)) || id;
   }
   return null;
