@@ -2305,11 +2305,30 @@ async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
   return { action: 'carte_badge_created', sale_type: 'carte' };
 }
 
-async function annotateMember(page, order, productConfig) {
-  // Plus d'annotation technique (Source / Produit / Montant / Mode) sur la fiche
-  void page;
-  void order;
-  void productConfig;
+async function annotateMember(page, _order, _productConfig) {
+  // Nettoyage des anciennes notes techniques (Source: storefront | Produit… ) — plus jamais écrites
+  try {
+    const { getMemberFormContext } = require('./member');
+    const ctx = await getMemberFormContext(page, { waitMs: 2500 });
+    const ta = ctx.locator('textarea[name="info_compta"]').first();
+    if ((await ta.count()) === 0) return;
+    const val = String((await ta.inputValue().catch(() => '')) || '');
+    if (!/Source:\s*|Produit:\s*|UTM\s|Commande:\s*|Montant PrestaShop|Offre:\s*/i.test(val)) {
+      return;
+    }
+    await ta.fill('');
+    const update = ctx
+      .locator(
+        'input[type="submit"][value*="Mettre"], button:has-text("Mettre à jour"), input[name="update"]'
+      )
+      .first();
+    if ((await update.count()) > 0) {
+      await update.click().catch(() => {});
+    }
+    logInfo('Note technique info_compta nettoyée (Source/Produit/UTM)');
+  } catch (err) {
+    logWarn('Nettoyage info_compta ignoré', { error: err.message });
+  }
 }
 
 async function verifyCreatedContract(page, memberId, { badge = false, label = '' } = {}) {

@@ -105,11 +105,11 @@ function mapDeciplusItem(item) {
     stripe_price_label: stripeEuros === 0 ? 'Gratuit' : formatEuros(stripeEuros),
     pay_today_label: stripeEuros === 0 ? 'Gratuit' : formatEuros(stripeEuros),
     deciplus_price: deciplusDisplayEuros,
-    price_subtitle: hasContractTotal ? `${formatEuros(stripeEuros)} — 1ère échéance CB` : null,
-    deciplus_total_note: hasContractTotal
-      ? `Total contrat Deciplus : ${formatEuros(deciplusDisplayEuros)}`
+    price_subtitle: hasContractTotal ? `${formatEuros(stripeEuros)} — première échéance` : null,
+    deciplus_total_note: null,
+    installments_note: hasContractTotal
+      ? '1ʳᵉ échéance par carte · prélèvement sans engagement'
       : null,
-    installments_note: hasContractTotal ? 'CB : 1ère échéance · suite par prélèvement IBAN' : null,
     sale_type: saleType,
     requires_iban: requiresIban,
     requires_payment: stripeEuros > 0,

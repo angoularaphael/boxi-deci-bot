@@ -103,18 +103,34 @@ async function injectAuthToken(page, token) {
   logInfo('Token Deciplus injecté depuis DECIPLUS_AUTH_TOKEN');
 }
 
-async function handleEmailVerification(page) {
-  const code = String(process.env.DECIPLUS_EMAIL_CODE || process.env.DECIPLUS_OTP || '').trim();
-  if (!code) {
+async function resolveEmailVerificationCode() {
+  const manual = String(process.env.DECIPLUS_EMAIL_CODE || process.env.DECIPLUS_OTP || '').trim();
+  if (manual) return { code: manual, source: 'env' };
+
+  const { isImapOtpConfigured, fetchDeciplusEmailCode } = require('./deciplus-otp-imap');
+  if (!isImapOtpConfigured()) {
     throw new Error(
       'Deciplus demande un code de vérification email. ' +
-        'Solution 1 : ajouter DECIPLUS_EMAIL_CODE=123456 dans .env (temporaire). ' +
-        'Solution 2 (recommandée) : exporter data/session/storage-state.json en local ' +
-        '(npm run session:export) et uploader sur BotHosting.'
+        'Configurer DECIPLUS_IMAP_USER + DECIPLUS_IMAP_PASS (lecture auto), ' +
+        'ou DECIPLUS_EMAIL_CODE=123456 (manuel), ' +
+        'ou exporter la session (npm run session:export).'
     );
   }
 
-  logInfo('Saisie code vérification Deciplus…');
+  const code = await fetchDeciplusEmailCode();
+  if (!code) {
+    throw new Error(
+      'Code email Deciplus introuvable dans la boîte IMAP — vérifier DECIPLUS_IMAP_USER/PASS ' +
+        'ou coller DECIPLUS_EMAIL_CODE manuellement.'
+    );
+  }
+  return { code, source: 'imap' };
+}
+
+async function handleEmailVerification(page) {
+  const { code, source } = await resolveEmailVerificationCode();
+
+  logInfo('Saisie code vérification Deciplus…', { source });
   const codeSelectors = [
     'input[name="code"]',
     'input[name="otp"]',

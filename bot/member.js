@@ -381,11 +381,11 @@ async function openMemberEditForm(page, memberId) {
 /** Lit la fiche ouverte — jamais les champs recherche #i_* . */
 async function readMemberIdentityFields(page) {
   let last = { lastName: '', firstName: '', birth: '', phone: '', fromMemberForm: false };
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const ctx = await getMemberFormContext(page, { waitMs: 2000 });
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const ctx = await getMemberFormContext(page, { waitMs: 1200 });
     const onMember = await isDeciplusMemberForm(ctx);
     if (!onMember) {
-      await page.waitForTimeout(200);
+      await page.waitForTimeout(150);
       continue;
     }
     const scope =
@@ -426,27 +426,56 @@ const DEFAULT_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate', 'phone'];
 /** Changement d’abo : nom + prénom + date de naissance uniquement. */
 const CHANGE_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate'];
 
+/** Normalise une date Deciplus / ISO vers JJ/MM/AAAA comparable. */
+function normalizeBirthCompare(value) {
+  const raw = String(value || '')
+    .trim()
+    .replace(/\s/g, '')
+    .replace(/-/g, '/');
+  if (!raw) return '';
+  // AAAA/MM/JJ → JJ/MM/AAAA
+  let m = raw.match(/^(\d{4})\/(\d{2})\/(\d{2})$/);
+  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
+  // JJ/MM/AA → JJ/MM/20AA (ou 19AA)
+  m = raw.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);
+  if (m) {
+    const yy = Number(m[3]);
+    const century = yy > 30 ? 1900 : 2000;
+    return `${m[1]}/${m[2]}/${century + yy}`;
+  }
+  // JJ/MM/AAAA
+  m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (m) return `${m[1]}/${m[2]}/${m[3]}`;
+  return raw;
+}
+
 /** Compare identité saisie vs fiche — retourne uniquement les champs réellement faux. */
 function computeIdentityMismatches(form, identity = {}, { fields = DEFAULT_MATCH_FIELDS } = {}) {
   const check = (name) => fields.includes(name);
   const expectedBirth = birthdateToDeciplus(identity.birthdate);
-  const lastNameOk = normalizePerson(form.lastName) === normalizePerson(identity.last_name);
-  const firstNameOk = normalizePerson(form.firstName) === normalizePerson(identity.first_name);
-  const normBirth = (v) =>
-    String(v || '')
-      .trim()
-      .replace(/\s/g, '')
-      .replace(/-/g, '/');
-  const birthOk = !expectedBirth || normBirth(form.birth) === normBirth(expectedBirth);
+  const formLast = String(form.lastName || '').trim();
+  const formFirst = String(form.firstName || '').trim();
+  const formBirth = String(form.birth || '').trim();
+  // Ne pas marquer nom/prénom en erreur si la fiche n’a pas pu les lire
+  const lastNameOk =
+    !formLast || normalizePerson(formLast) === normalizePerson(identity.last_name);
+  const firstNameOk =
+    !formFirst || normalizePerson(formFirst) === normalizePerson(identity.first_name);
+  const birthOk =
+    !expectedBirth ||
+    !formBirth ||
+    normalizeBirthCompare(formBirth) === normalizeBirthCompare(expectedBirth);
   const phoneOk = form.phone
     ? phonesMatch(form.phone, identity.phone)
     : Boolean(form.foundViaPhone);
 
   // Champs en erreur = ceux qui ne matchent PAS (ne jamais inverser)
   const mismatchFields = [];
-  if (check('last_name') && !lastNameOk) mismatchFields.push('last_name');
-  if (check('first_name') && !firstNameOk) mismatchFields.push('first_name');
-  if (check('birthdate') && !birthOk) mismatchFields.push('birthdate');
+  if (check('last_name') && formLast && !lastNameOk) mismatchFields.push('last_name');
+  if (check('first_name') && formFirst && !firstNameOk) mismatchFields.push('first_name');
+  if (check('birthdate') && expectedBirth && formBirth && !birthOk) {
+    mismatchFields.push('birthdate');
+  }
   if (check('phone') && !phoneOk) mismatchFields.push('phone');
   return {
     mismatchFields,
@@ -492,10 +521,12 @@ async function findMemberByIdentity(page, identity = {}, options = {}) {
     return { found: false, reason: 'not_found', mismatch_fields: [] };
   }
 
-  // Si la fiche est déjà lisible après la recherche, pas de 2ᵉ navigation
+  // Ouverture directe de la fiche (évite lectures foireuses sur la page recherche)
+  await openMemberEditForm(page, hit.member_id);
   let form = await readMemberIdentityFields(page);
   if (!form.fromMemberForm || !String(form.lastName || form.firstName).trim()) {
-    await openMemberEditForm(page, hit.member_id);
+    // 1 retry court
+    await page.waitForTimeout(400);
     form = await readMemberIdentityFields(page);
   }
   if (!form.fromMemberForm || !String(form.lastName || form.firstName).trim()) {
@@ -1330,6 +1361,7 @@ module.exports = {
   computeIdentityMismatches,
   DEFAULT_MATCH_FIELDS,
   CHANGE_MATCH_FIELDS,
+  getMemberFormContext,
   startNewMemberFromSelect,
   openNewMemberForm,
   fillMemberForm,

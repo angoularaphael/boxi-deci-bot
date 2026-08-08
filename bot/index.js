@@ -189,7 +189,10 @@ async function processCancelJob(page, order) {
   ).replace(/\/$/, '');
   const storeSecret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
 
-  const pushCancelStatus = async (status, { reason = null, mismatchFields = [], cancelledCount = null } = {}) => {
+  const pushCancelStatus = async (
+    status,
+    { reason = null, mismatchFields = [], cancelledCount = null, memberId = null } = {}
+  ) => {
     if (!storeBase || !storeSecret) return false;
     try {
       const res = await fetch(`${storeBase}/api/internal/cancel-status`, {
@@ -201,6 +204,7 @@ async function processCancelJob(page, order) {
           reason,
           mismatch_fields: mismatchFields,
           cancelled_count: cancelledCount,
+          deciplus_member_id: memberId,
           customer: identity,
         }),
       });
@@ -305,11 +309,14 @@ async function processCancelJob(page, order) {
     };
   }
 
+  // Identité OK → le front peut afficher « résiliation sera traitée » sans attendre Deciplus
+  await pushCancelStatus('verified', { memberId });
+
   try {
     const result = await cancelSale(page, memberId, {
       cancelDate: order.cancel_date || order.effective_date || null,
     });
-    await pushCancelStatus('done', { cancelledCount: result?.cancelled_count ?? null });
+    await pushCancelStatus('done', { cancelledCount: result?.cancelled_count ?? null, memberId });
     return {
       status: STATUS.SUCCESS,
       action: 'cancel',
@@ -318,7 +325,7 @@ async function processCancelJob(page, order) {
       ...result,
     };
   } catch (err) {
-    await pushCancelStatus('error', { reason: err.message });
+    await pushCancelStatus('error', { reason: err.message, memberId });
     throw err;
   }
 }
