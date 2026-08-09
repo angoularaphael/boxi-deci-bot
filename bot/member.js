@@ -679,24 +679,44 @@ async function detectFormValidationError(page) {
 async function openNewMemberFormViaSelect(page, customer) {
   const sel = getSelectors();
   await navigateToMembers(page);
-  await fillFirst(page, sel.quick_search_selectors?.nom || '#i_nom', customer.last_name);
-  await fillFirst(page, sel.quick_search_selectors?.prenom || '#i_prenom', customer.first_name);
+  // select.php est dans iframe nextgen (_vue_iframe) — #buttonNew n’est PAS sur page
+  const searchCtx = await getMemberSearchContext(page, { waitMs: 12000 });
+  await fillFirst(searchCtx, sel.quick_search_selectors?.nom || '#i_nom', customer.last_name);
+  await fillFirst(searchCtx, sel.quick_search_selectors?.prenom || '#i_prenom', customer.first_name);
   if (customer.email) {
-    await fillFirst(page, sel.quick_search_selectors?.email || '#i_email', customer.email);
+    await fillFirst(searchCtx, sel.quick_search_selectors?.email || '#i_email', customer.email);
   }
 
-  const newBtn = page.locator(sel.quick_search_selectors?.new_button || '#buttonNew').first();
-  if ((await newBtn.count()) === 0) return null;
+  const newBtn = searchCtx.locator(sel.quick_search_selectors?.new_button || '#buttonNew').first();
+  if ((await newBtn.count()) === 0) {
+    logWarn('Bouton Nouveau membre (#buttonNew) introuvable dans le contexte recherche');
+    return null;
+  }
 
   await newBtn.click();
-  await page.waitForURL(/joueurs\.php.*idj=new/, { timeout: navTimeout() }).catch(() => {});
+  await Promise.race([
+    page.waitForURL(/joueurs\.php|idj=new/i, { timeout: 20000 }),
+    page.waitForTimeout(2000),
+  ]).catch(() => {});
   await randomDelay();
   await dismissJqueryUiOverlay(page);
 
-  const ctx = await getMemberFormContext(page);
-  if ((await ctx.locator('form[name="db1_form"], input[name="nom"]').count()) > 0) {
-    return ctx;
-  }
+  const ctx = await getMemberFormContext(page, { waitMs: 20000 });
+  if (await isDeciplusMemberForm(ctx)) return ctx;
+  logWarn('Après #buttonNew — formulaire membre absent', {
+    url: page.url(),
+    frames: page
+      .frames()
+      .map((f) => {
+        try {
+          return f.url();
+        } catch {
+          return '';
+        }
+      })
+      .filter(Boolean)
+      .slice(0, 6),
+  });
   return null;
 }
 
@@ -709,14 +729,40 @@ async function openNewMemberFormViaUrl(page, customer) {
     jprenom: customer.first_name || '',
   });
   if (customer.email) params.set('jemail', customer.email);
+  const qs = params.toString();
+  const origin = new URL(page.url()).origin;
+  // Même stratégie que openMemberEditForm : nextgen/legacy d’abord
+  const candidates = [
+    `nextgen/legacy?path=${encodeURIComponent(`/joueurs.php?${qs}`)}`,
+    `joueurs.php?${qs}`,
+  ];
 
-  await gotoDeciplus(page, `joueurs.php?${params}`);
-  await randomDelay();
-  await dismissJqueryUiOverlay(page);
-
-  const ctx = await getMemberFormContext(page);
-  if ((await ctx.locator('form[name="db1_form"], input[name="nom"]').count()) > 0) {
-    return ctx;
+  for (const rel of candidates) {
+    await page
+      .goto(new URL(rel, origin).href, {
+        waitUntil: 'domcontentloaded',
+        timeout: Math.min(navTimeout(), 45000),
+      })
+      .catch((err) => logWarn('Navigation création membre', { rel, error: err.message }));
+    await randomDelay();
+    await dismissJqueryUiOverlay(page);
+    const ctx = await getMemberFormContext(page, { waitMs: 20000 });
+    if (await isDeciplusMemberForm(ctx)) return ctx;
+    logWarn('Création membre — formulaire absent après navigation', {
+      rel,
+      url: page.url(),
+      frames: page
+        .frames()
+        .map((f) => {
+          try {
+            return f.url();
+          } catch {
+            return '';
+          }
+        })
+        .filter(Boolean)
+        .slice(0, 6),
+    });
   }
   return null;
 }
@@ -730,12 +776,12 @@ async function openNewMemberForm(page, customer) {
   let ctx = await openNewMemberFormViaSelect(page, customer);
   if (ctx) return ctx;
 
-  logInfo('Repli création membre — URL directe joueurs.php');
+  logInfo('Repli création membre — URL nextgen/legacy joueurs.php');
   try {
     ctx = await openNewMemberFormViaUrl(page, customer);
     if (ctx) return ctx;
   } catch (err) {
-    logWarn('URL directe joueurs.php en échec', { error: err.message });
+    logWarn('URL joueurs.php en échec', { error: err.message });
   }
 
   ctx = await openNewMemberFormViaSelect(page, customer);

@@ -383,7 +383,9 @@ async function saveSession(context, opts = {}) {
 }
 
 function isSessionRecoverableError(message = '') {
-  return /session expir|token.*introuvable|relancer login|not logged|login\.php|Unauthorized|\b401\b|storage-state|connexion.*échou|Déconnexion|session Deciplus|déjà pas connect|auth.*expir|cookie|Execution context was destroyed|context.*destroyed|frame.*detached|joueurs\.php|imapflow|mailparser|code email|DECIPLUS_IMAP|cooldown|Impossible d'ouvrir|session inactive/i.test(
+  // Ne pas traiter « joueurs.php / formulaire » comme session morte :
+  // souvent l’UI nextgen/iframe, alors que le token est encore valide.
+  return /session expir|token.*introuvable|relancer login|not logged|login\.php|Unauthorized|\b401\b|storage-state|connexion.*échou|Déconnexion|session Deciplus|déjà pas connect|auth.*expir|cookie|Execution context was destroyed|context.*destroyed|frame.*detached|imapflow|mailparser|code email|DECIPLUS_IMAP|cooldown|session inactive/i.test(
     String(message || '')
   );
 }
