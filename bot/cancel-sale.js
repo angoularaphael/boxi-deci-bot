@@ -208,16 +208,41 @@ async function clickActionTile(page, names) {
   }, patterns.map((p) => (p instanceof RegExp ? p.source.replace(/^\^|\$$/g, '') : String(p))));
 }
 
-async function waitResilierForm(page, timeoutMs = 22000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const title = page.getByText(/Résilier le contrat|Date de résiliation effective/i).first();
-    if ((await title.count()) > 0 && (await title.isVisible().catch(() => false))) {
-      return true;
+async function isResilierFormVisible(page) {
+  const re = /Résilier le contrat|Date de résiliation effective|Motif de résiliation|Appliquer et Quitter/i;
+  for (const ctx of getScopes(page)) {
+    try {
+      const title = ctx.getByText(re).first();
+      if ((await title.count()) > 0 && (await title.isVisible().catch(() => false))) {
+        return true;
+      }
+      // Champ date typique du panneau résiliation
+      const dateField = ctx
+        .locator(
+          'xpath=//*[contains(normalize-space(.),"Date de résiliation")]/following::input[1]'
+        )
+        .first();
+      if ((await dateField.count()) > 0 && (await dateField.isVisible().catch(() => false))) {
+        return true;
+      }
+    } catch {
+      /* frame détachée */
     }
-    // Parfois la tuile a été cliquée sans ouvrir le panneau — re-clic Résilier
-    if ((Date.now() - start) > 4000 && (Date.now() - start) < 5000) {
-      await clickActionTile(page, [/^Résilier$/i]).catch(() => {});
+  }
+  return false;
+}
+
+async function waitResilierForm(page, timeoutMs = 28000) {
+  const start = Date.now();
+  let lastClickAt = 0;
+  while (Date.now() - start < timeoutMs) {
+    if (await isResilierFormVisible(page)) return true;
+
+    // Re-clic Résilier toutes les ~4 s si le panneau ne s’ouvre pas
+    if (Date.now() - lastClickAt > 4000) {
+      lastClickAt = Date.now();
+      await clickActionTile(page, [/^Résilier$/i, /^Résiliation$/i]).catch(() => {});
+      await page.waitForTimeout(600);
     }
     await page.waitForTimeout(300);
   }
@@ -335,85 +360,118 @@ async function selectResiliationMotif(page) {
     /Ne souhaite pas reconduire/i,
     /Ne souhaite plus reconduire/i,
     /ne souhaite pas reconduire/i,
+    /pas reconduire/i,
+    /changement/i,
+    /autre/i,
   ];
 
-  // Ouvrir le select
-  const select = page
-    .locator(
-      'xpath=//*[contains(normalize-space(.),"Motif de résiliation")]/following::*[contains(@class,"el-select") or self::select or contains(@class,"ari-select")][1]'
-    )
-    .first();
-  if ((await select.count()) > 0 && (await select.isVisible().catch(() => false))) {
-    await select.click({ force: true });
-  } else {
-    const choose = page.getByText(/^Choisir$/i).first();
-    if ((await choose.count()) > 0) await choose.click({ force: true });
-    else {
-      await page
-        .locator('.el-select, .el-input__inner')
-        .filter({ has: page.locator('input') })
-        .first()
-        .click({ force: true })
-        .catch(() => {});
+  // Ouvrir le select — plusieurs variantes Deciplus / Element UI
+  const openers = [
+    page
+      .locator(
+        'xpath=//*[contains(normalize-space(.),"Motif de résiliation")]/following::*[contains(@class,"el-select") or self::select or contains(@class,"ari-select")][1]'
+      )
+      .first(),
+    page.getByText(/Motif de résiliation/i).locator('xpath=following::input[1]').first(),
+    page.getByText(/^Choisir$/i).first(),
+    page.locator('.el-select .el-input__inner, .el-select .el-input').first(),
+  ];
+  for (const opener of openers) {
+    if ((await opener.count()) > 0 && (await opener.isVisible().catch(() => false))) {
+      await opener.click({ force: true }).catch(() => {});
+      break;
     }
   }
-  await randomDelay(400, 700);
+  await randomDelay(500, 900);
+
+  // Attendre le dropdown
+  for (let i = 0; i < 10; i += 1) {
+    const open = await page
+      .locator('.el-select-dropdown:visible, .el-popper:visible, ul.el-select-dropdown__list:visible')
+      .count()
+      .catch(() => 0);
+    if (open > 0) break;
+    await page.waitForTimeout(250);
+  }
 
   for (const re of motifs) {
-    const opt = page.locator('.el-select-dropdown__item, li, .el-option, div[role="option"]').filter({ hasText: re }).first();
-    if ((await opt.count()) > 0 && (await opt.isVisible().catch(() => false))) {
-      await opt.click({ force: true });
-      logInfo('Motif de résiliation sélectionné', { motif: 'Ne souhaite pas reconduire' });
-      await randomDelay(400, 700);
-      return true;
+    for (const ctx of getScopes(page)) {
+      try {
+        const opt = ctx
+          .locator(
+            '.el-select-dropdown__item, li.el-select-dropdown__item, li, .el-option, div[role="option"]'
+          )
+          .filter({ hasText: re })
+          .first();
+        if ((await opt.count()) > 0 && (await opt.isVisible().catch(() => false))) {
+          await opt.click({ force: true });
+          logInfo('Motif de résiliation sélectionné', { motif: String(re) });
+          await randomDelay(400, 700);
+          return true;
+        }
+      } catch {
+        /* ignore */
+      }
     }
     const byText = page.getByText(re).first();
     if ((await byText.count()) > 0 && (await byText.isVisible().catch(() => false))) {
       await byText.click({ force: true });
-      logInfo('Motif de résiliation sélectionné', { motif: 'Ne souhaite pas reconduire' });
+      logInfo('Motif de résiliation sélectionné', { motif: String(re) });
       await randomDelay(400, 700);
       return true;
     }
   }
 
-  // Repli JS dans les listes déroulantes
+  // Repli JS : préférer « ne souhaite… », sinon 1ère option non vide
   const picked = await page.evaluate(() => {
     const items = [
       ...document.querySelectorAll(
-        '.el-select-dropdown__item, li, [role="option"], .el-option, div.item'
+        '.el-select-dropdown__item, li.el-select-dropdown__item, li[role="option"], [role="option"], .el-option'
       ),
-    ];
-    const hit = items.find((el) =>
-      /ne souhaite (pas|plus) reconduire/i.test(String(el.textContent || '').trim())
+    ].filter((el) => {
+      const t = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+      const style = window.getComputedStyle(el);
+      return t && style.display !== 'none' && style.visibility !== 'hidden';
+    });
+    const preferred = items.find((el) =>
+      /ne souhaite|pas reconduire|changement|autre/i.test(String(el.textContent || ''))
     );
-    if (!hit) return false;
+    const hit = preferred || items[0];
+    if (!hit) {
+      return { ok: false, options: items.map((el) => String(el.textContent || '').trim()).slice(0, 12) };
+    }
     hit.click();
-    return true;
+    return { ok: true, motif: String(hit.textContent || '').replace(/\s+/g, ' ').trim() };
   });
-  if (picked) {
-    logInfo('Motif de résiliation sélectionné', { motif: 'Ne souhaite pas reconduire', via: 'evaluate' });
+  if (picked?.ok) {
+    logInfo('Motif de résiliation sélectionné', { motif: picked.motif, via: 'evaluate' });
     await randomDelay(400, 700);
     return true;
   }
 
-  logWarn('Motif « Ne souhaite pas reconduire » introuvable');
+  logWarn('Motif « Ne souhaite pas reconduire » introuvable', {
+    options: picked?.options || [],
+  });
   return false;
 }
 
 async function clickAppliquerEtQuitter(page) {
   const start = Date.now();
-  while (Date.now() - start < 15000) {
+  while (Date.now() - start < 20000) {
     const btn = page
       .locator(
-        'button.ari-button-filled:has-text("Appliquer et Quitter"), button:has-text("Appliquer et Quitter")'
+        'button.ari-button-filled:has-text("Appliquer et Quitter"), button:has-text("Appliquer et Quitter"), button:has-text("Appliquer")'
       )
+      .filter({ hasText: /Appliquer/i })
       .first();
     if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
       const disabled = await btn.isDisabled().catch(() => false);
       const ariaDisabled = (await btn.getAttribute('aria-disabled').catch(() => '')) === 'true';
       const cls = (await btn.getAttribute('class').catch(() => '')) || '';
       if (!disabled && !ariaDisabled && !/is-disabled|disabled/i.test(cls)) {
-        await btn.click({ force: true });
+        await btn.scrollIntoViewIfNeeded().catch(() => {});
+        await btn.click({ force: true, noWaitAfter: true }).catch(() => btn.click({ force: true }));
+        logInfo('Clic Appliquer et Quitter');
         return true;
       }
     }
@@ -421,14 +479,18 @@ async function clickAppliquerEtQuitter(page) {
   }
 
   // Dernier recours : clic JS même si état ambigu
-  return page.evaluate(() => {
+  const forced = await page.evaluate(() => {
     const hit = [...document.querySelectorAll('button')].find((b) =>
-      /Appliquer et Quitter/i.test(String(b.textContent || '').trim())
+      /Appliquer(\s+et\s+Quitter)?/i.test(String(b.textContent || '').trim())
     );
     if (!hit) return false;
+    hit.removeAttribute('disabled');
+    hit.classList.remove('is-disabled', 'disabled');
     hit.click();
     return true;
   });
+  if (forced) logInfo('Clic Appliquer et Quitter (force JS)');
+  return forced;
 }
 
 async function ensureResiliationEmailChecked(page) {
@@ -607,16 +669,24 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
   }
 
   // IMPORTANT : Résilier — jamais « Annuler la vente »
-  const mode = await clickActionTile(page, [/^Résilier$/i]);
+  const mode = await clickActionTile(page, [/^Résilier$/i, /^Résiliation$/i]);
   if (!mode) {
     logWarn('Tuile Résilier introuvable', { idc: contract.idc, url: page.url() });
     return { cancelled: false, reason: 'resilier_missing', idc: contract.idc };
   }
-  await randomDelay(800, 1200);
+  await randomDelay(1000, 1600);
 
   if (!(await waitResilierForm(page))) {
-    logWarn('Formulaire Résilier le contrat introuvable', { idc: contract.idc });
-    return { cancelled: false, reason: 'resilier_form_missing', idc: contract.idc };
+    // Dernier recours : double clic forcé + screenshot diagnostique
+    await clickActionTile(page, [/^Résilier$/i]).catch(() => {});
+    await page.waitForTimeout(1500);
+    if (!(await waitResilierForm(page, 8000))) {
+      logWarn('Formulaire Résilier le contrat introuvable', {
+        idc: contract.idc,
+        url: page.url(),
+      });
+      return { cancelled: false, reason: 'resilier_form_missing', idc: contract.idc };
+    }
   }
 
   const dateOk = await setResiliationDate(page, dateStr);
@@ -641,22 +711,28 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
   if (!applied) {
     return { cancelled: false, reason: 'appliquer_quitter_missing', idc: contract.idc };
   }
-  await randomDelay(800, 1400);
+  await randomDelay(1200, 2000);
 
-  // Modale : email + Confirmer
-  const confirmVisible = await page
-    .getByText(/Etes-vous certain de vouloir résilier|Êtes-vous certain de vouloir résilier/i)
-    .first()
-    .isVisible()
-    .catch(() => false);
-  if (!confirmVisible) {
-    // Parfois la modale met un instant
-    await page.waitForTimeout(800);
-  }
-
-  const confirmed = await confirmResiliationModal(page);
+  // Modale : email + Confirmer (plusieurs libellés Deciplus)
+  let confirmed = await confirmResiliationModal(page);
   if (!confirmed) {
-    logWarn('Modale Confirmer résiliation introuvable', { idc: contract.idc });
+    // Parfois 1er clic Appliquer n’a rien fait — retry
+    await clickAppliquerEtQuitter(page).catch(() => {});
+    await page.waitForTimeout(1500);
+    confirmed = await confirmResiliationModal(page);
+  }
+  if (!confirmed) {
+    // Bouton Confirmer parfois hors modale texte attendue
+    const anyConfirm = await page
+      .locator('button:has-text("Confirmer"), .el-button--primary:has-text("Confirmer"), .swal2-confirm')
+      .first()
+      .click({ force: true, noWaitAfter: true })
+      .then(() => true)
+      .catch(() => false);
+    confirmed = anyConfirm;
+  }
+  if (!confirmed) {
+    logWarn('Modale Confirmer résiliation introuvable', { idc: contract.idc, url: page.url() });
     return { cancelled: false, reason: 'confirm_missing', idc: contract.idc };
   }
   await randomDelay(500, 900);
