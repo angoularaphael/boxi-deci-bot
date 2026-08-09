@@ -208,12 +208,16 @@ async function clickActionTile(page, names) {
   }, patterns.map((p) => (p instanceof RegExp ? p.source.replace(/^\^|\$$/g, '') : String(p))));
 }
 
-async function waitResilierForm(page, timeoutMs = 15000) {
+async function waitResilierForm(page, timeoutMs = 22000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const title = page.getByText(/Résilier le contrat/i).first();
+    const title = page.getByText(/Résilier le contrat|Date de résiliation effective/i).first();
     if ((await title.count()) > 0 && (await title.isVisible().catch(() => false))) {
       return true;
+    }
+    // Parfois la tuile a été cliquée sans ouvrir le panneau — re-clic Résilier
+    if ((Date.now() - start) > 4000 && (Date.now() - start) < 5000) {
+      await clickActionTile(page, [/^Résilier$/i]).catch(() => {});
     }
     await page.waitForTimeout(300);
   }
@@ -472,33 +476,56 @@ async function ensureResiliationEmailChecked(page) {
 }
 
 async function confirmResiliationModal(page) {
+  // Attendre l’apparition de la modale (parfois lente après « Appliquer »)
+  const deadline = Date.now() + 12000;
+  while (Date.now() < deadline) {
+    const visible = await page
+      .getByText(/Etes-vous certain|Êtes-vous certain|confirmer la résiliation|Envoyer un mail de résiliation/i)
+      .first()
+      .isVisible()
+      .catch(() => false);
+    if (visible) break;
+    await page.waitForTimeout(350);
+  }
+
   await ensureResiliationEmailChecked(page);
   await randomDelay(200, 400);
 
-  for (const ctx of getScopes(page)) {
-    try {
-      const btn = ctx.getByRole('button', { name: /^Confirmer$/i }).first();
+  const clickConfirm = async (ctx) => {
+    const candidates = [
+      ctx.getByRole('button', { name: /^Confirmer$/i }).first(),
+      ctx.locator('button:has-text("Confirmer")').first(),
+      ctx.locator('.el-button--primary:has-text("Confirmer")').first(),
+      ctx.locator('button.el-button--primary').filter({ hasText: /Confirmer/i }).first(),
+    ];
+    for (const btn of candidates) {
       if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
-        await btn.click({ force: true });
+        await btn.click({ force: true, noWaitAfter: true }).catch(() => btn.click({ force: true }));
         return true;
       }
-      const byText = ctx.locator('button:has-text("Confirmer")').first();
-      if ((await byText.count()) > 0 && (await byText.isVisible().catch(() => false))) {
-        await byText.click({ force: true });
-        return true;
-      }
-    } catch {
-      /* ignore */
     }
+    return false;
+  };
+
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    for (const ctx of getScopes(page)) {
+      try {
+        if (await clickConfirm(ctx)) return true;
+      } catch {
+        /* ignore */
+      }
+    }
+    const ok = await page.evaluate(() => {
+      const buttons = [...document.querySelectorAll('button, .el-button, a')];
+      const b = buttons.find((el) => /^Confirmer$/i.test(String(el.textContent || '').trim()));
+      if (!b) return false;
+      b.click();
+      return true;
+    });
+    if (ok) return true;
+    await page.waitForTimeout(400);
   }
-  return page.evaluate(() => {
-    const b = [...document.querySelectorAll('button')].find((el) =>
-      /^Confirmer$/i.test(String(el.textContent || '').trim())
-    );
-    if (!b) return false;
-    b.click();
-    return true;
-  });
+  return false;
 }
 
 /**
