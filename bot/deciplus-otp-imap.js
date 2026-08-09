@@ -17,11 +17,13 @@ function imapConfig() {
   )
     .trim()
     .replace(/^["']|["']$/g, '');
+  // Mot de passe d’app Gmail : espaces d’affichage ignorés
   const pass = String(
     process.env.DECIPLUS_IMAP_PASS || process.env.IMAP_PASS || ''
   )
     .trim()
-    .replace(/^["']|["']$/g, '');
+    .replace(/^["']|["']$/g, '')
+    .replace(/\s+/g, '');
   return {
     host: process.env.DECIPLUS_IMAP_HOST || process.env.IMAP_HOST || 'imap.gmail.com',
     port: Number(process.env.DECIPLUS_IMAP_PORT || process.env.IMAP_PORT || 993),
@@ -86,11 +88,14 @@ async function fetchDeciplusEmailCode(opts = {}) {
   let ImapFlow;
   let simpleParser;
   try {
+    const { ensureOtpDeps } = require('../lib/ensure-deps');
+    ensureOtpDeps();
     ImapFlow = require('imapflow').ImapFlow;
     simpleParser = require('mailparser').simpleParser;
-  } catch {
+  } catch (err) {
     logWarn(
-      'imapflow/mailparser absents — npm install imapflow mailparser (lecture auto code Deciplus)'
+      'imapflow/mailparser absents — npm install imapflow mailparser (lecture auto code Deciplus)',
+      { error: err.message }
     );
     return null;
   }

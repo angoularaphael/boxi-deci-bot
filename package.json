@@ -6,13 +6,14 @@
   "main": "start.js",
   "scripts": {
     "start": "node start.js",
+    "bootstrap": "node bootstrap.js",
     "bot:run": "node bot/index.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "imapflow": "^1.0.169",
-    "mailparser": "^3.7.2",
+    "imapflow": "^1.6.6",
+    "mailparser": "^3.9.15",
     "playwright": "^1.51.1"
   }
 }

@@ -27,10 +27,10 @@ Membre + IBAN + abonnement + badge (auto)
 |-----------|--------|
 | **Repo GitHub** | `https://github.com/angoularaphael/boxi-deci-bot` |
 | **Branche** | `main` |
-| **Commande de démarrage** | `node start.js` |
+| **Commande de démarrage** | `node start.js` (repo à la racine) ou `node bootstrap.js` (clone via `BOT_REPO_URL`) |
 | **Node.js** | 18 ou 20 |
 
-`start.js` fait : `npm install` → `playwright install chromium` → lance le bot.
+`start.js` / `bot/index.js` forcent l’install de `imapflow` + `mailparser` (code email Deciplus).
 
 ---
 
