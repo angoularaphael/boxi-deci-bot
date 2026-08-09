@@ -292,7 +292,22 @@ async function submitMemberSearch(page) {
   }
 }
 
+async function pageShowsNoMemberResults(page) {
+  const contexts = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
+  for (const ctx of contexts) {
+    const text = ((await ctx.locator('body').innerText().catch(() => '')) || '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+    if (/aucun r[eé]sultat/.test(text)) return true;
+  }
+  return false;
+}
+
 async function readSearchHit(page) {
+  // « aucun résultat » prime sur les vieux liens idj encore présents dans l’UI
+  if (await pageShowsNoMemberResults(page)) {
+    return { found: false, empty: true };
+  }
   const fromUrl = await extractMemberIdFromAnyContext(page);
   if (fromUrl) {
     logInfo('Membre Deciplus trouvé', { member_id: fromUrl });
@@ -304,6 +319,28 @@ async function readSearchHit(page) {
     return { found: true, member_id: fromLink };
   }
   return { found: false };
+}
+
+/** Vérifie que la fiche ouverte correspond bien à l’email / téléphone demandés. */
+async function searchHitMatchesCustomer(page, customer = {}) {
+  const form = await readMemberIdentityFields(page).catch(() => null);
+  if (!form?.fromMemberForm) return false;
+  const wantEmail = String(customer.email || '')
+    .trim()
+    .toLowerCase();
+  const formEmail = String(form.email || '')
+    .trim()
+    .toLowerCase();
+  if (wantEmail && formEmail) {
+    return wantEmail === formEmail;
+  }
+  const wantPhone = phoneForDeciplus(customer.phone);
+  const formPhone = phoneForDeciplus(form.phone);
+  if (wantPhone && formPhone) {
+    return wantPhone === formPhone;
+  }
+  // Pas assez d’infos pour confirmer — refuse le faux positif
+  return false;
 }
 
 async function searchMember(page, query) {
@@ -598,46 +635,29 @@ async function extractMemberIdFromForm(page) {
 
 async function clickFirstMemberResult(page) {
   const contexts = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
-  const linkSel =
-    'a[href*="idj="], a[href*="idj%3D"], a[href*="check.php"], a[href*="joueurs.php"], a[href*="select.php"][href*="idj"]';
+  // Uniquement dans les zones résultats (évite les liens idj du menu / historique)
+  const scoped =
+    'table a[href*="idj="], table a[href*="idj%3D"], ' +
+    '#liste a[href*="idj="], .liste a[href*="idj="], ' +
+    'tr a[href*="joueurs.php"], tr a[href*="check.php"]';
 
   for (const ctx of contexts) {
     let links;
     try {
-      links = ctx.locator(linkSel);
+      links = ctx.locator(scoped);
     } catch {
       continue;
     }
     const count = await links.count().catch(() => 0);
-    for (let i = 0; i < count; i += 1) {
+    for (let i = 0; i < Math.min(count, 8); i += 1) {
       const href = (await links.nth(i).getAttribute('href').catch(() => '')) || '';
       const id = extractMemberIdFromUrl(href);
-      if (!id) continue;
+      if (!id || id === 'new') continue;
       await links.nth(i).click().catch(() => {});
       await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
       await randomDelay(150, 350);
       return (await extractMemberIdFromAnyContext(page)) || id;
     }
-  }
-
-  // Contenu HTML (lien encodé / onclick) dans la page ou les iframes
-  for (const ctx of contexts) {
-    const html = await ctx.content().catch(() => '');
-    const m =
-      html.match(/[?&]idj=(\d+)/i) ||
-      html.match(/idj%3D(\d+)/i) ||
-      html.match(/idjnew[=%]+(\d+)/i);
-    if (!m || m[1] === 'new') continue;
-    const id = m[1];
-    const origin = new URL(page.url()).origin;
-    await page
-      .goto(new URL(`check.php?idj=${id}`, origin).href, {
-        waitUntil: 'domcontentloaded',
-        timeout: navTimeout(),
-      })
-      .catch(() => {});
-    await randomDelay(150, 350);
-    return (await extractMemberIdFromAnyContext(page)) || id;
   }
   return null;
 }
@@ -1133,14 +1153,32 @@ async function findOrCreateMember(page, order, gymConfig) {
 
   await resetMemberSearchContext(page);
 
+  async function acceptHit(hit, action) {
+    if (!hit?.found || !hit.member_id) return null;
+    await openMemberEditForm(page, hit.member_id).catch(() => false);
+    const ok = await searchHitMatchesCustomer(page, customer);
+    if (!ok) {
+      logWarn('Résultat recherche Deciplus ignoré (identité non concordante)', {
+        member_id: hit.member_id,
+        action,
+        email: customer.email || null,
+      });
+      await resetMemberSearchContext(page).catch(() => {});
+      return null;
+    }
+    return { member_id: hit.member_id, action };
+  }
+
   if (customer.email) {
     const byEmail = await searchMember(page, customer.email);
-    if (byEmail.found) return { member_id: byEmail.member_id, action: 'found_email' };
+    const accepted = await acceptHit(byEmail, 'found_email');
+    if (accepted) return accepted;
   }
 
   if (customer.phone) {
     const byPhone = await searchMember(page, customer.phone);
-    if (byPhone.found) return { member_id: byPhone.member_id, action: 'found_phone' };
+    const accepted = await acceptHit(byPhone, 'found_phone');
+    if (accepted) return accepted;
   }
 
   await openNewMemberForm(page, customer);
@@ -1151,16 +1189,12 @@ async function findOrCreateMember(page, order, gymConfig) {
   if (duplicateMsg) {
     logWarn('Doublon à la création — recherche membre existant', { order_id: order.order_id });
     if (customer.email) {
-      const retryEmail = await searchMember(page, customer.email);
-      if (retryEmail.found) {
-        return { member_id: retryEmail.member_id, action: 'found_after_duplicate' };
-      }
+      const accepted = await acceptHit(await searchMember(page, customer.email), 'found_after_duplicate');
+      if (accepted) return accepted;
     }
     if (customer.phone) {
-      const retryPhone = await searchMember(page, customer.phone);
-      if (retryPhone.found) {
-        return { member_id: retryPhone.member_id, action: 'found_after_duplicate' };
-      }
+      const accepted = await acceptHit(await searchMember(page, customer.phone), 'found_after_duplicate');
+      if (accepted) return accepted;
     }
     return { duplicate: true, message: duplicateMsg };
   }

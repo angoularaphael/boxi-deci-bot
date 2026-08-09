@@ -58,7 +58,12 @@ const {
 } = require('./session-keepalive');
 
 function isTestMemberEmail(email) {
-  return /@boxplus-test\.local$/i.test(String(email || ''));
+  const e = String(email || '').toLowerCase();
+  return (
+    /@boxplus-test\.local$/i.test(e) ||
+    /^test\.essai\./i.test(e) ||
+    /@example\.com$/i.test(e)
+  );
 }
 
 /** Email admin direct (BotHosting) — ne dépend pas de Vercel. */
