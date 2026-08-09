@@ -125,7 +125,10 @@ async function fetchDeciplusEmailCode(opts = {}) {
       logger: false,
       tls: { rejectUnauthorized: false },
     });
+    // Évite un crash process si Gmail coupe la socket après logout / return
+    client.on('error', () => {});
 
+    let foundCode = null;
     try {
       await client.connect();
       const lock = await client.getMailboxLock('INBOX');
@@ -169,24 +172,32 @@ async function fetchDeciplusEmailCode(opts = {}) {
               age_s: ageSec,
               attempt,
             });
-            return code;
+            foundCode = code;
+            break;
           }
         }
       } finally {
         lock.release();
       }
-      await client.logout().catch(() => {});
     } catch (err) {
       logWarn('IMAP code Deciplus — tentative échouée', {
         attempt,
         error: err.message,
       });
+    } finally {
       try {
         await client.logout();
       } catch {
         /* ignore */
       }
+      try {
+        client.close();
+      } catch {
+        /* ignore */
+      }
     }
+
+    if (foundCode) return foundCode;
 
     await new Promise((r) => setTimeout(r, pollMs));
   }
