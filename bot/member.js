@@ -1,6 +1,6 @@
 const { randomDelay, loadJson } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
-const { gotoDeciplus, getAccessToken } = require('./auth');
+const { gotoDeciplus, getAccessToken, isSessionExpiredUrl } = require('./auth');
 const { dismissJqueryUiOverlay } = require('./ui');
 const {
   phoneForDeciplus,
@@ -188,6 +188,21 @@ async function getMemberSearchContext(page, { waitMs = 20000 } = {}) {
   return page;
 }
 
+function assertMemberSessionAlive(page, detail = '') {
+  if (isSessionExpiredUrl(page.url())) {
+    throw new Error(`Session Deciplus expirée (login.php) — ${detail || page.url()}`);
+  }
+  for (const frame of page.frames()) {
+    try {
+      if (isSessionExpiredUrl(frame.url())) {
+        throw new Error(`Session Deciplus expirée (login.php iframe) — ${detail || frame.url()}`);
+      }
+    } catch (err) {
+      if (/Session Deciplus expirée/i.test(err.message)) throw err;
+    }
+  }
+}
+
 async function navigateToMembers(page) {
   const searchCtx = await getMemberSearchContext(page, { waitMs: 1200 });
   const already =
@@ -201,6 +216,7 @@ async function navigateToMembers(page) {
     if ((await icon.count()) > 0) await icon.click();
     await gotoDeciplus(page, 'select.php').catch(() => {});
   });
+  assertMemberSessionAlive(page, 'select.php');
   // nextgen wrappe souvent select.php
   if (!/select\.php/i.test(page.url()) && !/legacy/i.test(page.url())) {
     const origin = new URL(page.url()).origin;
@@ -211,10 +227,12 @@ async function navigateToMembers(page) {
       })
       .catch(() => {});
   }
+  assertMemberSessionAlive(page, 'select.php legacy');
   await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
   await randomDelay(80, 180);
   await dismissJqueryUiOverlay(page);
   await getMemberSearchContext(page, { waitMs: 8000 });
+  assertMemberSessionAlive(page, 'recherche membres');
 }
 
 async function resetMemberSearchContext(page) {
@@ -687,9 +705,19 @@ async function openNewMemberFormViaSelect(page, customer) {
     await fillFirst(searchCtx, sel.quick_search_selectors?.email || '#i_email', customer.email);
   }
 
+  assertMemberSessionAlive(page, 'avant #buttonNew');
   const newBtn = searchCtx.locator(sel.quick_search_selectors?.new_button || '#buttonNew').first();
   if ((await newBtn.count()) === 0) {
-    logWarn('Bouton Nouveau membre (#buttonNew) introuvable dans le contexte recherche');
+    logWarn('Bouton Nouveau membre (#buttonNew) introuvable dans le contexte recherche', {
+      url: page.url(),
+      search_url: (() => {
+        try {
+          return searchCtx.url?.() || null;
+        } catch {
+          return null;
+        }
+      })(),
+    });
     return null;
   }
 
@@ -745,6 +773,9 @@ async function openNewMemberFormViaUrl(page, customer) {
       })
       .catch((err) => logWarn('Navigation création membre', { rel, error: err.message }));
     await randomDelay();
+    if (isSessionExpiredUrl(page.url())) {
+      throw new Error(`Session Deciplus expirée (login.php) — création membre via ${rel}`);
+    }
     await dismissJqueryUiOverlay(page);
     const ctx = await getMemberFormContext(page, { waitMs: 20000 });
     if (await isDeciplusMemberForm(ctx)) return ctx;
@@ -781,12 +812,16 @@ async function openNewMemberForm(page, customer) {
     ctx = await openNewMemberFormViaUrl(page, customer);
     if (ctx) return ctx;
   } catch (err) {
+    if (/Session Deciplus expirée/i.test(err.message)) throw err;
     logWarn('URL joueurs.php en échec', { error: err.message });
   }
 
   ctx = await openNewMemberFormViaSelect(page, customer);
   if (ctx) return ctx;
 
+  if (isSessionExpiredUrl(page.url())) {
+    throw new Error('Session Deciplus expirée (login.php) — Impossible d\'ouvrir joueurs.php');
+  }
   throw new Error('Impossible d\'ouvrir joueurs.php pour création membre');
 }
 

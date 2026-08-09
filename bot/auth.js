@@ -112,6 +112,56 @@ async function clearDeadAuth(page) {
     .catch(() => {});
 }
 
+/** Invalide cookies + localStorage (JWT API peut vivre alors que la session PHP legacy est morte). */
+async function wipeBrowserAuth(page) {
+  await clearDeadAuth(page);
+  await page
+    .evaluate(() => {
+      try {
+        localStorage.clear();
+        sessionStorage.clear();
+      } catch {
+        /* ignore */
+      }
+    })
+    .catch(() => {});
+  await page.context().clearCookies().catch(() => {});
+}
+
+/**
+ * Les pages legacy (select.php / joueurs.php) dépendent des cookies PHP,
+ * pas seulement du token API nextgen.
+ */
+async function isLegacySessionAlive(page) {
+  try {
+    const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
+    const origin = new URL(page.url().startsWith('http') ? page.url() : base).origin;
+    await page.goto(`${origin}/nextgen/legacy?path=${encodeURIComponent('/select.php')}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: Math.min(Number(process.env.DECIPLUS_NAV_TIMEOUT || 90000), 45000),
+    });
+    await page.waitForTimeout(Number(process.env.DECIPLUS_NAV_SETTLE_MS || 600));
+    if (isSessionExpiredUrl(page.url())) return false;
+
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      if (isSessionExpiredUrl(page.url())) return false;
+      for (const frame of page.frames()) {
+        if ((await frame.locator('#i_nom, #buttonNew, #i_tel').count().catch(() => 0)) > 0) {
+          return true;
+        }
+      }
+      if ((await page.locator('#i_nom, #buttonNew, #i_tel').count().catch(() => 0)) > 0) {
+        return true;
+      }
+      await page.waitForTimeout(350);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 async function isVerificationScreen(page) {
   const url = page.url();
   if (/verif|validation|otp|2fa|mfa|authenticate/i.test(url)) return true;
@@ -337,7 +387,7 @@ async function saveSession(context, opts = {}) {
   ensureDir(SESSION_DIR);
   const loadedMtimeMs = opts.loadedMtimeMs;
   const diskMtime = getStorageMtimeMs();
-  if (loadedMtimeMs != null && diskMtime > Number(loadedMtimeMs) + 50) {
+  if (!opts.force && loadedMtimeMs != null && diskMtime > Number(loadedMtimeMs) + 50) {
     logWarn('Session disque plus récente — pas d\'écrasement (export / changement session)');
     return { skipped: true, reason: 'newer_on_disk', mtimeMs: diskMtime };
   }
@@ -533,14 +583,20 @@ async function performLogin(page, options = {}) {
   const envToken = String(process.env.DECIPLUS_AUTH_TOKEN || '').trim();
   const siteLabel =
     options.siteLabel || process.env.DECIPLUS_DEFAULT_SITE || 'Minimes';
+  const force = Boolean(options.force);
 
   if (!url || !user || !pass) {
     throw new Error('DECIPLUS_URL, DECIPLUS_USER et DECIPLUS_PASSWORD requis');
   }
 
+  if (force) {
+    logInfo('Login forcé — wipe cookies / token (session PHP legacy souvent morte)');
+    await wipeBrowserAuth(page);
+  }
+
   const hasStoredSession = fs.existsSync(STORAGE_FILE);
 
-  if (hasStoredSession && !envToken) {
+  if (!force && hasStoredSession && !envToken) {
     await gotoDeciplus(page, 'nextgen/home');
     // Parfois Deciplus renvoie directement sur choose-zone
     if (/choose-zone/i.test(page.url()) || (await isChooseZoneScreen(page))) {
@@ -549,36 +605,40 @@ async function performLogin(page, options = {}) {
     }
     const storedToken = await getAccessToken(page);
     if (storedToken && !isSessionExpiredUrl(page.url()) && (await isAccessTokenValid(page, storedToken))) {
-      logInfo('Déjà connecté via session persistée');
-      await handleChooseZone(page, siteLabel);
-      return;
-    }
-    if (storedToken) {
+      // JWT API OK ≠ cookies PHP OK (select.php / joueurs.php → login.php)
+      if (await isLegacySessionAlive(page)) {
+        logInfo('Déjà connecté via session persistée');
+        await handleChooseZone(page, siteLabel);
+        return;
+      }
+      logWarn('Token API encore valide mais session PHP legacy morte — reconnexion');
+      await wipeBrowserAuth(page);
+    } else if (storedToken) {
       logWarn('Session persistée expirée (token local encore présent) — reconnexion');
-      await clearDeadAuth(page);
+      await wipeBrowserAuth(page);
     }
   }
 
   await gotoDeciplus(page, '');
 
-  if (envToken) {
+  if (!force && envToken) {
     await injectAuthToken(page, envToken);
     await gotoDeciplus(page, 'nextgen/home');
     const t = await getAccessToken(page);
-    if (t && (await isAccessTokenValid(page, t))) {
+    if (t && (await isAccessTokenValid(page, t)) && (await isLegacySessionAlive(page))) {
       logInfo('Connecté via DECIPLUS_AUTH_TOKEN');
       await handleChooseZone(page, siteLabel);
       return;
     }
-    logWarn('DECIPLUS_AUTH_TOKEN ignoré — token invalide ou expiré');
-    await clearDeadAuth(page);
+    logWarn('DECIPLUS_AUTH_TOKEN ignoré — token invalide ou session legacy morte');
+    await wipeBrowserAuth(page);
   }
 
   if (await isVerificationScreen(page)) {
     await handleEmailVerification(page, { notBeforeMs: Date.now() - 120_000 });
   }
 
-  if (await isLoggedIn(page)) {
+  if (!force && (await isLoggedIn(page)) && (await isLegacySessionAlive(page))) {
     logInfo('Déjà connecté via session persistée');
     await handleChooseZone(page, siteLabel);
     return;
@@ -660,6 +720,8 @@ module.exports = {
   login,
   isAuthBlocked,
   clearAuthCooldown,
+  wipeBrowserAuth,
+  isLegacySessionAlive,
   isMfaAuthError,
   isSessionRecoverableError,
   getStorageMtimeMs,

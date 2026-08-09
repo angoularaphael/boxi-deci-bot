@@ -1,15 +1,18 @@
 /**
  * Maintient la session Deciplus active (token ~4h) via ping périodique.
  * Défaut : toutes les 1h30 — si morte → login + IMAP OTP + sauvegarde session.
+ * Vérifie aussi la session PHP legacy (select.php), pas seulement le JWT API.
  */
 const {
   login,
   gotoDeciplus,
   getAccessToken,
   isAccessTokenValid,
+  isLegacySessionAlive,
   isAuthBlocked,
   clearAuthCooldown,
   saveSession,
+  wipeBrowserAuth,
 } = require('./auth');
 const { runWithSession, closeBrowser } = require('./browser-pool');
 const { listPending } = require('../lib/queue');
@@ -28,24 +31,32 @@ function touchKeepAliveClock() {
 }
 
 /**
- * Vérifie le token ; si mort → login (IMAP) et renvoie le nouveau token.
+ * Vérifie token API + session PHP legacy ; si mort → login forcé.
  * @param {{ forceLogin?: boolean }} opts
  */
 async function refreshSessionIfNeeded(page, opts = {}) {
   if (!opts.forceLogin) {
     await gotoDeciplus(page, 'nextgen/home');
     const token = await getAccessToken(page);
-    if (token && (await isAccessTokenValid(page, token))) {
+    const apiOk = Boolean(token && (await isAccessTokenValid(page, token)));
+    if (apiOk && (await isLegacySessionAlive(page))) {
       return { token, renewed: false };
     }
-    logWarn('Keepalive — session morte ou token invalide — reconnexion');
+    logWarn('Keepalive — session API/legacy morte — reconnexion forcée', {
+      api_ok: apiOk,
+    });
   }
 
   clearAuthCooldown();
-  await login(page);
+  await wipeBrowserAuth(page);
+  await login(page, { force: true });
   await gotoDeciplus(page, 'nextgen/home');
   const token = await getAccessToken(page);
   if (!token || !(await isAccessTokenValid(page, token))) {
+    return { token: null, renewed: true };
+  }
+  if (!(await isLegacySessionAlive(page))) {
+    logWarn('Keepalive — login OK mais legacy select.php toujours inaccessible');
     return { token: null, renewed: true };
   }
   return { token, renewed: true };
@@ -86,6 +97,7 @@ async function maybeKeepSessionAlive() {
 
 /**
  * Refresh immédiat (erreur job liée session) — ignore le délai 1h30.
+ * Force un vrai login (wipe) même si le JWT API répond encore.
  */
 async function forceRefreshSession() {
   if (inFlight) {
@@ -103,7 +115,7 @@ async function forceRefreshSession() {
     const result = await runWithSession('session-force-refresh', async (page, context) => {
       const out = await refreshSessionIfNeeded(page, { forceLogin: true });
       if (out.token) {
-        await saveSession(context).catch(() => {});
+        await saveSession(context, { force: true }).catch(() => {});
       }
       return out;
     });
@@ -112,7 +124,7 @@ async function forceRefreshSession() {
       logInfo('Session Deciplus renouvelée (force après erreur job)');
       return true;
     }
-    logWarn('Force refresh session — toujours pas de token');
+    logWarn('Force refresh session — toujours pas de token / legacy');
     return false;
   } catch (err) {
     logWarn('Force refresh session échoué', { error: err.message });
