@@ -8,14 +8,14 @@ if (process.env.DECIPLUS_FAST == null || process.env.DECIPLUS_FAST === '') {
   process.env.DECIPLUS_FAST = '1';
 }
 
-const { login, isMfaAuthError, isSessionRecoverableError } = require('./auth');
-  const {
-    runWithSession,
-    closeBrowser,
-    sessionFileChanged,
-    syncLoadedStorageMtime,
-    hasActiveBrowser,
-  } = require('./browser-pool');
+const { login, isMfaAuthError, isSessionRecoverableError, isAuthBlocked } = require('./auth');
+const {
+  runWithSession,
+  closeBrowser,
+  sessionFileChanged,
+  syncLoadedStorageMtime,
+  hasActiveBrowser,
+} = require('./browser-pool');
 const { findOrCreateMember, resetMemberSearchContext, uploadMemberPhoto } = require('./member');
 const { recordSale } = require('./sale');
 const { setMemberIban, openMemberCheck } = require('./wallet');
@@ -41,7 +41,11 @@ const { fetchDeciplusCatalog, resolveProductConfig, resolveBadgeProductConfig } 
 const { applyBillingPlanToProductConfig } = require('../lib/billing-plan');
 const { logInfo, logError, logWarn, sendAlert } = require('../lib/logger');
 const { sleep } = require('../lib/utils');
-const { maybeKeepSessionAlive, touchKeepAliveClock } = require('./session-keepalive');
+const {
+  maybeKeepSessionAlive,
+  forceRefreshSession,
+  touchKeepAliveClock,
+} = require('./session-keepalive');
 
 function isTestMemberEmail(email) {
   return /@boxplus-test\.local$/i.test(String(email || ''));
@@ -811,8 +815,27 @@ async function processOneJob(job) {
 
     // Toute tentative compte (y compris session) — max 3 puis stop
     const attempts = priorAttempts + 1;
-    const noRetry = isMfaAuthError(err.message);
-    const exhausted = noRetry || attempts >= MAX_RETRIES;
+    const sessionErr = isSessionRecoverableError(err.message);
+    const browserGone = /browser has been closed|Target page, context or browser/i.test(err.message);
+    const mfaErr = isMfaAuthError(err.message);
+
+    // Erreur liée session → refresh immédiat (sans attendre le ping 1h30) puis retry job
+    let sessionRecovered = false;
+    if (sessionErr || browserGone) {
+      logWarn('Erreur liée session — refresh immédiat puis reprise du job', {
+        job_id: jobId,
+        error: err.message,
+        auth_cooldown: isAuthBlocked(),
+      });
+      await closeBrowser().catch(() => {});
+      // Si cooldown MFA déjà actif (IMAP KO), ne pas spammer un nouveau login
+      if (!isAuthBlocked() || !mfaErr) {
+        sessionRecovered = await forceRefreshSession().catch(() => false);
+      }
+    }
+
+    // MFA/IMAP : plus de noRetry immédiat — le cooldown évite le spam OTP ; on retente jusqu’à MAX
+    const exhausted = attempts >= MAX_RETRIES;
     const status = exhausted ? STATUS.MANUAL_REVIEW : STATUS.ERROR;
     const lastError = exhausted
       ? `Job impossible à traiter après ${attempts} tentatives — ${err.message}`
@@ -822,6 +845,7 @@ async function processOneJob(job) {
       status,
       last_error: lastError,
       attempts,
+      ...(sessionRecovered ? { session_refreshed_at: new Date().toISOString() } : {}),
     });
 
     if (status === STATUS.MANUAL_REVIEW) {
@@ -839,18 +863,16 @@ async function processOneJob(job) {
         deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
       });
       removeJob(filePath);
+    } else if (sessionRecovered) {
+      logInfo('Session renouvelée — job remis en file pour retry', {
+        job_id: jobId,
+        attempts,
+      });
     }
 
     logError('Erreur traitement job', { job_id: jobId, order_id: job.order_id, error: lastError });
 
-    const sessionErr = isSessionRecoverableError(err.message);
-    const browserGone = /browser has been closed|Target page, context or browser/i.test(err.message);
-    if (sessionErr || browserGone) {
-      logWarn('Session / navigateur — reset pour reprendre le job avec la nouvelle session');
-      await closeBrowser();
-    }
-
-    return { ok: false, error: lastError, impossible: exhausted };
+    return { ok: false, error: lastError, impossible: exhausted, session_recovered: sessionRecovered };
   }
 }
 

@@ -33,6 +33,10 @@ function blockAuthRetries(reason) {
   });
 }
 
+function clearAuthCooldown() {
+  authBlockedUntil = 0;
+}
+
 function assertAuthAllowed() {
   if (isAuthBlocked()) {
     throw new Error(getAuthBlockedMessage());
@@ -379,7 +383,7 @@ async function saveSession(context, opts = {}) {
 }
 
 function isSessionRecoverableError(message = '') {
-  return /session expir|token.*introuvable|relancer login|not logged|login\.php|Unauthorized|\b401\b|storage-state|connexion.*échou|Déconnexion|session Deciplus|déjà pas connect|auth.*expir|cookie|Execution context was destroyed|context.*destroyed|frame.*detached/i.test(
+  return /session expir|token.*introuvable|relancer login|not logged|login\.php|Unauthorized|\b401\b|storage-state|connexion.*échou|Déconnexion|session Deciplus|déjà pas connect|auth.*expir|cookie|Execution context was destroyed|context.*destroyed|frame.*detached|joueurs\.php|imapflow|mailparser|code email|DECIPLUS_IMAP|cooldown|Impossible d'ouvrir|session inactive/i.test(
     String(message || '')
   );
 }
@@ -653,6 +657,7 @@ module.exports = {
   isSessionExpiredUrl,
   login,
   isAuthBlocked,
+  clearAuthCooldown,
   isMfaAuthError,
   isSessionRecoverableError,
   getStorageMtimeMs,

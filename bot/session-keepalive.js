@@ -1,15 +1,23 @@
 /**
  * Maintient la session Deciplus active (token ~4h) via ping périodique.
+ * Défaut : toutes les 1h30 — si morte → login + IMAP OTP + sauvegarde session.
  */
-const { login, gotoDeciplus, getAccessToken, isAuthBlocked } = require('./auth');
-const { runWithSession } = require('./browser-pool');
+const {
+  login,
+  gotoDeciplus,
+  getAccessToken,
+  isAccessTokenValid,
+  isAuthBlocked,
+  clearAuthCooldown,
+  saveSession,
+} = require('./auth');
+const { runWithSession, closeBrowser } = require('./browser-pool');
 const { listPending } = require('../lib/queue');
 const { logInfo, logWarn } = require('../lib/logger');
 
-const API_BASE = 'https://api.deciplus.pro/staff/v1';
-// Token Deciplus ~4h — ping avant expiration (défaut 90 min)
+// Ping toutes les 1h30 (session Deciplus ~4h)
 const KEEPALIVE_MS = Number(process.env.BOT_SESSION_KEEPALIVE_MS || 90 * 60 * 1000);
-const KEEPALIVE_RETRY_MS = Number(process.env.BOT_SESSION_KEEPALIVE_RETRY_MS || 15 * 60 * 1000);
+const KEEPALIVE_RETRY_MS = Number(process.env.BOT_SESSION_KEEPALIVE_RETRY_MS || 10 * 60 * 1000);
 
 let lastKeepAliveSuccessAt = Date.now();
 let lastKeepAliveAttemptAt = 0;
@@ -19,35 +27,31 @@ function touchKeepAliveClock() {
   lastKeepAliveSuccessAt = Date.now();
 }
 
-async function pingDeciplusApi(page, token) {
-  const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
-  const referer = new URL('nextgen/home', base).href;
-  const response = await page.context().request.get(`${API_BASE}/product/getAvailableProducts?all=true`, {
-    headers: {
-      Accept: 'application/json, text/plain, */*',
-      'x-access-token': token,
-      'Deciplus-Client-Type': 'manager',
-      Referer: referer,
-    },
-  });
-  return response.ok();
-}
-
-async function refreshSessionIfNeeded(page) {
-  await gotoDeciplus(page, 'nextgen/home');
-  let token = await getAccessToken(page);
-  if (token && (await pingDeciplusApi(page, token))) {
-    return token;
+/**
+ * Vérifie le token ; si mort → login (IMAP) et renvoie le nouveau token.
+ * @param {{ forceLogin?: boolean }} opts
+ */
+async function refreshSessionIfNeeded(page, opts = {}) {
+  if (!opts.forceLogin) {
+    await gotoDeciplus(page, 'nextgen/home');
+    const token = await getAccessToken(page);
+    if (token && (await isAccessTokenValid(page, token))) {
+      return { token, renewed: false };
+    }
+    logWarn('Keepalive — session morte ou token invalide — reconnexion');
   }
 
+  clearAuthCooldown();
   await login(page);
   await gotoDeciplus(page, 'nextgen/home');
-  token = await getAccessToken(page);
-  if (!token) return null;
-  if (await pingDeciplusApi(page, token)) return token;
-  return null;
+  const token = await getAccessToken(page);
+  if (!token || !(await isAccessTokenValid(page, token))) {
+    return { token: null, renewed: true };
+  }
+  return { token, renewed: true };
 }
 
+/** Ping périodique (file vide). Si OK → resauvegarde session ; si KO → login. */
 async function maybeKeepSessionAlive() {
   if (inFlight) return;
   if (isAuthBlocked()) return;
@@ -62,14 +66,15 @@ async function maybeKeepSessionAlive() {
   inFlight = true;
   lastKeepAliveAttemptAt = Date.now();
   try {
-    const token = await runWithSession('keepalive', async (page) => refreshSessionIfNeeded(page));
-    if (!token) {
+    const result = await runWithSession('keepalive', async (page) => refreshSessionIfNeeded(page));
+    if (!result?.token) {
       logWarn('Keepalive — session Deciplus non rafraîchie');
       return;
     }
 
     logInfo('Session Deciplus maintenue (keepalive)', {
       interval_min: Math.round(KEEPALIVE_MS / 60000),
+      renewed: Boolean(result.renewed),
     });
     lastKeepAliveSuccessAt = Date.now();
   } catch (err) {
@@ -79,8 +84,48 @@ async function maybeKeepSessionAlive() {
   }
 }
 
+/**
+ * Refresh immédiat (erreur job liée session) — ignore le délai 1h30.
+ */
+async function forceRefreshSession() {
+  if (inFlight) {
+    const deadline = Date.now() + 120000;
+    while (inFlight && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+
+  inFlight = true;
+  lastKeepAliveAttemptAt = Date.now();
+  clearAuthCooldown();
+  try {
+    await closeBrowser();
+    const result = await runWithSession('session-force-refresh', async (page, context) => {
+      const out = await refreshSessionIfNeeded(page, { forceLogin: true });
+      if (out.token) {
+        await saveSession(context).catch(() => {});
+      }
+      return out;
+    });
+    if (result?.token) {
+      lastKeepAliveSuccessAt = Date.now();
+      logInfo('Session Deciplus renouvelée (force après erreur job)');
+      return true;
+    }
+    logWarn('Force refresh session — toujours pas de token');
+    return false;
+  } catch (err) {
+    logWarn('Force refresh session échoué', { error: err.message });
+    return false;
+  } finally {
+    inFlight = false;
+    await closeBrowser().catch(() => {});
+  }
+}
+
 module.exports = {
   maybeKeepSessionAlive,
+  forceRefreshSession,
   touchKeepAliveClock,
   KEEPALIVE_MS,
   KEEPALIVE_RETRY_MS,
