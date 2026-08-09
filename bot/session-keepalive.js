@@ -83,10 +83,17 @@ async function maybeKeepSessionAlive() {
       return;
     }
 
-    logInfo('Session Deciplus maintenue (keepalive)', {
-      interval_min: Math.round(KEEPALIVE_MS / 60000),
-      renewed: Boolean(result.renewed),
-    });
+    const renewed = Boolean(result.renewed);
+    // Message inline : BotHosting n’affiche souvent que la string, pas le meta
+    logInfo(
+      renewed
+        ? 'Session Deciplus maintenue (keepalive) — reconnexion faite (renewed)'
+        : 'Session Deciplus maintenue (keepalive) — session toujours bonne',
+      {
+        interval_min: Math.round(KEEPALIVE_MS / 60000),
+        renewed,
+      }
+    );
     lastKeepAliveSuccessAt = Date.now();
   } catch (err) {
     logWarn('Keepalive session échoué', { error: err.message });
