@@ -128,37 +128,108 @@ async function unlockRibFormForSubmit(ctx) {
     .catch(() => {});
 }
 
+function navTimeoutMs() {
+  return Number(process.env.DECIPLUS_NAV_TIMEOUT || 90000);
+}
+
+function memberCheckUrls(memberId) {
+  const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
+  const origin = new URL(base).origin;
+  const qs = `check.php?idj=${encodeURIComponent(memberId)}`;
+  return [
+    // nextgen/legacy d’abord — plus fiable après résiliation (évite hang check.php brut)
+    `${origin}/nextgen/legacy?path=${encodeURIComponent(`/${qs}`)}`,
+    `${origin}/${qs}`,
+  ];
+}
+
 async function openMemberDetail(page, memberId) {
   const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
-  await page.goto(new URL(`joueurs.php?idj=${memberId}`, base).href, {
-    waitUntil: 'domcontentloaded',
-    timeout: 30000,
-  });
-  await randomDelay();
-  await getMemberFormContext(page, { waitMs: 15000 });
+  const origin = new URL(base).origin;
+  const timeout = Math.min(navTimeoutMs(), 60000);
+  const urls = [
+    `${origin}/nextgen/legacy?path=${encodeURIComponent(`/joueurs.php?idj=${memberId}`)}`,
+    new URL(`joueurs.php?idj=${memberId}`, base).href,
+  ];
+  let lastErr = null;
+  for (const target of urls) {
+    try {
+      await page.goto(target, { waitUntil: 'domcontentloaded', timeout });
+      await randomDelay();
+      await getMemberFormContext(page, { waitMs: 15000 });
+      return;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error(`openMemberDetail failed for ${memberId}`);
 }
 
 async function openMemberCheck(page, memberId) {
   const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
-  const target = new URL(`check.php?idj=${memberId}`, base).href;
+  const urls = memberCheckUrls(memberId);
+  const timeout = Math.min(navTimeoutMs(), 60000);
   let lastErr = null;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const target = urls[attempt % urls.length];
     try {
       await page.goto(target, {
-        waitUntil: 'domcontentloaded',
-        timeout: 30000,
+        waitUntil: attempt === 0 ? 'domcontentloaded' : 'commit',
+        timeout,
       });
+      await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
       await randomDelay();
+      // Fiche membre : bouton Achat Abonnement / iframe nextgen
+      const readyDeadline = Date.now() + 12000;
+      while (Date.now() < readyDeadline) {
+        if (/login\.php/i.test(page.url())) {
+          throw new Error(`Session Deciplus expirée (login.php) — check.php idj=${memberId}`);
+        }
+        for (const ctx of [page, ...page.frames()]) {
+          try {
+            if (
+              (await ctx
+                .locator(
+                  'input.fichemembre_button[value*="Achat"], input[value*="Achat Abonnement"], text=/Achat Abonnement/i'
+                )
+                .count()) > 0
+            ) {
+              return;
+            }
+          } catch {
+            /* frame détachée */
+          }
+        }
+        if (/check\.php|idj=/i.test(page.url())) {
+          // Page chargée même si boutons lents — OK pour continuer
+          return;
+        }
+        await page.waitForTimeout(400);
+      }
       return;
     } catch (err) {
       lastErr = err;
-      // Après résiliation/mail, Deciplus abort parfois la navigation — retry
-      if (!/ERR_ABORTED|interrupted|destroyed/i.test(String(err.message || ''))) throw err;
-      await page.waitForTimeout(600 * (attempt + 1));
-      await page.goto(new URL('nextgen/home', base).href, {
-        waitUntil: 'domcontentloaded',
-        timeout: 20000,
-      }).catch(() => {});
+      const msg = String(err.message || '');
+      // Après résiliation, Deciplus timeout / abort souvent — retry avec autre URL
+      const retryable =
+        /ERR_ABORTED|interrupted|destroyed|Timeout|timeout|exceeded|Session Deciplus expirée/i.test(
+          msg
+        );
+      logWarn('openMemberCheck — retry', {
+        member_id: memberId,
+        attempt: attempt + 1,
+        url: target,
+        error: msg.slice(0, 160),
+      });
+      if (!retryable && attempt >= 1) break;
+      await page.waitForTimeout(700 * (attempt + 1));
+      await page
+        .goto(new URL('nextgen/home', base).href, {
+          waitUntil: 'domcontentloaded',
+          timeout: 25000,
+        })
+        .catch(() => {});
     }
   }
   throw lastErr || new Error(`openMemberCheck failed for ${memberId}`);

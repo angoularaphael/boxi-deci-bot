@@ -387,10 +387,15 @@ async function processSaleJob(page, order, jobMeta = {}) {
     }
   }
 
-  let memberId = checkpoint.deciplus_member_id || null;
+  // Changement d’abo / reprise : l’id membre est déjà connu — ne pas re-chercher
+  let memberId =
+    checkpoint.deciplus_member_id ||
+    order.deciplus_member_id ||
+    order.customer?.deciplus_member_id ||
+    null;
   let memberResult = {
     member_id: memberId,
-    action: memberId ? 'checkpoint_resume' : null,
+    action: memberId ? (checkpoint.deciplus_member_id ? 'checkpoint_resume' : 'order_member_id') : null,
   };
 
   if (!memberId) {
