@@ -483,6 +483,7 @@ async function handleChooseZone(page, siteLabel) {
   }
 
   logInfo('Écran choix de site Deciplus détecté', { site: label });
+  await dismissDeciplusModals(page).catch(() => {});
   const selected = await selectSiteInPicker(page, label);
   if (!selected) {
     logWarn('Sélection site Deciplus échouée sur l’écran zone', { site: label, url: page.url() });
