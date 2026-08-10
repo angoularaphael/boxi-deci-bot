@@ -2305,29 +2305,54 @@ async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
   return { action: 'carte_badge_created', sale_type: 'carte' };
 }
 
-async function annotateMember(page, _order, _productConfig) {
-  // Nettoyage des anciennes notes techniques (Source: storefront | Produit… ) — plus jamais écrites
+async function annotateMember(page, order, productConfig) {
+  const { buildFourXInfoComptaNote } = require('../lib/info-compta-note');
   try {
     const { getMemberFormContext } = require('./member');
-    const ctx = await getMemberFormContext(page, { waitMs: 2500 });
-    const ta = ctx.locator('textarea[name="info_compta"]').first();
-    if ((await ta.count()) === 0) return;
-    const val = String((await ta.inputValue().catch(() => '')) || '');
-    if (!/Source:\s*|Produit:\s*|UTM\s|Commande:\s*|Montant PrestaShop|Offre:\s*/i.test(val)) {
+    // Ouvrir la fiche détaillée si on est sur check.php
+    const ficheLink = page.locator('a').filter({ hasText: /Fiche d[eé]taill/i }).first();
+    if ((await ficheLink.count()) > 0 && (await ficheLink.isVisible().catch(() => false))) {
+      await ficheLink.click().catch(() => {});
+      await page.waitForTimeout(800);
+    }
+
+    const ctx = await getMemberFormContext(page, { waitMs: 4000 });
+    const ta = ctx
+      .locator('textarea[name="info_compta"], input[name="info_compta"], textarea#info_compta')
+      .first();
+    if ((await ta.count()) === 0) {
+      logWarn('Annotation — champ info_compta introuvable');
       return;
     }
-    await ta.fill('');
+
+    const current = String((await ta.inputValue().catch(() => '')) || '');
+    const fourXNote = buildFourXInfoComptaNote(order, productConfig);
+
+    if (fourXNote) {
+      await ta.fill(fourXNote);
+      logInfo('Info Compte/Paiement — note 4× sans frais écrite', {
+        order_id: order?.order_id,
+        chars: fourXNote.length,
+      });
+    } else if (/Source:\s*|Produit:\s*|UTM\s|Commande:\s*|Montant PrestaShop|4× sans frais|4x sans frais/i.test(current)) {
+      // Comptant / prélèvement : pas de note 4× — nettoyer anciennes notes techniques
+      await ta.fill('');
+      logInfo('Note info_compta nettoyée (pas de 4×)');
+    } else {
+      return;
+    }
+
     const update = ctx
       .locator(
-        'input[type="submit"][value*="Mettre"], button:has-text("Mettre à jour"), input[name="update"]'
+        'input[type="submit"][value*="Mettre"], button:has-text("Mettre à jour"), input[name="update"], input[type="submit"][value*="Valider"]'
       )
       .first();
     if ((await update.count()) > 0) {
       await update.click().catch(() => {});
+      await page.waitForTimeout(600);
     }
-    logInfo('Note technique info_compta nettoyée (Source/Produit/UTM)');
   } catch (err) {
-    logWarn('Nettoyage info_compta ignoré', { error: err.message });
+    logWarn('Annotation info_compta ignorée', { error: err.message });
   }
 }
 
