@@ -4,6 +4,7 @@ const { ROOT, ensureDir, randomDelay } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
 const { launchChromiumWithRetry } = require('./playwright-launch');
 const { isChooseZoneScreen, selectSiteInPicker, clickSellOnSite } = require('./deciplus-zone');
+const { dismissDeciplusModals } = require('./ui');
 
 const SESSION_DIR = process.env.BOT_SESSION_DIR || path.join(ROOT, 'data', 'session');
 const STORAGE_FILE = path.join(SESSION_DIR, 'storage-state.json');
