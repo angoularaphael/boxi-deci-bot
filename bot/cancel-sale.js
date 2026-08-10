@@ -845,12 +845,28 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
 async function cancelSale(page, memberId, options = {}) {
   if (!memberId) throw new Error('member_id requis pour résilier');
   const cancelDate = options.cancelDate || options.cancel_date || null;
+  const cancelReason = String(options.cancelReason || options.cancel_reason || '').toLowerCase();
   const outcome = await cancelAllMemberSales(page, memberId, {
     maxSales: 15,
     cancelDate,
   });
   if (outcome.cancelled_count === 0) {
-    throw new Error(`Résiliation impossible — ${outcome.details[0]?.reason || 'inconnu'}`);
+    const reason = outcome.details[0]?.reason || 'inconnu';
+    // Changement d’abo après résil déjà faite : pas de contrat à couper → continuer la vente
+    if (cancelReason === 'change_to_comptant' && reason === 'no_active_sale') {
+      logInfo('Changement abo — aucun contrat actif, skip résiliation', {
+        member_id: memberId,
+        reason,
+      });
+      return {
+        action: 'sale_cancelled',
+        sale_type: 'cancel',
+        cancelled_count: 0,
+        skipped: true,
+        details: outcome.details,
+      };
+    }
+    throw new Error(`Résiliation impossible — ${reason}`);
   }
   logInfo('Résiliation Deciplus terminée', {
     member_id: memberId,
