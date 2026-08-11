@@ -672,14 +672,7 @@ async function processJob(page, job) {
     }
   }
 
-  if (order.action === 'cancel') {
-    return processCancelJob(page, order);
-  }
-
-  if (order.action === 'verify_identity') {
-    return processVerifyIdentityJob(page, order);
-  }
-
+  // Pas de cancel / verify sur le bot inscriptions
   return processSaleJob(page, order, {
     file: job.file,
     checkpoint: job.checkpoint || {},
@@ -802,6 +795,21 @@ async function processOneJob(job) {
   if (validationErrors.length) {
     rejectJob(job, filePath, validationErrors.join(', '));
     return { ok: false, rejected: true, error: validationErrors.join(', ') };
+  }
+
+  // Bot inscriptions : jamais de résil / verify / changement (avant login Deciplus)
+  {
+    const action = String(order.action || 'sale').toLowerCase();
+    const isChangeSale =
+      action === 'sale' &&
+      (order.notify_change_complete ||
+        String(order.source || '').includes('change') ||
+        /change/i.test(String(order.cancel_reason || '')));
+    if (action !== 'sale' || isChangeSale) {
+      const err = `Bot ventes ignore « ${isChangeSale ? 'change' : action} » — file ops uniquement`;
+      rejectJob(job, filePath, err);
+      return { ok: false, rejected: true, error: err };
+    }
   }
 
   updateJob(filePath, { status: STATUS.PROCESSING, started_at: new Date().toISOString() });

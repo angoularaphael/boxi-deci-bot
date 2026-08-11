@@ -32,9 +32,27 @@ function createBotServer() {
     }
     try {
       const order = normalizeOrder(req.body);
+      const action = String(order.action || 'sale').toLowerCase();
+      const isChangeSale =
+        action === 'sale' &&
+        (order.notify_change_complete ||
+          String(order.source || '').includes('change') ||
+          /change/i.test(String(order.cancel_reason || '')));
+      // Bot inscriptions = ventes uniquement (pas résil / verify / changement / échéancier)
+      if (action !== 'sale' || isChangeSale) {
+        logInfo('Job ops refusé à l’ingest (bot ventes)', {
+          order_id: order.order_id,
+          action,
+        });
+        return res.status(422).json({
+          ok: false,
+          error:
+            `Bot inscriptions refuse « ${isChangeSale ? 'change' : action} » — envoyer vers BOXPLUS_BOT_URL_OPS`,
+        });
+      }
       const errors = validateOrder(order);
       if (errors.length) {
-        return res.status(400).json({ ok: false, error: errors.join(', ') });
+        return res.status(400).json({ ok: false, error: errors.join(', ')});
       }
       const result = enqueue(order);
       logInfo('Job reçu depuis boutique', {
