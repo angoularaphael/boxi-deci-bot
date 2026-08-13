@@ -49,6 +49,7 @@ const {
 } = require('../lib/normalize');
 const { fetchDeciplusCatalog, resolveProductConfig, resolveBadgeProductConfig } = require('./catalog');
 const { applyBillingPlanToProductConfig } = require('../lib/billing-plan');
+const { isCartePrestationConfig } = require('../lib/catalog-sale');
 const { logInfo, logError, logWarn, sendAlert } = require('../lib/logger');
 const { sleep } = require('../lib/utils');
 const {
@@ -381,8 +382,12 @@ async function processSaleJob(page, order, jobMeta = {}) {
   }
   const gymConfig = getGymConfig(order.gym);
 
+  if (isCartePrestationConfig(productConfig)) {
+    productConfig.auto_badge = false;
+  }
+
   let badgeProductConfig = null;
-  if (productConfig.auto_badge) {
+  if (productConfig.auto_badge && !isCartePrestationConfig(productConfig)) {
     try {
       badgeProductConfig = resolveBadgeProductConfig(catalog, {
         badge_timing: 'deferred',

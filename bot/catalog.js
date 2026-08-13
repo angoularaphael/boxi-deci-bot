@@ -11,7 +11,7 @@ const {
   inferSaleType,
   buildDeciplusProductSearch,
 } = require('../lib/catalog-text');
-const { isTrialOrder, buildProductConfig } = require('../lib/catalog-sale');
+const { isTrialOrder, isCarteMerchOrder, buildProductConfig, isBadgeCatalogTitle } = require('../lib/catalog-sale');
 
 const API_BASE = 'https://api.deciplus.pro/staff/v1';
 const CATALOG_CACHE_MS = Number(process.env.BOT_CATALOG_CACHE_MS || 300000);
@@ -166,11 +166,13 @@ function scoreMatch(query, product) {
 }
 
 function findProductInCatalog(catalog, order) {
+  const wantBadge = isBadgeCatalogTitle(order.product_name || order.offer || '');
   const candidates = [
-    order.product_reference,
-    order.product_name,
+    order.deciplus_product_search,
     order.deciplus_product_name,
+    order.product_name,
     order.offer,
+    order.product_reference,
   ].filter(Boolean);
 
   let best = null;
@@ -178,6 +180,7 @@ function findProductInCatalog(catalog, order) {
 
   for (const query of candidates) {
     for (const product of catalog) {
+      if (!wantBadge && isBadgeCatalogTitle(product.title)) continue;
       let score = scoreMatch(query, product);
       if (String(query).startsWith('dp-') && String(product.id) === String(query).replace(/^dp-/, '')) {
         score = Math.max(score, 100);
@@ -287,9 +290,14 @@ function resolveProductConfig(order, catalog) {
   if (isTrialOrder(order)) return buildProductConfig(order, null);
   if (order.deciplus_id) {
     const byId = catalog.find((p) => String(p.id) === String(order.deciplus_id));
-    if (byId) return buildProductConfig(order, byId);
+    if (byId && !(isCarteMerchOrder(order) && isBadgeCatalogTitle(byId.title))) {
+      return buildProductConfig(order, byId);
+    }
   }
   const matched = findProductInCatalog(catalog, order);
+  if (isCarteMerchOrder(order) && matched && isBadgeCatalogTitle(matched.title)) {
+    return buildProductConfig(order, null);
+  }
   return buildProductConfig(order, matched);
 }
 

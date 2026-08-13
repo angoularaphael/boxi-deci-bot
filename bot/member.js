@@ -411,7 +411,6 @@ function phonesMatch(a, b) {
   const na = phoneForDeciplus(a);
   const nb = phoneForDeciplus(b);
   // Si l’un des deux n’est pas un FR 10 chiffres valide → pas de match
-  // (évite qu’un 11e chiffre soit ignoré par troncature)
   return Boolean(na && nb && na === nb);
 }
 
@@ -671,7 +670,7 @@ async function extractMemberId(page) {
 }
 
 async function resolveCreatedMemberId(page, customer) {
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     const id = await extractMemberId(page);
     if (id) return id;
     // Parfois Deciplus redirige via check.php?idjnew= puis select.php
@@ -680,17 +679,20 @@ async function resolveCreatedMemberId(page, customer) {
     await page.waitForTimeout(700);
   }
 
-  if (customer?.email) {
-    const byEmail = await searchMember(page, customer.email);
-    if (byEmail.found) return byEmail.member_id;
-  }
-  if (customer?.phone) {
-    const byPhone = await searchMember(page, customer.phone);
-    if (byPhone.found) return byPhone.member_id;
-  }
-  if (customer?.last_name || customer?.first_name) {
-    const byName = await searchMemberByName(page, customer.last_name, customer.first_name);
-    if (byName.found) return byName.member_id;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (customer?.email) {
+      const byEmail = await searchMember(page, customer.email);
+      if (byEmail.found) return byEmail.member_id;
+    }
+    if (customer?.phone) {
+      const byPhone = await searchMember(page, customer.phone);
+      if (byPhone.found) return byPhone.member_id;
+    }
+    if (customer?.last_name || customer?.first_name) {
+      const byName = await searchMemberByName(page, customer.last_name, customer.first_name);
+      if (byName.found) return byName.member_id;
+    }
+    await page.waitForTimeout(1200);
   }
   return null;
 }

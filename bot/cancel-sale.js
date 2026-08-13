@@ -121,7 +121,7 @@ async function findActiveContracts(page) {
           consulter: (await consulter.count()) > 0 ? consulter : null,
           idc,
           label: label.slice(0, 160) || `prestation_${idc}`,
-          isBadge: /badge|carte/i.test(label),
+          isBadge: /\bbadge\b/i.test(label) && !/essai|coaching/i.test(label),
         });
       }
     } catch {

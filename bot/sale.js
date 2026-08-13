@@ -10,12 +10,17 @@ const { cancelSale } = require('./cancel-sale');
 const { ensureDeciplusSaleZone, isChooseZoneScreen } = require('./deciplus-zone');
 const { dismissJqueryUiOverlay } = require('./ui');
 const { buildDeciplusProductSearch, buildSearchTokens, normalizeText } = require('./catalog');
+const {
+  isBadgeProductConfig,
+  isCartePrestationConfig,
+  isDeciplusBadgeLabel,
+  resolvePrestationHint,
+  scoreCatalogTile,
+} = require('../lib/catalog-sale');
 
+/** Vrai uniquement pour le produit Badge Deciplus (~34,99 €), jamais essai/coaching. */
 function isBadgeSale(productConfig) {
-  return (
-    productConfig.sale_type === 'carte' ||
-    /badge/i.test(String(productConfig.label || productConfig.deciplus_product_name || ''))
-  );
+  return isBadgeProductConfig(productConfig);
 }
 
 function formatFrDate(date) {
@@ -65,6 +70,13 @@ async function isPaiementComptantChecked(page) {
 function buildSearchCandidates(productConfig) {
   const name = productConfig.deciplus_product_name || productConfig.label || '';
   const candidates = new Set();
+  const hint = resolvePrestationHint(productConfig);
+
+  if (hint) {
+    for (const term of hint.searches || []) candidates.add(term);
+    candidates.add(hint.search);
+    candidates.add(hint.label);
+  }
 
   if (productConfig.deciplus_product_search) {
     candidates.add(productConfig.deciplus_product_search);
@@ -96,16 +108,25 @@ function buildSearchCandidates(productConfig) {
     candidates.add(price[1].replace('.', ','));
   }
 
-  return [...candidates].filter(Boolean);
+  return [...candidates].filter((value) => {
+    if (!value) return false;
+    if (hint && isDeciplusBadgeLabel(value)) return false;
+    return true;
+  });
 }
 
 async function openProductCategory(page, productConfig) {
+  // Essai / coaching / Badge : tous dans « Cartes prépayées » (grille Achat Carte).
   const isCarte =
+    isCartePrestationConfig(productConfig) ||
+    isBadgeSale(productConfig) ||
     productConfig.sale_type === 'carte' ||
-    /badge|decipass|carte/i.test(String(productConfig.label || productConfig.deciplus_product_name || ''));
+    /badge|decipass|carte|essai|coaching/i.test(
+      String(productConfig.label || productConfig.deciplus_product_name || '')
+    );
 
   const patterns = isCarte
-    ? [/Cartes/i, /prépay/i, /Decipass/i]
+    ? [/Cartes prépay/i, /Cartes/i, /prépay/i, /Decipass/i]
     : [/^Abonnements$/i, /Abonnement/i];
 
   for (const pat of patterns) {
@@ -122,50 +143,28 @@ async function openProductCategory(page, productConfig) {
 
 async function getProductTileLocator(page) {
   const selectors = [
+    '.product-wrapper',
+    '[class*="product-wrapper"]:not([class*="title"])',
     '.product-wrapper-title',
     '.product-wrapper .product-wrapper-title',
     '[class*="product-wrapper-title"]',
-    '[class*="product-card"] [class*="title"]',
+    '[class*="product-card"]',
   ];
+  let best = null;
+  let bestCount = 0;
   for (const selector of selectors) {
     const loc = page.locator(selector);
-    if ((await loc.count()) > 0) return loc;
+    const n = await loc.count().catch(() => 0);
+    if (n > bestCount) {
+      bestCount = n;
+      best = loc;
+    }
   }
-  return page.locator('.product-wrapper-title');
+  return best || page.locator('.product-wrapper-title');
 }
 
 async function scoreProductTile(text, productConfig) {
-  const name = productConfig.deciplus_product_name || productConfig.label || '';
-  const normalized = normalizeText(text);
-  const targetName = normalizeText(name);
-  let score = 0;
-
-  if (normalized === targetName) score += 200;
-  else if (normalized.includes(targetName) || targetName.includes(normalized)) score += 120;
-
-  const amount = Number(productConfig.amount);
-  if (Number.isFinite(amount) && amount > 0) {
-    const priceVariants = [
-      String(amount),
-      String(amount).replace('.', ','),
-      amount.toFixed(2),
-      amount.toFixed(2).replace('.', ','),
-    ];
-    for (const pv of priceVariants) {
-      if (text.includes(pv)) score += 80;
-    }
-  }
-
-  if (/training camp/i.test(name) && /training camp/i.test(text)) score += 40;
-  if (/badge/i.test(name) && /badge/i.test(text)) score += 100;
-  if (/association/i.test(name) && /association/i.test(text)) score += 60;
-
-  const targetTokens = normalizeText(name).split(' ').filter((t) => t.length > 3);
-  const textTokens = new Set(normalizeText(text).split(' '));
-  const overlap = targetTokens.filter((t) => textTokens.has(t)).length;
-  score += overlap * 15;
-
-  return score;
+  return scoreCatalogTile(text, productConfig);
 }
 
 async function clickProductResult(page, productConfig) {
@@ -181,6 +180,9 @@ async function clickProductResult(page, productConfig) {
     if (!(await tile.isVisible().catch(() => false))) continue;
     const text = (await tile.innerText().catch(() => '')).trim();
     if (!text) continue;
+    if ((isCartePrestationConfig(productConfig) || !isBadgeSale(productConfig)) && isDeciplusBadgeLabel(text)) {
+      continue;
+    }
     const score = await scoreProductTile(text, productConfig);
     if (score > bestScore) {
       bestScore = score;
@@ -189,7 +191,11 @@ async function clickProductResult(page, productConfig) {
   }
 
   if (bestTile && bestScore >= 40) {
-    await bestTile.click();
+    const card = bestTile.locator(
+      'xpath=ancestor-or-self::*[contains(@class,"product-wrapper") or contains(@class,"product-card")][1]'
+    );
+    if ((await card.count()) > 0) await card.first().click();
+    else await bestTile.click();
     logInfo('Produit Deciplus sélectionné', {
       name,
       score: bestScore,
@@ -198,16 +204,24 @@ async function clickProductResult(page, productConfig) {
     return true;
   }
 
-  const exact = tiles.filter({ hasText: name }).first();
-  if ((await exact.count()) > 0 && (await exact.isVisible().catch(() => false))) {
-    await exact.click();
-    return true;
-  }
+  if (!isDeciplusBadgeLabel(name) || isBadgeSale(productConfig)) {
+    const exact = tiles.filter({ hasText: name }).first();
+    if ((await exact.count()) > 0 && (await exact.isVisible().catch(() => false))) {
+      const exactText = (await exact.innerText().catch(() => '')).trim();
+      if (!(isCartePrestationConfig(productConfig) && isDeciplusBadgeLabel(exactText))) {
+        await exact.click();
+        return true;
+      }
+    }
 
-  const partial = page.getByText(new RegExp(escapeRegExp(name.slice(0, 24)), 'i')).first();
-  if ((await partial.count()) > 0 && (await partial.isVisible().catch(() => false))) {
-    await partial.click();
-    return true;
+    const partial = page.getByText(new RegExp(escapeRegExp(name.slice(0, 24)), 'i')).first();
+    if ((await partial.count()) > 0 && (await partial.isVisible().catch(() => false))) {
+      const partialText = (await partial.innerText().catch(() => '')).trim();
+      if (!(isCartePrestationConfig(productConfig) && isDeciplusBadgeLabel(partialText))) {
+        await partial.click();
+        return true;
+      }
+    }
   }
 
   return false;
@@ -238,7 +252,7 @@ const PRODUCT_SEARCH_SELECTOR =
 async function getMemberCheckContext(page, { waitMs = 20000 } = {}) {
   const deadline = Date.now() + Math.max(0, waitMs);
   const achatSel =
-    'input.fichemembre_button[value="Achat Abonnement"], input[type="button"][value="Achat Abonnement"]';
+    'input.fichemembre_button[value="Achat Abonnement"], input[type="button"][value="Achat Abonnement"], input.fichemembre_button[value="Achat Carte"], input[type="button"][value="Achat Carte"]';
   do {
     try {
       if ((await page.locator(achatSel).count()) > 0) return page;
@@ -300,6 +314,13 @@ async function selectProductInCatalog(page, productConfig) {
   await searchInput.waitFor({ state: 'visible', timeout: 20000 });
 
   await openProductCategory(ctx, productConfig);
+  await randomDelay(600, 1000);
+
+  // Grille « Cartes prépayées » : essai / coaching / badge déjà visibles sans recherche.
+  if (await clickProductResult(ctx, productConfig)) {
+    logInfo('Produit Deciplus trouvé dans le catalogue UI', { search: '(visible)', name });
+    return true;
+  }
 
   for (const search of searchCandidates) {
     await searchInput.fill('');
@@ -1988,6 +2009,11 @@ async function typeBadgePaymentDate(page, dateStr) {
 }
 
 async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
+  if (isCartePrestationConfig(productConfig)) {
+    throw new Error(
+      'Séance d’essai / pack coaching — modale Configuration de Badge interdite (pas de droit Badge)'
+    );
+  }
   await randomDelay(400, 700);
   await ensureBadgeConfigModalForSale(page);
 
@@ -2173,6 +2199,39 @@ async function openSaleFlow(page, productConfig, gymConfig, saleKind) {
 }
 
 async function applyConfigModal(page, productConfig, memberId = null) {
+  logInfo('Vente Deciplus — configuration', {
+    sale_type: productConfig.sale_type,
+    label: productConfig.label || productConfig.deciplus_product_name,
+    search: productConfig.deciplus_product_search,
+    is_badge: isBadgeSale(productConfig),
+    paiement_comptant: productConfig.paiement_comptant,
+  });
+  if (isCartePrestationConfig(productConfig)) {
+    logInfo('Vente Deciplus — prestation carte (Achat Carte, pas Badge)', {
+      label: productConfig.label || productConfig.deciplus_product_name,
+      search: productConfig.deciplus_product_search,
+    });
+    await page.locator('[role="dialog"]').first()
+      .waitFor({ state: 'visible', timeout: 8000 })
+      .catch(() => {});
+    if (productConfig.paiement_comptant === true) {
+      await ensurePaiementComptantOn(page, { strict: false }).catch(() => {});
+    }
+    const work = await resolveDeciplusWorkPage(page);
+    let applied = await clickFirst(work, sel('sale_config_modal.appliquer'), {
+      force: true,
+    }).catch(() => false);
+    if (!applied) {
+      applied = await clickVenteFooterAction(page, /\bAppliquer\b/i, { exact: true });
+    }
+    if (applied) {
+      logInfo('Vente Deciplus — configuration appliquée');
+      await randomDelay(600, 1000);
+    } else {
+      logInfo('Vente Deciplus — pas de modale Appliquer, produit ajouté au panier vente');
+    }
+    return;
+  }
   if (isBadgeSale(productConfig)) {
     return applyBadgeConfigModal(page, productConfig, memberId);
   }
@@ -2302,7 +2361,8 @@ async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
   await applyConfigModal(page, productConfig, memberId);
   await finalizePayment(page, productConfig);
 
-  return { action: 'carte_badge_created', sale_type: 'carte' };
+  const action = isBadgeSale(productConfig) ? 'carte_badge_created' : 'carte_created';
+  return { action, sale_type: 'carte' };
 }
 
 async function annotateMember(page, order, productConfig, memberId = null) {
@@ -2368,7 +2428,14 @@ async function verifyCreatedContract(page, memberId, { badge = false, label = ''
     await openMemberCheck(page, memberId).catch(() => {});
     await randomDelay(badge ? 500 : 700, badge ? 800 : 1100);
     const contracts = await findActiveContracts(page).catch(() => []);
-    const contract = contracts.find((item) => Boolean(item.isBadge) === Boolean(badge));
+    const needle = String(label || '').toLowerCase();
+    const contract = contracts.find((item) => {
+      const itemLabel = String(item.label || '');
+      if (badge) return Boolean(item.isBadge);
+      if (/essai/i.test(needle)) return /essai/i.test(itemLabel);
+      if (/coaching/i.test(needle)) return /coaching/i.test(itemLabel);
+      return Boolean(item.isBadge) === false;
+    });
     if (contract) {
       logInfo('Contrat Deciplus vérifié après vente', {
         member_id: memberId,
@@ -2380,8 +2447,9 @@ async function verifyCreatedContract(page, memberId, { badge = false, label = ''
     }
     await page.waitForTimeout(badge ? 500 : 800);
   }
+  const expected = label || (badge ? 'Badge' : 'prestation');
   throw new Error(
-    `Vente Deciplus non confirmée : contrat ${badge ? 'badge' : 'abonnement'} absent de la fiche membre ${memberId}`
+    `Vente Deciplus non confirmée : contrat ${expected} absent de la fiche membre ${memberId}`
   );
 }
 
@@ -2410,23 +2478,71 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
   await randomDelay(1000, 1800);
 
   let result;
-  const { badgeProductConfig } = options;
+  let badgeProductConfig = options.badgeProductConfig || null;
+  if (isCartePrestationConfig(productConfig)) {
+    if (badgeProductConfig) {
+      logWarn('Prestation essai/coaching — Badge ignoré (pas de droit d’accès club)', {
+        order_id: order.order_id,
+        member_id: memberId,
+      });
+    }
+    badgeProductConfig = null;
+    productConfig.auto_badge = false;
+  }
 
   if (productConfig.sale_type === 'carte') {
+    if (isCartePrestationConfig(productConfig) && isBadgeSale(productConfig)) {
+      throw new Error('Vente essai/coaching configurée comme Badge — interdit');
+    }
+
+    let badgesBefore = 0;
+    if (isCartePrestationConfig(productConfig)) {
+      const { findActiveContracts } = require('./cancel-sale');
+      const before = await findActiveContracts(page).catch(() => []);
+      badgesBefore = before.filter((item) => item.isBadge).length;
+    }
+
     result = await buyCarteBadge(page, productConfig, gymConfig, memberId);
-    const badgeContract = await verifyCreatedContract(page, memberId, {
-      badge: true,
-      label: productConfig.name || productConfig.title || 'Badge',
-    });
-    result.sale_id = badgeContract.idc;
-    const enforce = await enforceBadgeEcheance(page, memberId, productConfig).catch((err) => ({
-      ok: false,
-      reason: err.message,
-    }));
-    result.badge_echeance_ok = enforce.ok;
-    if (!enforce.ok) {
-      result.manual_review = true;
-      result.badge_error = `Échéance badge J+${resolveBadgePrelevementDelayDays(productConfig)} non confirmée (${enforce.reason || 'inconnue'})`;
+    if (result.action === 'carte_badge_created' && isCartePrestationConfig(productConfig)) {
+      throw new Error('La vente essai/coaching a pris le flux Badge — interdit');
+    }
+    if (isBadgeSale(productConfig)) {
+      const badgeContract = await verifyCreatedContract(page, memberId, {
+        badge: true,
+        label: productConfig.name || productConfig.title || 'Badge',
+      });
+      result.sale_id = badgeContract.idc;
+      const enforce = await enforceBadgeEcheance(page, memberId, productConfig).catch((err) => ({
+        ok: false,
+        reason: err.message,
+      }));
+      result.badge_echeance_ok = enforce.ok;
+      if (!enforce.ok) {
+        result.manual_review = true;
+        result.badge_error = `Échéance badge J+${resolveBadgePrelevementDelayDays(productConfig)} non confirmée (${enforce.reason || 'inconnue'})`;
+      }
+    } else {
+      // Essai / coaching : prestation carte, pas le contrat Badge
+      const carteContract = await verifyCreatedContract(page, memberId, {
+        badge: false,
+        label:
+          productConfig.label ||
+          productConfig.deciplus_product_name ||
+          productConfig.name ||
+          order.product_name,
+      });
+      result.sale_id = carteContract.idc;
+      if (isCartePrestationConfig(productConfig)) {
+        const { findActiveContracts } = require('./cancel-sale');
+        const after = await findActiveContracts(page).catch(() => []);
+        const badgesAfter = after.filter((item) => item.isBadge).length;
+        if (badgesAfter > badgesBefore) {
+          throw new Error(
+            'Un Badge a été ajouté pour une séance d’essai ou un pack coaching — ces offres n’ont pas droit au Badge'
+          );
+        }
+        result.badge_action = null;
+      }
     }
   } else if (productConfig.sale_type === 'abonnement') {
     result = await buyAbonnement(page, productConfig, gymConfig);
@@ -2669,4 +2785,5 @@ module.exports = {
   cancelSale: cancelSaleOnMember,
   buyAbonnement,
   buyCarteBadge,
+  isBadgeSale,
 };
