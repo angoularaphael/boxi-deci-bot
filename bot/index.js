@@ -58,100 +58,6 @@ const {
   touchKeepAliveClock,
 } = require('./session-keepalive');
 
-function isTestMemberEmail(email) {
-  const e = String(email || '').toLowerCase();
-  return (
-    /@boxplus-test\.local$/i.test(e) ||
-    /^test\.essai\./i.test(e) ||
-    /@example\.com$/i.test(e)
-  );
-}
-
-/** Email admin direct (BotHosting) — ne dépend pas de Vercel. */
-async function sendNewMemberAlertDirect(payload) {
-  const apiKey = String(process.env.BREVO_API_KEY || '').trim().replace(/^["']|["']$/g, '');
-  const adminTo = (
-    process.env.ADMIN_EMAIL ||
-    process.env.SUPER_ADMIN_EMAIL ||
-    process.env.ALERT_EMAIL ||
-    ''
-  ).trim();
-  if (!adminTo || !apiKey.startsWith('xkeysib-')) return false;
-  const html = `<p><strong>Nouveau membre créé dans Deciplus</strong></p>
-    <p>Commande : ${payload.order_id || '—'}</p>
-    <p>Membre Deciplus : ${payload.member_id || '—'}</p>
-    <p>Nom : ${payload.first_name || ''} ${payload.last_name || ''}</p>
-    <p>Email : ${payload.email || '—'}</p>
-    <p>Salle : ${payload.gym || '—'}</p>
-    <p>Offre : ${payload.product_name || '—'}</p>`;
-  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
-    method: 'POST',
-    headers: { 'api-key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({
-      sender: {
-        name: process.env.BREVO_SENDER_NAME || 'Boxing Center',
-        email: process.env.BREVO_SENDER_EMAIL || 'suzinabot@gmail.com',
-      },
-      to: [{ email: adminTo }],
-      subject: `[Nouveau membre] ${payload.first_name || ''} ${payload.last_name || ''} — ${payload.order_id || ''}`.trim(),
-      htmlContent: html,
-    }),
-  });
-  return res.ok;
-}
-
-async function notifyBoutiqueNewMember(order, memberId) {
-  const email = order.customer?.email || order.email;
-  if (isTestMemberEmail(email)) {
-    logInfo('Alerte nouveau membre ignorée (email test)', { order_id: order.order_id, email });
-    return;
-  }
-
-  const payload = {
-    order_id: order.order_id,
-    member_id: memberId,
-    email,
-    first_name: order.customer?.first_name,
-    last_name: order.customer?.last_name,
-    gym: order.gym,
-    product_name: order.product_name,
-  };
-
-  // 1) Direct Brevo depuis le bot (prod BotHosting)
-  let sent = false;
-  try {
-    sent = await sendNewMemberAlertDirect(payload);
-    if (sent) logInfo('Email nouveau membre envoyé (Brevo direct)', { order_id: order.order_id });
-  } catch (err) {
-    logWarn('Email nouveau membre Brevo direct échoué', { error: err.message });
-  }
-
-  // 2) Relais boutique Vercel (si configuré)
-  const base = (process.env.BOXPLUS_STORE_URL || process.env.STORE_URL || '').replace(/\/$/, '');
-  const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
-  if (!base || !secret) {
-    if (!sent) logWarn('Alerte nouveau membre — STORE_URL/SYNC_SECRET manquants et Brevo non envoyé');
-    return;
-  }
-  try {
-    const res = await fetch(`${base}/api/internal/new-member-alert`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-sync-secret': secret,
-      },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      logWarn('Alerte nouveau membre boutique échouée', { status: res.status });
-    } else if (!sent) {
-      logInfo('Email nouveau membre relayé via boutique', { order_id: order.order_id });
-    }
-  } catch (err) {
-    logWarn('Alerte nouveau membre boutique non envoyée', { error: err.message });
-  }
-}
-
 const MAX_RETRIES = Number(process.env.BOT_MAX_RETRIES || 3);
 const POLL_MS = Number(process.env.BOT_POLL_MS || 5000);
 const CATALOG_PUSH_MS = Number(process.env.BOT_CATALOG_PUSH_MS || 6 * 60 * 60 * 1000);
@@ -292,7 +198,14 @@ async function processCancelJob(page, order) {
 
   let memberId = order.deciplus_member_id || null;
   if (!memberId && (identity.first_name || identity.last_name)) {
-    const match = await findMemberByIdentity(page, identity);
+    const { CHANGE_MATCH_FIELDS } = require('./member');
+    const cancelReason = String(order.cancel_reason || '').toLowerCase();
+    // Changement d’abo : même règle que verify_identity (nom/prénom/naissance, pas téléphone)
+    const matchFields =
+      cancelReason === 'change_to_comptant' || cancelReason.startsWith('change_')
+        ? CHANGE_MATCH_FIELDS
+        : undefined;
+    const match = await findMemberByIdentity(page, identity, { matchFields });
     if (!match.found) {
       await notifyMismatch(match.reason || 'identity_mismatch', match.mismatch_fields || []);
       return {
@@ -337,6 +250,22 @@ async function processCancelJob(page, order) {
       cancelDate: order.cancel_date || order.effective_date || null,
       cancelReason: order.cancel_reason || null,
     });
+    if (result?.refused && result.reason === 'comptant_refused') {
+      await pushCancelStatus('error', {
+        reason:
+          'Formule comptant détectée — résiliation web réservée aux prélèvements. Contactez votre manager en salle.',
+        memberId,
+      });
+      return {
+        status: STATUS.MANUAL_REVIEW,
+        action: 'cancel',
+        error:
+          'Résiliation refusée : formule comptant. Contactez le manager de votre salle en présentiel.',
+        cancel_reason: order.cancel_reason,
+        refused: true,
+        reason: 'comptant_refused',
+      };
+    }
     await pushCancelStatus('done', { cancelledCount: result?.cancelled_count ?? null, memberId });
     return {
       status: STATUS.SUCCESS,
@@ -435,7 +364,6 @@ async function processSaleJob(page, order, jobMeta = {}) {
     }
     saveCheckpoint({ step: 'member', deciplus_member_id: memberId });
     if (memberResult.action === 'created') {
-      // Info only — do not sendAlert (that logs ERROR + admin webhook noise).
       logInfo('Nouveau membre Deciplus créé — pas d’alerte admin', {
         order_id: order.order_id,
         member_id: memberId,
@@ -639,6 +567,91 @@ async function notifyMembershipChangeComplete(order, memberId) {
   }
 }
 
+/** Relance dossier payé mais non terminé — email boxe, sans Deciplus. */
+async function processInscriptionNudgeJob(order) {
+  const email = order.customer?.email || order.raw?.email || '';
+  if (!email || /@boxplus-test\.local$/i.test(email)) {
+    logInfo('Relance inscription ignorée (test / sans email)', { order_id: order.order_id });
+    return { status: STATUS.SUCCESS, action: 'inscription_nudge', skipped: true };
+  }
+  const first = order.customer?.first_name || '';
+  const resumeUrl = order.raw?.resume_url || '';
+  const subject =
+    order.raw?.email_subject ||
+    'Gong ! Ton inscription Boxing Center n’est pas encore sur le ring';
+  const html =
+    order.raw?.email_html ||
+    `<p>Salut ${first || 'champion'},</p>
+     <p>Tu as payé, mais le round n’est pas fini : dossier + signature. Tant que ce n’est pas bouclé, tu n’es pas inscrit en salle.</p>
+     <p><a href="${resumeUrl}">Finir le round</a></p>
+     <p>À tout de suite sur le ring,<br/>Boxing Center</p>`;
+
+  const apiKey = String(process.env.BREVO_API_KEY || '').trim().replace(/^["']|["']$/g, '');
+  if (apiKey.startsWith('xkeysib-')) {
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'api-key': apiKey, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        sender: {
+          name: process.env.BREVO_SENDER_NAME || 'Boxing Center',
+          email: process.env.BREVO_SENDER_EMAIL || 'suzinabot@gmail.com',
+        },
+        to: [{ email }],
+        subject,
+        htmlContent: html,
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(`Brevo relance inscription HTTP ${res.status} ${errText}`.trim());
+    }
+    logInfo('Relance inscription envoyée (Brevo)', { order_id: order.order_id, email });
+  } else {
+    logWarn('Relance inscription : BREVO_API_KEY manquante', { order_id: order.order_id });
+  }
+
+  const storeBase = (
+    order.status_callback_base ||
+    process.env.BOXPLUS_STORE_URL ||
+    process.env.STORE_URL ||
+    ''
+  ).replace(/\/$/, '');
+  const storeSecret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+  if (storeBase && storeSecret) {
+    await fetch(`${storeBase}/api/internal/inscription-nudges/${encodeURIComponent(order.order_id)}/sent`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-sync-secret': storeSecret },
+    }).catch(() => {});
+  }
+  return { status: STATUS.SUCCESS, action: 'inscription_nudge' };
+}
+
+async function maybeTriggerInscriptionNudges() {
+  const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
+  if (role === 'sales') return;
+  const storeBase = (
+    process.env.BOXPLUS_STORE_URL ||
+    process.env.STORE_URL ||
+    ''
+  ).replace(/\/$/, '');
+  const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+  if (!storeBase || !secret) return;
+  try {
+    const res = await fetch(`${storeBase}/api/cron/inscription-nudges`, {
+      method: 'GET',
+      headers: { 'x-sync-secret': secret },
+    });
+    if (!res.ok) {
+      logWarn('Poll relances inscription HTTP', { status: res.status });
+    }
+  } catch (err) {
+    logWarn('Poll relances inscription', { error: err.message });
+  }
+}
+
+let lastNudgePollAt = 0;
+const NUDGE_POLL_MS = Number(process.env.BOT_NUDGE_POLL_MS || 60 * 1000);
+
 async function processJob(page, job) {
   const order = normalizeOrder(job);
   const errors = validateOrder(order);
@@ -651,21 +664,28 @@ async function processJob(page, job) {
     return { status: STATUS.DUPLICATE, duplicate: true, action: order.action };
   }
 
-  const role = String(process.env.BOT_ROLE || 'sales').toLowerCase();
+  const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
   const action = String(order.action || 'sale').toLowerCase();
   const isChangeSale =
     action === 'sale' &&
     (order.notify_change_complete || String(order.source || '').includes('change'));
 
-  if (role === 'sales') {
-    if (action !== 'sale' || isChangeSale) {
-      throw new Error(
-        `Bot ventes refuse « ${action} » — utiliser BOXPLUS_BOT_URL_OPS (résils / changements)`
-      );
-    }
+  if (role === 'sales' && (action !== 'sale' || isChangeSale)) {
+    throw new Error(`Bot ventes refuse « ${action} » — utiliser BOXPLUS_BOT_URL_OPS`);
   }
 
-  // Pas de cancel / verify sur le bot inscriptions
+  if (order.action === 'inscription_nudge') {
+    return processInscriptionNudgeJob(order);
+  }
+
+  if (order.action === 'cancel') {
+    return processCancelJob(page, order);
+  }
+
+  if (order.action === 'verify_identity') {
+    return processVerifyIdentityJob(page, order);
+  }
+
   return processSaleJob(page, order, {
     file: job.file,
     checkpoint: job.checkpoint || {},
@@ -790,22 +810,30 @@ async function processOneJob(job) {
     return { ok: false, rejected: true, error: validationErrors.join(', ') };
   }
 
-  // Bot inscriptions : jamais de résil / verify / changement (avant login Deciplus)
-  {
-    const action = String(order.action || 'sale').toLowerCase();
-    const isChangeSale =
-      action === 'sale' &&
-      (order.notify_change_complete ||
-        String(order.source || '').includes('change') ||
-        /change/i.test(String(order.cancel_reason || '')));
-    if (action !== 'sale' || isChangeSale) {
-      const err = `Bot ventes ignore « ${isChangeSale ? 'change' : action} » — file ops uniquement`;
-      rejectJob(job, filePath, err);
-      return { ok: false, rejected: true, error: err };
+  updateJob(filePath, { status: STATUS.PROCESSING, started_at: new Date().toISOString() });
+
+  const action = String(order.action || job.action || 'sale').toLowerCase();
+  if (action === 'inscription_nudge') {
+    try {
+      const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
+      if (role === 'sales') {
+        throw new Error('Bot ventes refuse « inscription_nudge » — utiliser BOXPLUS_BOT_URL_OPS');
+      }
+      const outcome = await processInscriptionNudgeJob(order);
+      markProcessed(jobId, outcome);
+      removeJob(filePath);
+      logInfo('Relance inscription traitée', { job_id: jobId, order_id: order.order_id });
+      return { ok: true, result: outcome };
+    } catch (err) {
+      updateJob(filePath, {
+        status: STATUS.ERROR,
+        last_error: err.message,
+        attempts: priorAttempts + 1,
+      });
+      logError('Erreur relance inscription', { job_id: jobId, error: err.message });
+      return { ok: false, error: err.message };
     }
   }
-
-  updateJob(filePath, { status: STATUS.PROCESSING, started_at: new Date().toISOString() });
 
   try {
     if (!order.gym) {
@@ -962,6 +990,10 @@ async function runLoop(once = false) {
     if (pending.length === 0) {
       if (once) break;
       await maybeKeepSessionAlive();
+      if (Date.now() - lastNudgePollAt >= NUDGE_POLL_MS) {
+        lastNudgePollAt = Date.now();
+        await maybeTriggerInscriptionNudges();
+      }
       await sleep(POLL_MS);
       continue;
     }
