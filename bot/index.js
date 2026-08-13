@@ -627,6 +627,7 @@ async function processInscriptionNudgeJob(order) {
 }
 
 async function maybeTriggerInscriptionNudges() {
+  // Vercel Hobby n'autorise qu'un cron/jour : le bot ops appelle l'endpoint à la place.
   const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
   if (role === 'sales') return;
   const storeBase = (
