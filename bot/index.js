@@ -26,7 +26,7 @@ const {
   syncLoadedStorageMtime,
   hasActiveBrowser,
 } = require('./browser-pool');
-const { findOrCreateMember, resetMemberSearchContext, uploadMemberPhoto } = require('./member');
+const { findOrCreateMember, resetMemberSearchContext, uploadMemberPhoto, findMemberByIdentity } = require('./member');
 const { recordSale } = require('./sale');
 const { setMemberIban, openMemberCheck } = require('./wallet');
 const { isValidFrenchIban } = require('../lib/iban');
@@ -627,6 +627,69 @@ async function processInscriptionNudgeJob(order) {
   return { status: STATUS.SUCCESS, action: 'inscription_nudge' };
 }
 
+async function processMemberPhotoJob(page, order) {
+  let memberId = order.deciplus_member_id || order.customer?.deciplus_member_id || null;
+  if (!memberId) {
+    const match = await findMemberByIdentity(
+      page,
+      {
+        first_name: order.customer?.first_name || order.first_name,
+        last_name: order.customer?.last_name || order.last_name,
+        birthdate: order.customer?.birthdate || order.birthdate,
+        phone: order.customer?.phone || order.phone,
+        email: order.customer?.email || order.email,
+      },
+      { matchFields: ['last_name', 'first_name', 'birthdate'] }
+    );
+    if (!match.found) {
+      return {
+        status: STATUS.MANUAL_REVIEW,
+        action: 'member_photo',
+        error: match.reason || 'membre introuvable',
+        mismatch_fields: match.mismatch_fields || [],
+        deciplus_member_id: match.member_id || null,
+      };
+    }
+    memberId = match.member_id;
+  }
+
+  await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(400);
+  const photoResult = await uploadMemberPhoto(
+    page,
+    order.photo_path,
+    order.photo_base64,
+    memberId,
+    order.photo_url
+  ).catch((err) => ({ ok: false, reason: err.message }));
+
+  if (!photoResult?.ok) {
+    logWarn('Photo membre (job dédié) non uploadée', {
+      order_id: order.order_id,
+      member_id: memberId,
+      reason: photoResult?.reason,
+    });
+    return {
+      status: STATUS.MANUAL_REVIEW,
+      action: 'member_photo',
+      error: photoResult?.reason || 'upload_failed',
+      deciplus_member_id: memberId,
+    };
+  }
+
+  logInfo('Photo membre (job dédié) uploadée', {
+    order_id: order.order_id,
+    member_id: memberId,
+    via: photoResult.via,
+  });
+  return {
+    status: STATUS.SUCCESS,
+    action: 'member_photo',
+    deciplus_member_id: memberId,
+    photo_uploaded: true,
+  };
+}
+
 async function maybeTriggerInscriptionNudges() {
   // Vercel Hobby n'autorise qu'un cron/jour : le bot ops appelle l'endpoint à la place.
   const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
@@ -671,13 +734,18 @@ async function processJob(page, job) {
   const isChangeSale =
     action === 'sale' &&
     (order.notify_change_complete || String(order.source || '').includes('change'));
+  const salesAllowed = (action === 'sale' && !isChangeSale) || action === 'member_photo';
 
-  if (role === 'sales' && (action !== 'sale' || isChangeSale)) {
+  if (role === 'sales' && !salesAllowed) {
     throw new Error(`Bot ventes refuse « ${action} » — utiliser BOXPLUS_BOT_URL_OPS`);
   }
 
   if (order.action === 'inscription_nudge') {
     return processInscriptionNudgeJob(order);
+  }
+
+  if (order.action === 'member_photo') {
+    return processMemberPhotoJob(page, order);
   }
 
   if (order.action === 'cancel') {
@@ -1027,4 +1095,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { processJob, processOneJob, runLoop, processCancelJob, processSaleJob };
+module.exports = { processJob, processOneJob, runLoop, processCancelJob, processSaleJob, processMemberPhotoJob };
