@@ -375,7 +375,7 @@ async function processSaleJob(page, order, jobMeta = {}) {
   }
 
   let photoResult = null;
-  if (!checkpoint.photo_done && (order.photo_path || order.photo_base64)) {
+  if (!checkpoint.photo_done && (order.photo_path || order.photo_base64 || order.photo_url)) {
     // Attendre la fin des redirections de création membre avant l'appel API photo.
     // Ne pas rouvrir la fiche ici : cela détruisait le contexte pendant page.evaluate.
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
@@ -384,7 +384,8 @@ async function processSaleJob(page, order, jobMeta = {}) {
       page,
       order.photo_path,
       order.photo_base64,
-      memberId
+      memberId,
+      order.photo_url
     ).catch((err) => ({
       ok: false,
       reason: err.message,

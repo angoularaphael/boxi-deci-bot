@@ -1225,12 +1225,22 @@ async function findOrCreateMember(page, order, gymConfig) {
   return { member_id: memberId, action: 'created' };
 }
 
-async function resolvePhotoFile(photoPath, photoBase64) {
+async function resolvePhotoFile(photoPath, photoBase64, photoUrl) {
   const fs = require('fs');
   const path = require('path');
   const os = require('os');
 
   if (photoPath && fs.existsSync(photoPath)) return { path: photoPath, cleanup: false };
+
+  if (photoUrl && /^https?:\/\//i.test(String(photoUrl))) {
+    const res = await fetch(String(photoUrl));
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 32) return null;
+    const dest = path.join(os.tmpdir(), `bc-member-photo-${Date.now()}.jpg`);
+    fs.writeFileSync(dest, buf);
+    return { path: dest, cleanup: true };
+  }
 
   if (photoBase64) {
     const raw = String(photoBase64);
@@ -1423,9 +1433,9 @@ async function uploadMemberPhotoViaLegacyUi(page, photoPath, memberId) {
  * Priorité : API staff PUT /member/:id/photo (base64, min 200×200).
  * Repli : UI legacy photo_upload.php.
  */
-async function uploadMemberPhoto(page, photoPath, photoBase64 = null, memberId = null) {
+async function uploadMemberPhoto(page, photoPath, photoBase64 = null, memberId = null, photoUrl = null) {
   const fs = require('fs');
-  const resolved = await resolvePhotoFile(photoPath, photoBase64);
+  const resolved = await resolvePhotoFile(photoPath, photoBase64, photoUrl);
   if (!resolved?.path && !photoBase64) {
     return { ok: false, reason: 'missing_file' };
   }
