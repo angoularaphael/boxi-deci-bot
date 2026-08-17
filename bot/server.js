@@ -38,8 +38,9 @@ function createBotServer() {
         (order.notify_change_complete ||
           String(order.source || '').includes('change') ||
           /change/i.test(String(order.cancel_reason || '')));
-      // Bot inscriptions = ventes uniquement (pas résil / verify / changement / échéancier)
-      if (action !== 'sale' || isChangeSale) {
+      const salesAllowed = (action === 'sale' && !isChangeSale) || action === 'member_photo';
+      // Bot inscriptions = ventes + photo membre (pas résil / verify / changement / échéancier)
+      if (!salesAllowed) {
         logInfo('Job ops refusé à l’ingest (bot ventes)', {
           order_id: order.order_id,
           action,
