@@ -582,6 +582,22 @@ async function openRibForm(page, memberId, { forceFresh = false } = {}) {
   throw new Error(`Impossible d'ouvrir le formulaire RIB pour membre ${memberId}`);
 }
 
+async function clickReplaceMandate(ctx) {
+  return clickFirst(
+    ctx,
+    [
+      'a:has-text("Remplacer le mandat")',
+      'button:has-text("Remplacer le mandat")',
+      'input[type="submit"][value*="Remplacer le mandat"]',
+      'a:has-text("Nouveau mandat")',
+      'button:has-text("Nouveau mandat")',
+      'a:has-text("Régénérer le mandat")',
+      'a:has-text("Regénérer le mandat")',
+      'input[value*="nouveau mandat" i]',
+    ].join(', ')
+  );
+}
+
 async function fillRibForm(ctx, iban, customer, gymConfig) {
   const value = normalizeIban(iban);
   const addr = ribAddressFields(customer, gymConfig);
@@ -708,7 +724,7 @@ async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}
     );
   }
 
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
     const ribCtx = await openRibForm(page, memberId, { forceFresh: true });
     const existingMeta = await readMandateMeta(ribCtx);
     const existingIban = normalizeIban(existingMeta.iban);
@@ -719,6 +735,20 @@ async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}
       });
       await closeGreyboxIfOpen(page);
       return true;
+    }
+
+    // Ancien mandat (souvent 0 échéance / IBAN différent) : Deciplus refuse l’édition.
+    if (existingMeta.rum && existingIban !== value) {
+      const replaced = await clickReplaceMandate(ribCtx);
+      if (replaced) {
+        logInfo('Mandat SEPA existant — remplacement demandé', {
+          member_id: memberId,
+          attempt,
+        });
+        await closeGreyboxIfOpen(page);
+        await randomDelay(400, 800);
+        continue;
+      }
     }
 
     await fillRibForm(ribCtx, value, customer, gymConfig);

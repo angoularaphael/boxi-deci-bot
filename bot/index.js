@@ -406,43 +406,69 @@ async function processSaleJob(page, order, jobMeta = {}) {
   }
 
   let saleResult = { sale_id: checkpoint.deciplus_sale_id || null };
+  let ibanError = null;
 
   const needsIban =
     productConfig.requires_iban === true && productConfig.paiement_comptant !== true;
   const iban = order.payment.iban;
+  const paidFirstMonth = order.payment?.status === 'paid';
+
+  const deferIbanIfPaid = (error) => {
+    if (!paidFirstMonth) return false;
+    ibanError = error;
+    logWarn('RIB Deciplus non enregistré — vente quand même (1er mois déjà payé)', {
+      order_id: order.order_id,
+      member_id: memberId,
+      error,
+    });
+    return true;
+  };
 
   if (!checkpoint.iban_done) {
     if (needsIban && productConfig.sale_type !== 'none') {
       if (!iban) {
-        return {
-          status: STATUS.MANUAL_REVIEW,
-          error: 'IBAN requis pour cette offre',
-          deciplus_member_id: memberId,
-        };
-      }
-      if (!isValidFrenchIban(iban)) {
-        return {
-          status: STATUS.MANUAL_REVIEW,
-          error: 'IBAN français invalide',
-          deciplus_member_id: memberId,
-        };
-      }
-      if (memberId) {
-        await setMemberIban(page, memberId, iban, order.customer, gymConfig);
-        mark('iban');
-        saveCheckpoint({ step: 'iban', deciplus_member_id: memberId, iban_done: true });
+        if (!deferIbanIfPaid('IBAN requis pour cette offre')) {
+          return {
+            status: STATUS.MANUAL_REVIEW,
+            error: 'IBAN requis pour cette offre',
+            deciplus_member_id: memberId,
+          };
+        }
+      } else if (!isValidFrenchIban(iban)) {
+        if (!deferIbanIfPaid('IBAN français invalide')) {
+          return {
+            status: STATUS.MANUAL_REVIEW,
+            error: 'IBAN français invalide',
+            deciplus_member_id: memberId,
+          };
+        }
+      } else if (memberId) {
+        try {
+          await setMemberIban(page, memberId, iban, order.customer, gymConfig);
+          mark('iban');
+          saveCheckpoint({ step: 'iban', deciplus_member_id: memberId, iban_done: true });
+        } catch (err) {
+          if (!deferIbanIfPaid(err.message)) throw err;
+        }
       }
     } else if (iban && memberId) {
       if (!isValidFrenchIban(iban)) {
-        return {
-          status: STATUS.MANUAL_REVIEW,
-          error: 'IBAN français invalide',
-          deciplus_member_id: memberId,
-        };
+        if (!deferIbanIfPaid('IBAN français invalide')) {
+          return {
+            status: STATUS.MANUAL_REVIEW,
+            error: 'IBAN français invalide',
+            deciplus_member_id: memberId,
+          };
+        }
+      } else {
+        try {
+          await setMemberIban(page, memberId, iban, order.customer, gymConfig);
+          mark('iban');
+          saveCheckpoint({ step: 'iban', deciplus_member_id: memberId, iban_done: true });
+        } catch (err) {
+          if (!deferIbanIfPaid(err.message)) throw err;
+        }
       }
-      await setMemberIban(page, memberId, iban, order.customer, gymConfig);
-      mark('iban');
-      saveCheckpoint({ step: 'iban', deciplus_member_id: memberId, iban_done: true });
     }
   }
 
@@ -474,7 +500,7 @@ async function processSaleJob(page, order, jobMeta = {}) {
   }
 
   const finalStatus =
-    saleResult.manual_review ? STATUS.MANUAL_REVIEW : STATUS.SUCCESS;
+    saleResult.manual_review || ibanError ? STATUS.MANUAL_REVIEW : STATUS.SUCCESS;
 
   if (
     finalStatus === STATUS.SUCCESS &&
@@ -496,6 +522,7 @@ async function processSaleJob(page, order, jobMeta = {}) {
   return {
     status: finalStatus,
     action: 'sale',
+    error: ibanError || saleResult.error || null,
     deciplus_member_id: memberId || null,
     deciplus_sale_id: saleResult.sale_id || null,
     member_action: memberResult.action,
@@ -503,6 +530,7 @@ async function processSaleJob(page, order, jobMeta = {}) {
     badge_action: saleResult.badge_action || null,
     badge_error: saleResult.badge_error || null,
     photo_uploaded: Boolean(photoResult?.ok || checkpoint.photo_done),
+    iban_error: ibanError || null,
   };
 }
 
@@ -840,6 +868,49 @@ function rejectJob(job, filePath, error) {
   });
 }
 
+/** Pousse fiche / vente / erreur vers la boutique — sinon l’admin ne voit pas l’échec IBAN. */
+async function pushBotSaleStatus(order, outcome = {}) {
+  const action = String(order?.action || outcome.action || 'sale').toLowerCase();
+  if (
+    action === 'inscription_nudge' ||
+    action === 'cancel' ||
+    action === 'verify_identity' ||
+    action === 'echeancier'
+  ) {
+    return;
+  }
+  const base = String(
+    order.status_callback_base || process.env.BOXPLUS_STORE_URL || process.env.STORE_URL || ''
+  ).replace(/\/$/, '');
+  const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+  if (!base || !secret || !order?.order_id) return;
+  try {
+    const res = await fetch(`${base}/api/internal/sale-status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-sync-secret': secret },
+      body: JSON.stringify({
+        order_id: order.order_id,
+        status: outcome.status || null,
+        error: outcome.error || null,
+        deciplus_member_id: outcome.deciplus_member_id || null,
+        deciplus_sale_id: outcome.deciplus_sale_id || null,
+        action,
+      }),
+    });
+    if (!res.ok) {
+      logWarn('Callback sale-status boutique échoué', {
+        status: res.status,
+        order_id: order.order_id,
+      });
+    }
+  } catch (err) {
+    logWarn('Callback sale-status boutique ignoré', {
+      error: err.message,
+      order_id: order.order_id,
+    });
+  }
+}
+
 async function processOneJob(job) {
   const filePath = job.file;
   const jobId = job.job_id || job.order_id;
@@ -856,14 +927,16 @@ async function processOneJob(job) {
       job.last_error && /impossible à traiter/i.test(job.last_error)
         ? job.last_error
         : `Job impossible à traiter après ${priorAttempts} tentatives${job.last_error ? ` — ${job.last_error}` : ''}`;
-    markProcessed(jobId, {
+    const exhaustedOutcome = {
       status: STATUS.MANUAL_REVIEW,
       error,
       action: job.action || 'sale',
       deciplus_member_id: job.checkpoint?.deciplus_member_id || null,
       deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
-    });
+    };
+    markProcessed(jobId, exhaustedOutcome);
     removeJob(filePath);
+    await pushBotSaleStatus(job, exhaustedOutcome);
     logWarn('Job impossible à traiter — stop', { job_id: jobId, attempts: priorAttempts });
     await sendAlert(`Job impossible à traiter après ${priorAttempts} tentatives — ${jobId}`, {
       job_id: jobId,
@@ -931,6 +1004,7 @@ async function processOneJob(job) {
 
     markProcessed(jobId, outcome);
     removeJob(filePath);
+    await pushBotSaleStatus(job, outcome);
 
     logInfo('Job Deciplus traité', {
       job_id: jobId,
@@ -989,14 +1063,16 @@ async function processOneJob(job) {
         action: job.action,
         error: lastError,
       });
-      markProcessed(jobId, {
+      const failed = {
         status,
         error: lastError,
         action: job.action || 'sale',
         deciplus_member_id: job.checkpoint?.deciplus_member_id || null,
         deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
-      });
+      };
+      markProcessed(jobId, failed);
       removeJob(filePath);
+      await pushBotSaleStatus(job, failed);
     } else if (sessionRecovered) {
       logInfo('Session renouvelée — job remis en file pour retry', {
         job_id: jobId,
