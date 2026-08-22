@@ -17,6 +17,7 @@ const {
   resolvePrestationHint,
   scoreCatalogTile,
 } = require('../lib/catalog-sale');
+const { saleContractMatches } = require('../lib/sale-contract-match');
 
 /** Vrai uniquement pour le produit Badge Deciplus (~34,99 €), jamais essai/coaching. */
 function isBadgeSale(productConfig) {
@@ -2420,20 +2421,29 @@ async function annotateMember(page, order, productConfig, memberId = null) {
   }
 }
 
-async function verifyCreatedContract(page, memberId, { badge = false, label = '' } = {}) {
+async function verifyCreatedContract(
+  page,
+  memberId,
+  { badge = false, label = '', productConfig = null, existingIds = [] } = {}
+) {
   const { findActiveContracts } = require('./cancel-sale');
+  const prior = new Set((existingIds || []).map((id) => String(id)));
   const maxAttempts = badge ? 4 : 5;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     await closeGreyboxIfOpen(page).catch(() => {});
     await openMemberCheck(page, memberId).catch(() => {});
     await randomDelay(badge ? 500 : 700, badge ? 800 : 1100);
-    const contracts = await findActiveContracts(page).catch(() => []);
+    const contracts = await findActiveContracts(page, {
+      includeExpiredPrestation: true,
+    }).catch(() => []);
     const needle = String(label || '').toLowerCase();
     const contract = contracts.find((item) => {
+      if (prior.has(String(item.idc))) return false;
       const itemLabel = String(item.label || '');
       if (badge) return Boolean(item.isBadge);
       if (/essai/i.test(needle)) return /essai/i.test(itemLabel);
       if (/coaching/i.test(needle)) return /coaching/i.test(itemLabel);
+      if (productConfig) return saleContractMatches(itemLabel, productConfig);
       return Boolean(item.isBadge) === false;
     });
     if (contract) {
@@ -2545,10 +2555,15 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       }
     }
   } else if (productConfig.sale_type === 'abonnement') {
+    const { findActiveContracts } = require('./cancel-sale');
+    const before = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
+    const existingIds = before.filter((c) => !c.isBadge).map((c) => c.idc);
     result = await buyAbonnement(page, productConfig, gymConfig);
     const subscriptionContract = await verifyCreatedContract(page, memberId, {
       badge: false,
       label: productConfig.name || productConfig.title || order.product_name,
+      productConfig,
+      existingIds,
     });
     result.sale_id = subscriptionContract.idc;
 
