@@ -859,6 +859,7 @@ async function maybeTriggerInscriptionNudges() {
     const res = await fetch(`${storeBase}/api/cron/inscription-nudges`, {
       method: 'GET',
       headers: { 'x-sync-secret': secret },
+      signal: AbortSignal.timeout(20000),
     });
     if (!res.ok) {
       logWarn('Poll relances inscription HTTP', { status: res.status });
@@ -882,6 +883,7 @@ async function maybeTriggerEssaiFollowup() {
     const res = await fetch(`${storeBase}/api/cron/essai-followup`, {
       method: 'GET',
       headers: { 'x-sync-secret': secret },
+      signal: AbortSignal.timeout(20000),
     });
     if (!res.ok) {
       logWarn('Poll essai 10 € followup HTTP', { status: res.status });
@@ -904,6 +906,7 @@ async function maybeTriggerDeciplusSaleReconcile() {
     const res = await fetch(`${storeBase}/api/cron/deciplus-sale-reconcile`, {
       method: 'GET',
       headers: { 'x-sync-secret': secret },
+      signal: AbortSignal.timeout(20000),
     });
     if (!res.ok) {
       logWarn('Poll ventes Deciplus HTTP', { status: res.status });

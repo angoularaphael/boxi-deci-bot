@@ -1176,7 +1176,10 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
       result.reason === 'resilier_missing' ||
       result.reason === 'contract_nav_failed' ||
       result.reason === 'resiliation_date_missing' ||
-      result.reason === 'resilier_form_missing'
+      result.reason === 'resilier_form_missing' ||
+      result.reason === 'appliquer_quitter_missing' ||
+      result.reason === 'confirm_missing' ||
+      result.reason === 'resiliation_motif_missing'
     ) {
       logWarn('Contrat sauté — tentative suivante', {
         idc: contracts[0].idc,

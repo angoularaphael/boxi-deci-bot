@@ -2924,9 +2924,9 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
     const before = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
     const classified = classifyMemberContracts(before, productConfig, {
       isPendingOrFuture: isPendingOrFutureContract,
-      // Aventure : la vente est sur la fiche Minimes. Un 44,99 / saison déjà
-      // dessus doit être résilié — Balma n’est pas sur cette fiche.
       skipCancel: false,
+      replaceExisting: true,
+      keepSaleId: order.deciplus_sale_id || null,
     });
 
     if (classified.toCancel.length) {
@@ -2951,16 +2951,43 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       const stillThere = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(
         () => []
       );
-      const leftover = classifyMemberContracts(stillThere, productConfig, {
+      let leftover = classifyMemberContracts(stillThere, productConfig, {
         isPendingOrFuture: isPendingOrFutureContract,
         skipCancel: false,
+        replaceExisting: true,
+        keepSaleId: order.deciplus_sale_id || null,
       }).toCancel.filter((c) => cancelIds.has(String(c.idc)));
       if (leftover.length) {
-        throw new Error(
-          `Ancien abo encore actif (${leftover
-            .map((c) => String(c.label || '').slice(0, 40))
-            .join(' | ')}) — nouvelle vente bloquée pour éviter un doublon`
+        logWarn('Ancien abo encore listé — second essai de résiliation', {
+          order_id: order.order_id,
+          member_id: memberId,
+          labels: leftover.map((c) => String(c.label || '').slice(0, 80)),
+        });
+        const leftoverIds = new Set(leftover.map((c) => String(c.idc)));
+        await cancelSale(page, memberId, {
+          cancelReason: 'change_replace_existing',
+          filter: (c) => c && !c.isBadge && leftoverIds.has(String(c.idc)),
+        }).catch((err) => {
+          logWarn('Second essai résiliation échoué', { error: err.message });
+        });
+        await closeGreyboxIfOpen(page);
+        await openMemberCheck(page, memberId, gymConfig);
+        const stillAfterRetry = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(
+          () => []
         );
+        leftover = classifyMemberContracts(stillAfterRetry, productConfig, {
+          isPendingOrFuture: isPendingOrFutureContract,
+          skipCancel: false,
+          replaceExisting: true,
+          keepSaleId: order.deciplus_sale_id || null,
+        }).toCancel.filter((c) => leftoverIds.has(String(c.idc)));
+      }
+      if (leftover.length) {
+        logWarn('Ancien abo toujours visible — on vend le nouveau quand même', {
+          order_id: order.order_id,
+          member_id: memberId,
+          labels: leftover.map((c) => String(c.label || '').slice(0, 80)),
+        });
       }
     }
 
@@ -2970,9 +2997,15 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
     const afterClassified = classifyMemberContracts(afterCancel, productConfig, {
       isPendingOrFuture: isPendingOrFutureContract,
       skipCancel: true,
+      replaceExisting: true,
+      keepSaleId: order.deciplus_sale_id || null,
     });
     const existingMatch =
-      !options.forceNewSale && afterClassified.matchingStarted[0] ? afterClassified.matchingStarted[0] : null;
+      !options.forceNewSale && !afterClassified.needsNewSale
+        ? afterClassified.matchingStarted.find(
+            (c) => String(c.idc) === String(order.deciplus_sale_id || '')
+          ) || afterClassified.matchingStarted[0] || null
+        : null;
 
     if (existingMatch) {
       logInfo('Contrat déjà présent — pas de nouvelle vente', {
