@@ -31,15 +31,24 @@ function parseGymAddress(raw) {
   return { address: text, postal_code: '31200', city: 'Toulouse', country: 'France' };
 }
 
+function isUsableRibCity(city, postalDigits) {
+  const c = String(city || '').trim();
+  if (!c) return false;
+  if (/^\d+$/.test(c)) return false;
+  const cityDigits = c.replace(/\D/g, '');
+  if (cityDigits.length === 5 && cityDigits === String(postalDigits || '')) return false;
+  return true;
+}
+
 function ribAddressFields(customer = {}, gymConfig = {}) {
   const postalDigits = String(customer.postal_code || '').replace(/\D/g, '');
   const validFrPostal = postalDigits.length === 5;
 
-  if (validFrPostal && customer.address && customer.city) {
+  if (validFrPostal && customer.address && isUsableRibCity(customer.city, postalDigits)) {
     return {
       address: customer.address,
       postal_code: postalDigits,
-      city: customer.city,
+      city: String(customer.city).trim(),
       country: 'France',
     };
   }

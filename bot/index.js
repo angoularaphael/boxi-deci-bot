@@ -330,7 +330,12 @@ async function processSaleJob(page, order, jobMeta = {}) {
   } else {
     const { isOffre29Product } = require('../lib/sale-contract-match');
     if (isOffre29Product(productConfig) || isOffre29Product(order)) {
-      productConfig.auto_badge = true;
+      const { shouldGiftBadgeComptant } = require('../lib/balma');
+      const giftBadge = shouldGiftBadgeComptant(order, {
+        id: order.product_id,
+        name: order.product_name,
+      });
+      productConfig.auto_badge = giftBadge || Boolean(order.payment?.iban);
     }
   }
 
