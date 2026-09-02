@@ -2929,6 +2929,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       keepSaleId: order.deciplus_sale_id || null,
     });
 
+    let leftover = [];
     if (classified.toCancel.length) {
       const cancelIds = new Set(classified.toCancel.map((c) => String(c.idc)));
       logInfo('Ancien abo à résilier avant nouvelle vente', {
@@ -2951,7 +2952,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       const stillThere = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(
         () => []
       );
-      let leftover = classifyMemberContracts(stillThere, productConfig, {
+      leftover = classifyMemberContracts(stillThere, productConfig, {
         isPendingOrFuture: isPendingOrFutureContract,
         skipCancel: false,
         replaceExisting: true,
@@ -3001,7 +3002,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       keepSaleId: order.deciplus_sale_id || null,
     });
     const existingMatch =
-      !options.forceNewSale && !afterClassified.needsNewSale
+      !options.forceNewSale && leftover.length === 0 && !afterClassified.needsNewSale
         ? afterClassified.matchingStarted.find(
             (c) => String(c.idc) === String(order.deciplus_sale_id || '')
           ) || afterClassified.matchingStarted[0] || null

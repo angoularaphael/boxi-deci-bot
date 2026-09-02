@@ -697,10 +697,11 @@ async function confirmResiliationModal(page) {
 
   const clickConfirm = async (ctx) => {
     const candidates = [
-      ctx.getByRole('button', { name: /^Confirmer$/i }).first(),
+      ctx.getByRole('button', { name: /^(Confirmer|Valider|OK)$/i }).first(),
       ctx.locator('button:has-text("Confirmer")').first(),
+      ctx.locator('button:has-text("Valider")').first(),
       ctx.locator('.el-button--primary:has-text("Confirmer")').first(),
-      ctx.locator('button.el-button--primary').filter({ hasText: /Confirmer/i }).first(),
+      ctx.locator('button.el-button--primary').filter({ hasText: /Confirmer|Valider/i }).first(),
     ];
     for (const btn of candidates) {
       if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
@@ -721,7 +722,7 @@ async function confirmResiliationModal(page) {
     }
     const ok = await page.evaluate(() => {
       const buttons = [...document.querySelectorAll('button, .el-button, a')];
-      const b = buttons.find((el) => /^Confirmer$/i.test(String(el.textContent || '').trim()));
+      const b = buttons.find((el) => /^(Confirmer|Valider|OK)$/i.test(String(el.textContent || '').trim()));
       if (!b) return false;
       b.click();
       return true;
