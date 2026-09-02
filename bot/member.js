@@ -7,11 +7,25 @@ const {
   expandDeciplusUrl,
   extractMemberIdFromUrl,
   isNewMemberUrl,
+  nameForDeciplusSearch,
+  namesMatch,
+  emailsMatch,
+  isSearchableMemberEmail,
+  memberSearchHitMatches,
+  normalizeBirthCompare: formatNormalizeBirthCompare,
 } = require('../lib/deciplus-member-format');
+
+const SCOPED_RESULT_LINKS =
+  'table a[href*="idj="], table a[href*="idj%3D"], ' +
+  '#liste a[href*="idj="], .liste a[href*="idj="], ' +
+  'tr a[href*="joueurs.php"], tr a[href*="check.php"]';
 
 function navTimeout() {
   return Number(process.env.DECIPLUS_NAV_TIMEOUT || 90000);
 }
+
+/** Deciplus stocke les portraits en 200×200 (~6–8 Ko). En dessous = blanc / vide. */
+const MIN_STORED_PHOTO_BYTES = 5000;
 
 function getSelectors() {
   try {
@@ -303,44 +317,45 @@ async function pageShowsNoMemberResults(page) {
   return false;
 }
 
-async function readSearchHit(page) {
-  // « aucun résultat » prime sur les vieux liens idj encore présents dans l’UI
-  if (await pageShowsNoMemberResults(page)) {
-    return { found: false, empty: true };
+async function countScopedResultLinks(page) {
+  const contexts = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
+  let n = 0;
+  for (const ctx of contexts) {
+    n += await ctx.locator(SCOPED_RESULT_LINKS).count().catch(() => 0);
   }
+  return n;
+}
+
+async function readSearchHit(page) {
   const fromUrl = await extractMemberIdFromAnyContext(page);
-  if (fromUrl) {
+  const urlHay = expandDeciplusUrl(page.url());
+  const onFiche = Boolean(fromUrl) && /joueurs\.php|check\.php/i.test(urlHay);
+  if (onFiche) {
     logInfo('Membre Deciplus trouvé', { member_id: fromUrl });
     return { found: true, member_id: fromUrl };
   }
+  // Liens du tableau d’abord : un vieux « aucun résultat » (recherche email/tél)
+  // ne doit pas masquer un hit nom/prénom.
   const fromLink = await clickFirstMemberResult(page);
   if (fromLink) {
     logInfo('Membre Deciplus trouvé (liste)', { member_id: fromLink });
     return { found: true, member_id: fromLink };
   }
+  if ((await countScopedResultLinks(page)) === 0 && (await pageShowsNoMemberResults(page))) {
+    return { found: false, empty: true };
+  }
   return { found: false };
 }
 
-/** Vérifie que la fiche ouverte correspond bien à l’email / téléphone demandés. */
+/** Vérifie que la fiche ouverte est la même personne (nom obligatoire si le client en a un). */
 async function searchHitMatchesCustomer(page, customer = {}) {
-  const form = await readMemberIdentityFields(page).catch(() => null);
+  let form = await readMemberIdentityFields(page).catch(() => null);
+  if (!form?.fromMemberForm || !String(form.lastName || form.firstName).trim()) {
+    await page.waitForTimeout(400);
+    form = await readMemberIdentityFields(page).catch(() => null);
+  }
   if (!form?.fromMemberForm) return false;
-  const wantEmail = String(customer.email || '')
-    .trim()
-    .toLowerCase();
-  const formEmail = String(form.email || '')
-    .trim()
-    .toLowerCase();
-  if (wantEmail && formEmail) {
-    return wantEmail === formEmail;
-  }
-  const wantPhone = phoneForDeciplus(customer.phone);
-  const formPhone = phoneForDeciplus(form.phone);
-  if (wantPhone && formPhone) {
-    return wantPhone === formPhone;
-  }
-  // Pas assez d’infos pour confirmer — refuse le faux positif
-  return false;
+  return memberSearchHitMatches(form, customer);
 }
 
 async function searchMember(page, query) {
@@ -371,31 +386,131 @@ async function searchMember(page, query) {
   return hit;
 }
 
-async function searchMemberByName(page, lastName, firstName) {
-  if (!lastName && !firstName) return { found: false };
-  logInfo('Recherche membre Deciplus', { via: 'name', last_name: lastName || null });
-
+async function runNameSearch(page, lastName, firstName) {
   const sel = getSelectors();
   await navigateToMembers(page);
   await clearMemberSearchFields(page);
   const ctx = await getMemberSearchContext(page);
-
   if (lastName) await fillFirst(ctx, sel.quick_search_selectors?.nom || '#i_nom', lastName);
   if (firstName) await fillFirst(ctx, sel.quick_search_selectors?.prenom || '#i_prenom', firstName);
-
   await submitMemberSearch(page);
+  return readSearchHit(page);
+}
 
-  const hit = await readSearchHit(page);
-  if (!hit.found) logInfo('Membre Deciplus introuvable', { via: 'name', url: page.url() });
+async function searchMemberByName(page, lastName, firstName) {
+  const last = nameForDeciplusSearch(lastName);
+  const first = nameForDeciplusSearch(firstName);
+  if (!last && !first) return { found: false };
+  logInfo('Recherche membre Deciplus', { via: 'name', last_name: last, first_name: first || null });
+
+  let hit = await runNameSearch(page, last, first);
+  if (!hit.found && last && first) {
+    logInfo('Recherche membre Deciplus', { via: 'name_last_only', last_name: last });
+    hit = await runNameSearch(page, last, '');
+  }
+  if (!hit.found) logInfo('Membre Deciplus introuvable', { via: 'name', url: page.url(), last_name: last });
   return hit;
 }
 
-function normalizePerson(value) {
-  return String(value || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, '');
+async function listScopedSearchMemberIds(page) {
+  const ids = [];
+  const seen = new Set();
+  const add = (raw) => {
+    const id = String(raw || '');
+    if (!/^\d+$/.test(id) || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  };
+  const fromUrl = await extractMemberIdFromAnyContext(page);
+  const urlHay = expandDeciplusUrl(page.url());
+  if (fromUrl && /joueurs\.php|check\.php/i.test(urlHay)) add(fromUrl);
+  const contexts = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
+  for (const ctx of contexts) {
+    const links = ctx.locator(SCOPED_RESULT_LINKS);
+    const count = await links.count().catch(() => 0);
+    for (let i = 0; i < Math.min(count, 12); i += 1) {
+      const href = (await links.nth(i).getAttribute('href').catch(() => '')) || '';
+      add(extractMemberIdFromUrl(href));
+    }
+  }
+  return ids;
+}
+
+async function listNameSearchMemberIds(page, lastName, firstName) {
+  const last = nameForDeciplusSearch(lastName);
+  const first = nameForDeciplusSearch(firstName);
+  if (!last && !first) return [];
+  const searchOnce = async (ln, fn) => {
+    await navigateToMembers(page);
+    await clearMemberSearchFields(page);
+    const ctx = await getMemberSearchContext(page);
+    const sel = getSelectors();
+    if (ln) await fillFirst(ctx, sel.quick_search_selectors?.nom || '#i_nom', ln);
+    if (fn) await fillFirst(ctx, sel.quick_search_selectors?.prenom || '#i_prenom', fn);
+    await submitMemberSearch(page);
+    return listScopedSearchMemberIds(page);
+  };
+  let ids = await searchOnce(last, first);
+  if (!ids.length && last && first) ids = await searchOnce(last, '');
+  return ids;
+}
+
+/** 1 fiche nom/prénom/naissance → OK ; plusieurs → email pour départager. */
+function pickAventureBalmaMatch(matches = [], email) {
+  if (!matches.length) return { found: false, reason: 'not_found', mismatch_fields: [] };
+  if (matches.length === 1) return { found: true, member_id: String(matches[0].member_id) };
+  const searchable = isSearchableMemberEmail(email);
+  if (!searchable) {
+    return {
+      found: false,
+      reason: 'need_email',
+      mismatch_fields: ['email'],
+      candidates: matches.length,
+    };
+  }
+  const picked = matches.find((m) => emailsMatch(m.email, searchable));
+  if (!picked) {
+    return { found: false, reason: 'identity_mismatch', mismatch_fields: ['email'] };
+  }
+  return { found: true, member_id: String(picked.member_id) };
+}
+
+async function findAventureBalmaMember(page, identity = {}) {
+  const last = String(identity.last_name || '').trim();
+  const first = String(identity.first_name || '').trim();
+  const missing = [];
+  if (!last) missing.push('last_name');
+  if (!first) missing.push('first_name');
+  if (!identity.birthdate) missing.push('birthdate');
+  if (missing.length) {
+    return { found: false, reason: 'missing_identity', mismatch_fields: missing };
+  }
+
+  const ids = await listNameSearchMemberIds(page, last, first);
+  if (!ids.length) return { found: false, reason: 'not_found', mismatch_fields: [] };
+
+  const matches = [];
+  for (const memberId of ids.slice(0, 8)) {
+    await openMemberEditForm(page, memberId).catch(() => {});
+    let form = await readMemberIdentityFields(page).catch(() => null);
+    if (!form?.fromMemberForm || !String(form.lastName || form.firstName).trim()) {
+      await page.waitForTimeout(400);
+      form = await readMemberIdentityFields(page).catch(() => null);
+    }
+    if (!form?.fromMemberForm) continue;
+    const { mismatchFields } = computeIdentityMismatches(form, identity, {
+      fields: CHANGE_MATCH_FIELDS,
+    });
+    if (!mismatchFields.length) {
+      matches.push({ member_id: String(memberId), email: form.email || '' });
+    }
+  }
+
+  logInfo('Aventure Balma — candidats nom/prénom/naissance', {
+    candidates: ids.length,
+    matches: matches.length,
+  });
+  return pickAventureBalmaMatch(matches, identity.email);
 }
 
 function birthdateToDeciplus(value) {
@@ -471,7 +586,12 @@ async function readMemberIdentityFields(page) {
         .inputValue()
         .catch(() => '');
     }
-    last = { lastName, firstName, birth, phone, fromMemberForm: true };
+    const email = await scope
+      .locator('input[name="email"]:not(#i_email)')
+      .first()
+      .inputValue()
+      .catch(() => '');
+    last = { lastName, firstName, birth, phone, email, fromMemberForm: true };
     if (String(lastName || firstName).trim()) break;
     await page.waitForTimeout(180);
   }
@@ -481,28 +601,11 @@ async function readMemberIdentityFields(page) {
 const DEFAULT_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate', 'phone'];
 /** Changement d’abo : nom + prénom + date de naissance uniquement. */
 const CHANGE_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate'];
+/** Aventure Balma : nom + prénom + naissance. Email seulement s’il y a plusieurs fiches. */
+const AVENTURE_MATCH_FIELDS = ['last_name', 'first_name', 'birthdate'];
 
-/** Normalise une date Deciplus / ISO vers JJ/MM/AAAA comparable. */
 function normalizeBirthCompare(value) {
-  const raw = String(value || '')
-    .trim()
-    .replace(/\s/g, '')
-    .replace(/-/g, '/');
-  if (!raw) return '';
-  // AAAA/MM/JJ → JJ/MM/AAAA
-  let m = raw.match(/^(\d{4})\/(\d{2})\/(\d{2})$/);
-  if (m) return `${m[3]}/${m[2]}/${m[1]}`;
-  // JJ/MM/AA → JJ/MM/20AA (ou 19AA)
-  m = raw.match(/^(\d{2})\/(\d{2})\/(\d{2})$/);
-  if (m) {
-    const yy = Number(m[3]);
-    const century = yy > 30 ? 1900 : 2000;
-    return `${m[1]}/${m[2]}/${century + yy}`;
-  }
-  // JJ/MM/AAAA
-  m = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-  if (m) return `${m[1]}/${m[2]}/${m[3]}`;
-  return raw;
+  return formatNormalizeBirthCompare(value);
 }
 
 /** Compare identité saisie vs fiche — retourne uniquement les champs réellement faux. */
@@ -514,16 +617,19 @@ function computeIdentityMismatches(form, identity = {}, { fields = DEFAULT_MATCH
   const formBirth = String(form.birth || '').trim();
   // Ne pas marquer nom/prénom en erreur si la fiche n’a pas pu les lire
   const lastNameOk =
-    !formLast || normalizePerson(formLast) === normalizePerson(identity.last_name);
+    !formLast || namesMatch(formLast, identity.last_name);
   const firstNameOk =
-    !formFirst || normalizePerson(formFirst) === normalizePerson(identity.first_name);
+    !formFirst || namesMatch(formFirst, identity.first_name);
   const birthOk =
     !expectedBirth ||
     !formBirth ||
     normalizeBirthCompare(formBirth) === normalizeBirthCompare(expectedBirth);
-  const phoneOk = form.phone
-    ? phonesMatch(form.phone, identity.phone)
-    : Boolean(form.foundViaPhone);
+  // Tél. uniquement si les deux côtés en ont un — fiche Balma souvent sans SMS
+  const phoneOk =
+    !form.phone ||
+    !identity.phone ||
+    phonesMatch(form.phone, identity.phone) ||
+    Boolean(form.foundViaPhone);
 
   // Champs en erreur = ceux qui ne matchent PAS (ne jamais inverser)
   const mismatchFields = [];
@@ -533,9 +639,12 @@ function computeIdentityMismatches(form, identity = {}, { fields = DEFAULT_MATCH
     mismatchFields.push('birthdate');
   }
   if (check('phone') && !phoneOk) mismatchFields.push('phone');
+  const formEmail = String(form.email || '').trim();
+  const emailOk = emailsMatch(formEmail, identity.email);
+  if (check('email') && !emailOk) mismatchFields.push('email');
   return {
     mismatchFields,
-    checks: { lastNameOk, firstNameOk, birthOk, phoneOk },
+    checks: { lastNameOk, firstNameOk, birthOk, phoneOk, emailOk },
   };
 }
 
@@ -552,21 +661,27 @@ async function findMemberByIdentity(page, identity = {}, options = {}) {
   if (matchFields.includes('phone') && !phone) {
     return { found: false, reason: 'missing_phone', mismatch_fields: ['phone'] };
   }
-  if (!identity.last_name || !identity.first_name || !identity.birthdate) {
+  if (!identity.last_name || !identity.first_name) {
     const missing = [];
     if (!identity.last_name) missing.push('last_name');
     if (!identity.first_name) missing.push('first_name');
-    if (!identity.birthdate) missing.push('birthdate');
     return { found: false, reason: 'missing_identity', mismatch_fields: missing };
   }
+  if (matchFields.includes('birthdate') && !identity.birthdate) {
+    return { found: false, reason: 'missing_identity', mismatch_fields: ['birthdate'] };
+  }
+  const searchableEmail = isSearchableMemberEmail(identity.email);
+  if (matchFields.includes('email') && !searchableEmail) {
+    return { found: false, reason: 'missing_identity', mismatch_fields: ['email'] };
+  }
 
-  // Email d’abord (plus unique) — stop dès le 1er hit (pas de recherches inutiles)
+  // Email d’abord (plus unique) — jamais le mail PSP Aventure
   let foundViaPhone = false;
   let hit = { found: false };
-  if (identity.email) {
-    hit = await searchMember(page, identity.email);
+  if (searchableEmail) {
+    hit = await searchMember(page, searchableEmail);
   }
-  if (!hit.found && phone) {
+  if (!hit.found && phone && matchFields.includes('phone')) {
     hit = await searchMember(page, phone);
     if (hit.found) foundViaPhone = true;
   }
@@ -635,10 +750,7 @@ async function extractMemberIdFromForm(page) {
 async function clickFirstMemberResult(page) {
   const contexts = [page, ...page.frames().filter((f) => f !== page.mainFrame())];
   // Uniquement dans les zones résultats (évite les liens idj du menu / historique)
-  const scoped =
-    'table a[href*="idj="], table a[href*="idj%3D"], ' +
-    '#liste a[href*="idj="], .liste a[href*="idj="], ' +
-    'tr a[href*="joueurs.php"], tr a[href*="check.php"]';
+  const scoped = SCOPED_RESULT_LINKS;
 
   for (const ctx of contexts) {
     let links;
@@ -663,34 +775,75 @@ async function clickFirstMemberResult(page) {
 
 async function extractMemberId(page) {
   return (
-    extractMemberIdFromUrl(page.url()) ||
+    (await extractMemberIdFromAnyContext(page)) ||
     (await extractMemberIdFromForm(page)) ||
     null
   );
 }
 
-async function resolveCreatedMemberId(page, customer) {
+async function collectMemberIdsFromPage(page, { links = true } = {}) {
+  const ids = [];
+  const seen = new Set();
+  const add = (raw) => {
+    const id = String(raw || '');
+    if (!/^\d+$/.test(id) || seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  };
+  add(extractMemberIdFromUrl(page.url()));
+  for (const frame of page.frames()) {
+    try {
+      add(extractMemberIdFromUrl(frame.url()));
+    } catch {
+      /* frame détachée */
+    }
+    if (!links) continue;
+    const loc = frame.locator('a[href*="idj="], a[href*="idj%3D"]');
+    const n = await loc.count().catch(() => 0);
+    for (let i = 0; i < n; i += 1) {
+      const href = (await loc.nth(i).getAttribute('href').catch(() => '')) || '';
+      add((href.match(/idj(?:=|%3D)(\d+)/i) || [])[1]);
+    }
+  }
+  return ids;
+}
+
+async function pickCreatedMemberId(page, excludeIds = [], { links = true } = {}) {
+  const skip = new Set((excludeIds || []).map(String).filter(Boolean));
+  const ids = await collectMemberIdsFromPage(page, { links });
+  return ids.find((id) => !skip.has(id)) || null;
+}
+
+async function resolveCreatedMemberId(page, customer, { excludeIds = [] } = {}) {
+  const skip = new Set((excludeIds || []).map(String).filter(Boolean));
+  const accept = (id) => (id && !skip.has(String(id)) ? String(id) : null);
+
   for (let attempt = 0; attempt < 8; attempt += 1) {
-    const id = await extractMemberId(page);
+    const id = accept(await pickCreatedMemberId(page, excludeIds, { links: false }));
     if (id) return id;
-    // Parfois Deciplus redirige via check.php?idjnew= puis select.php
-    const urlId = extractMemberIdFromUrl(page.url());
-    if (urlId) return urlId;
     await page.waitForTimeout(700);
   }
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     if (customer?.email) {
-      const byEmail = await searchMember(page, customer.email);
-      if (byEmail.found) return byEmail.member_id;
+      await searchMember(page, customer.email);
+      const id = accept(await pickCreatedMemberId(page, excludeIds, { links: true }));
+      if (id) return id;
     }
     if (customer?.phone) {
-      const byPhone = await searchMember(page, customer.phone);
-      if (byPhone.found) return byPhone.member_id;
+      await searchMember(page, customer.phone);
+      const id = accept(await pickCreatedMemberId(page, excludeIds, { links: true }));
+      if (id) return id;
     }
     if (customer?.last_name || customer?.first_name) {
-      const byName = await searchMemberByName(page, customer.last_name, customer.first_name);
-      if (byName.found) return byName.member_id;
+      await searchMemberByName(page, customer.last_name, customer.first_name);
+      const id = accept(await pickCreatedMemberId(page, excludeIds, { links: true }));
+      if (id) return id;
+    }
+    if (customer?.last_name) {
+      await searchMemberByName(page, customer.last_name, '');
+      const id = accept(await pickCreatedMemberId(page, excludeIds, { links: true }));
+      if (id) return id;
     }
     await page.waitForTimeout(1200);
   }
@@ -718,15 +871,17 @@ async function detectFormValidationError(page) {
   return null;
 }
 
-async function openNewMemberFormViaSelect(page, customer) {
+async function openNewMemberFormViaSelect(page, customer, { skipIdentityPrefill = false } = {}) {
   const sel = getSelectors();
   await navigateToMembers(page);
   // select.php est dans iframe nextgen (_vue_iframe) — #buttonNew n’est PAS sur page
   const searchCtx = await getMemberSearchContext(page, { waitMs: 12000 });
-  await fillFirst(searchCtx, sel.quick_search_selectors?.nom || '#i_nom', customer.last_name);
-  await fillFirst(searchCtx, sel.quick_search_selectors?.prenom || '#i_prenom', customer.first_name);
-  if (customer.email) {
-    await fillFirst(searchCtx, sel.quick_search_selectors?.email || '#i_email', customer.email);
+  if (!skipIdentityPrefill) {
+    await fillFirst(searchCtx, sel.quick_search_selectors?.nom || '#i_nom', nameForDeciplusSearch(customer.last_name));
+    await fillFirst(searchCtx, sel.quick_search_selectors?.prenom || '#i_prenom', nameForDeciplusSearch(customer.first_name));
+    if (customer.email) {
+      await fillFirst(searchCtx, sel.quick_search_selectors?.email || '#i_email', customer.email);
+    }
   }
 
   assertMemberSessionAlive(page, 'avant #buttonNew');
@@ -772,15 +927,17 @@ async function openNewMemberFormViaSelect(page, customer) {
   return null;
 }
 
-async function openNewMemberFormViaUrl(page, customer) {
+async function openNewMemberFormViaUrl(page, customer, { skipIdentityPrefill = false } = {}) {
   const params = new URLSearchParams({
     idj: 'new',
     idn: '',
     returntoselect: '',
-    jnom: customer.last_name || '',
-    jprenom: customer.first_name || '',
   });
-  if (customer.email) params.set('jemail', customer.email);
+  if (!skipIdentityPrefill) {
+    params.set('jnom', nameForDeciplusSearch(customer.last_name));
+    params.set('jprenom', nameForDeciplusSearch(customer.first_name));
+    if (customer.email) params.set('jemail', customer.email);
+  }
   const qs = params.toString();
   const origin = new URL(page.url()).origin;
   // Même stratégie que openMemberEditForm : nextgen/legacy d’abord
@@ -822,25 +979,26 @@ async function openNewMemberFormViaUrl(page, customer) {
   return null;
 }
 
-async function openNewMemberForm(page, customer) {
+async function openNewMemberForm(page, customer, options = {}) {
   logInfo('Ouverture formulaire nouveau membre Deciplus', {
     last_name: customer.last_name,
     email: customer.email || null,
+    skip_identity_prefill: Boolean(options.skipIdentityPrefill),
   });
 
-  let ctx = await openNewMemberFormViaSelect(page, customer);
+  let ctx = await openNewMemberFormViaSelect(page, customer, options);
   if (ctx) return ctx;
 
   logInfo('Repli création membre — URL nextgen/legacy joueurs.php');
   try {
-    ctx = await openNewMemberFormViaUrl(page, customer);
+    ctx = await openNewMemberFormViaUrl(page, customer, options);
     if (ctx) return ctx;
   } catch (err) {
     if (/Session Deciplus expirée/i.test(err.message)) throw err;
     logWarn('URL joueurs.php en échec', { error: err.message });
   }
 
-  ctx = await openNewMemberFormViaSelect(page, customer);
+  ctx = await openNewMemberFormViaSelect(page, customer, options);
   if (ctx) return ctx;
 
   if (isSessionExpiredUrl(page.url())) {
@@ -859,11 +1017,13 @@ async function startNewMemberFromSelect(page, customer) {
 }
 
 async function fillMemberForm(page, customer, gymConfig, order) {
+  const { applySeanceOfferteCustomerDefaults } = require('../lib/info-compta-note');
+  customer = applySeanceOfferteCustomerDefaults(customer, order || {});
   const sel = getSelectors().member_form_selectors || {};
   const ctx = await getMemberFormContext(page);
   const phone = phoneForDeciplus(customer.phone);
-  const lastName = customer.last_name || customer.first_name || 'CLIENT';
-  const firstName = customer.first_name || customer.last_name || 'WEB';
+  const lastName = nameForDeciplusSearch(customer.last_name || customer.first_name || 'CLIENT');
+  const firstName = nameForDeciplusSearch(customer.first_name || customer.last_name || 'WEB');
 
   logInfo('Remplissage fiche membre Deciplus', {
     last_name: lastName,
@@ -872,14 +1032,16 @@ async function fillMemberForm(page, customer, gymConfig, order) {
     gym: gymConfig.key || gymConfig.deciplus_label || null,
   });
 
-  await fillFirst(ctx, sel.nom || 'input[name="nom"]', lastName);
-  await fillFirst(ctx, sel.prenom || 'input[name="prenom"]', firstName);
-  await fillFirst(ctx, sel.email || 'input[name="email"]', customer.email);
+  await fillFirst(ctx, 'form[name="db1_form"] input[name="nom"]:not(#i_nom)', lastName);
+  await fillFirst(ctx, 'form[name="db1_form"] input[name="prenom"]:not(#i_prenom)', firstName);
+  await fillFirst(ctx, 'form[name="db1_form"] input[name="email"]:not(#i_email)', customer.email);
   await fillFirst(ctx, sel.date_naissance || 'input[name="date_naissance"]', formatBirthdate(customer.birthdate));
   await fillFirst(ctx, sel.sexe || 'select[name="sexe"]', genderToDeciplus(customer.gender));
   await fillFirst(ctx, sel.telsms || 'input[name="telsms"]', phone);
   await fillFirst(ctx, sel.tel || 'input[name="tel"]', phone);
   await fillFirst(ctx, sel.adr1 || 'input[name="adr1"]', customer.address);
+  const adr2 = customer.address2 || customer.adr2;
+  if (adr2) await fillFirst(ctx, sel.adr2 || 'input[name="adr2"]', adr2);
   await fillFirst(ctx, sel.codepostal || 'input[name="codepostal"]', customer.postal_code);
   await fillFirst(ctx, sel.ville || 'input[name="ville"]', customer.city);
   await fillFirst(
@@ -887,6 +1049,20 @@ async function fillMemberForm(page, customer, gymConfig, order) {
     sel.pays || 'input[name="pays"], select[name="pays"]',
     countryLabelForDeciplus(customer.country)
   );
+
+  const writtenFirst = await ctx
+    .locator('form[name="db1_form"] input[name="prenom"]:not(#i_prenom)')
+    .first()
+    .inputValue()
+    .catch(() => '');
+  if (String(writtenFirst || '').trim() !== String(firstName).trim()) {
+    await ctx
+      .locator('form[name="db1_form"] input[name="prenom"]:not(#i_prenom)')
+      .first()
+      .fill(String(firstName))
+      .catch(() => {});
+  }
+  logInfo('Prénom fiche membre', { expected: firstName, written: writtenFirst });
 
   if (order.utm?.source) await fillFirst(ctx, sel.utm_source || 'input[name="utm_source"]', order.utm.source);
   if (order.utm?.medium) await fillFirst(ctx, sel.utm_medium || 'input[name="utm_medium"]', order.utm.medium);
@@ -1036,7 +1212,162 @@ async function clickValidateButton(ctx, selectors, opts = {}) {
   return false;
 }
 
-async function submitMemberForm(page) {
+const CREER_QUAND_MEME_RE = /cr[eé]er\s+quand\s+m[eê]me/i;
+
+function deciplusScopes(page) {
+  try {
+    return [page, ...(page.frames?.() || [])];
+  } catch {
+    return [page];
+  }
+}
+
+async function duplicateDialogVisible(page) {
+  for (const ctx of deciplusScopes(page)) {
+    const visible = await ctx
+      .evaluate(() => {
+        const widget =
+          document.querySelector('.ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"]') ||
+          document.getElementById('emailOrTelAlreadyExistDialog')?.closest('.ui-dialog');
+        if (!widget) return false;
+        const s = window.getComputedStyle(widget);
+        const r = widget.getBoundingClientRect();
+        return s.display !== 'none' && s.visibility !== 'hidden' && r.width > 10 && r.height > 10;
+      })
+      .catch(() => false);
+    if (visible) return true;
+  }
+  return false;
+}
+
+async function waitForMemberId(page, timeoutMs = 15000, { excludeIds = [] } = {}) {
+  const skip = new Set((excludeIds || []).map(String).filter(Boolean));
+  const deadline = Date.now() + Math.max(500, timeoutMs);
+  while (Date.now() < deadline) {
+    const id = await extractMemberId(page);
+    if (id && !skip.has(String(id))) return id;
+    await page.waitForTimeout(300);
+  }
+  return null;
+}
+
+async function clickCreerQuandMemeInContext(ctx) {
+  const result = await ctx
+    .evaluate(() => {
+      const re = /cr[eé]er\s+quand\s+m[eê]me/i;
+      const content = document.getElementById('emailOrTelAlreadyExistDialog');
+      const widget =
+        document.querySelector('.ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"]') ||
+        content?.closest('.ui-dialog');
+      if (widget) {
+        const s = window.getComputedStyle(widget);
+        const r = widget.getBoundingClientRect();
+        if (s.display === 'none' || s.visibility === 'hidden' || r.width < 10) {
+          return { ok: false, how: 'hidden' };
+        }
+      } else if (!content) {
+        return { ok: false, how: 'missing' };
+      }
+
+      const $ = window.jQuery;
+      if ($ && content && $.fn && $.fn.dialog) {
+        try {
+          const $dlg = $(content);
+          const btns = $dlg.dialog('option', 'buttons');
+          const run = (fn) => {
+            fn.call(content);
+            return { ok: true, how: 'jquery-dialog' };
+          };
+          if (Array.isArray(btns)) {
+            const b = btns.find((x) => re.test(String(x.text || x.label || '')));
+            if (b && typeof b.click === 'function') return run(b.click);
+          } else if (btns && typeof btns === 'object') {
+            const key = Object.keys(btns).find((k) => re.test(k));
+            if (key && typeof btns[key] === 'function') return run(btns[key]);
+          }
+        } catch {
+          /* dialog non initialisé */
+        }
+      }
+
+      const btn =
+        (widget || document).querySelector(
+          '.ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"] .ui-dialog-buttonset button.ui-button.ui-corner-all.ui-widget, .ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"] .ui-dialog-buttonset button.ui-button'
+        ) ||
+        (widget || document).querySelector(
+          '.ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"] .ui-dialog-buttonset button, .ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"] .ui-button'
+        ) ||
+        Array.from(
+          (widget || document).querySelectorAll('.ui-dialog-buttonset button, .ui-dialog-buttonpane button')
+        ).find((node) => re.test(`${node.innerText || ''} ${node.value || ''}`));
+      if (!btn) return { ok: false, how: 'no-btn' };
+      if ($) $(btn).click();
+      else btn.click();
+      return { ok: true, how: 'dom-click' };
+    })
+    .catch(() => ({ ok: false, how: 'eval' }));
+
+  if (result?.ok) return result.how || true;
+
+  const widget = ctx.locator(
+    '.ui-dialog[aria-describedby="emailOrTelAlreadyExistDialog"], .ui-dialog:has(#emailOrTelAlreadyExistDialog)'
+  );
+  if ((await widget.count().catch(() => 0)) === 0) return false;
+  if (!(await widget.first().isVisible().catch(() => false))) return false;
+  const btn = widget
+    .locator(
+      '.ui-dialog-buttonset button.ui-button.ui-corner-all.ui-widget, .ui-dialog-buttonset button.ui-button, .ui-dialog-buttonset button'
+    )
+    .filter({ hasText: CREER_QUAND_MEME_RE })
+    .first();
+  if ((await btn.count().catch(() => 0)) === 0) return false;
+  await btn.click({ timeout: 4000 }).catch(async () => {
+    await btn.click({ force: true, timeout: 3000 });
+  });
+  return 'locator';
+}
+
+/** Dialogue Deciplus `#emailOrTelAlreadyExistDialog` → callback jQuery « Créer quand même ». */
+async function clickCreerQuandMeme(page, { timeoutMs = 10000 } = {}) {
+  const deadline = Date.now() + Math.max(500, timeoutMs);
+  const formCtx = await getMemberFormContext(page, { waitMs: 800 }).catch(() => page);
+  while (Date.now() < deadline) {
+    const scopes = [formCtx, ...deciplusScopes(page)];
+    const seen = new Set();
+    for (const ctx of scopes) {
+      const key = ctx === page ? 'page' : ctx.url?.() || String(ctx);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const how = await clickCreerQuandMemeInContext(ctx).catch(() => false);
+      if (!how) continue;
+      logInfo('Doublon Deciplus — clic « Créer quand même »', { how });
+      await randomDelay(600, 1100);
+      if (!(await duplicateDialogVisible(page))) return true;
+    }
+    await page.waitForTimeout(250);
+  }
+  if (!(await duplicateDialogVisible(page))) return true;
+  logWarn('Bouton « Créer quand même » introuvable');
+  return false;
+}
+
+const HARD_DUPLICATE_PAGE_RE =
+  /CR[EÉ]ATION\s+D['’']UN\s+DOUBLON|n['’']a\s+pas\s+[eé]t[eé]\s+enregistr[eé]e|op[eé]ration\s+annul[eé]e/i;
+
+/** Page serveur Deciplus (pas le dialog email/tel) — aucun bouton « forcer ». */
+async function detectHardDuplicatePage(page) {
+  const scopes = [page, ...(page.frames?.() || [])];
+  for (const ctx of scopes) {
+    const text = ((await ctx.locator('body').innerText().catch(() => '')) || '').slice(0, 5000);
+    if (!HARD_DUPLICATE_PAGE_RE.test(text)) continue;
+    const snippet = text.replace(/\s+/g, ' ').trim().slice(0, 280);
+    logWarn('Page Deciplus CRÉATION D\'UN DOUBLON (blocage serveur)', { snippet });
+    return snippet;
+  }
+  return null;
+}
+
+async function submitMemberForm(page, options = {}) {
   const cfg = getSelectors();
   const ctx = await getMemberFormContext(page);
   const isNew = await isNewMemberForm(page, ctx);
@@ -1106,28 +1437,59 @@ async function submitMemberForm(page) {
     }
   }
 
-  await navPromise;
-  await page
-    .waitForURL(
-      /check\.php|idjnew=\d+|joueurs\.php\?[^#]*idj=\d+|select\.php|legacy\?path=/i,
-      { timeout: 20000 }
-    )
-    .catch(() => {});
-  await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
-  await randomDelay(800, 1500);
-  await dismissJqueryUiOverlay(page);
-
-  // Dialogue confirmation éventuel après Valider
-  const confirmBtn = page
-    .locator(
-      '.ui-dialog-buttonpane button:has-text("OK"), .ui-dialog-buttonpane button:has-text("Valider"), .ui-dialog-buttonpane button:has-text("Oui")'
-    )
-    .first();
-  if ((await confirmBtn.count()) > 0 && (await confirmBtn.isVisible().catch(() => false))) {
-    await confirmBtn.click().catch(() => {});
+  if (options.allowDuplicate) {
+    const excludeIds = options.excludeIds || [];
+    await clickCreerQuandMeme(page, { timeoutMs: 25000 });
+    await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
+    await page
+      .waitForURL(/idjnew=\d+|check\.php|joueurs\.php\?[^#]*idj=\d+/i, { timeout: 12000 })
+      .catch(() => {});
+    const hard = await detectHardDuplicatePage(page);
+    if (hard) {
+      throw new Error(`Deciplus a bloqué le doublon (identité + adresse identiques) : ${hard}`);
+    }
+    let memberId = await waitForMemberId(page, 15000, { excludeIds });
+    if (!memberId && (await duplicateDialogVisible(page))) {
+      await clickCreerQuandMeme(page, { timeoutMs: 8000 });
+      await page.waitForLoadState('domcontentloaded', { timeout: 12000 }).catch(() => {});
+      const hard2 = await detectHardDuplicatePage(page);
+      if (hard2) {
+        throw new Error(`Deciplus a bloqué le doublon (identité + adresse identiques) : ${hard2}`);
+      }
+      memberId = await waitForMemberId(page, 10000, { excludeIds });
+    }
+    if (!memberId) {
+      const snippet = ((await page.locator('body').innerText().catch(() => '')) || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 280);
+      logWarn('Après « Créer quand même », ID membre encore introuvable — pas de 2e Valider', {
+        url: page.url(),
+        snippet,
+      });
+    }
+  } else {
+    await navPromise;
+    await page
+      .waitForURL(
+        /check\.php|idjnew=\d+|joueurs\.php\?[^#]*idj=\d+|select\.php|legacy\?path=/i,
+        { timeout: 20000 }
+      )
+      .catch(() => {});
     await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
-    await randomDelay(500, 900);
+    await randomDelay(800, 1500);
     await dismissJqueryUiOverlay(page);
+    const confirmBtn = page
+      .locator(
+        '.ui-dialog-buttonpane button:has-text("OK"), .ui-dialog-buttonpane button:has-text("Valider"), .ui-dialog-buttonpane button:has-text("Oui")'
+      )
+      .first();
+    if ((await confirmBtn.count()) > 0 && (await confirmBtn.isVisible().catch(() => false))) {
+      await confirmBtn.click().catch(() => {});
+      await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+      await randomDelay(500, 900);
+      await dismissJqueryUiOverlay(page);
+    }
   }
 
   const afterUrl = page.url();
@@ -1150,9 +1512,7 @@ async function detectDuplicateError(page) {
   return null;
 }
 
-async function findOrCreateMember(page, order, gymConfig) {
-  const { customer } = order;
-
+async function findExistingMemberOnCurrentSite(page, customer) {
   await resetMemberSearchContext(page);
 
   async function acceptHit(hit, action) {
@@ -1172,16 +1532,74 @@ async function findOrCreateMember(page, order, gymConfig) {
   }
 
   if (customer.email) {
-    const byEmail = await searchMember(page, customer.email);
-    const accepted = await acceptHit(byEmail, 'found_email');
+    const accepted = await acceptHit(await searchMember(page, customer.email), 'found_email');
     if (accepted) return accepted;
+  }
+  if (customer.phone) {
+    const accepted = await acceptHit(await searchMember(page, customer.phone), 'found_phone');
+    if (accepted) return accepted;
+  }
+  if (customer.last_name || customer.first_name) {
+    const accepted = await acceptHit(
+      await searchMemberByName(page, customer.last_name, customer.first_name),
+      'found_name'
+    );
+    if (accepted) return accepted;
+  }
+  return null;
+}
+
+async function detectMemberGymConfig(page, fallback) {
+  const { gymConfigFromZoneId } = require('../lib/deciplus-sites');
+  const scopes = [page, ...(page.frames?.() || [])];
+  for (const ctx of scopes) {
+    const val = await ctx
+      .locator('form[name="db1_form"] select[name="idz"], select[name="idz"]')
+      .first()
+      .inputValue()
+      .catch(() => '');
+    const cfg = gymConfigFromZoneId(val);
+    if (cfg) return cfg;
+  }
+  return fallback;
+}
+
+async function findOrCreateMember(page, order, gymConfig) {
+  const { customer } = order;
+  const { uniqueDeciplusSearchConfigs } = require('../lib/deciplus-sites');
+  const { switchDeciplusSite } = require('./deciplus-zone');
+
+  const sites = uniqueDeciplusSearchConfigs(order.gym || gymConfig.key);
+  for (const site of sites) {
+    const label = site.deciplus_label || site.label;
+    const switched = await switchDeciplusSite(page, label).catch((err) => {
+      logWarn('Site Deciplus non ouvert pour recherche membre', {
+        site: label,
+        error: err.message,
+      });
+      return false;
+    });
+    if (!switched) continue;
+    const found = await findExistingMemberOnCurrentSite(page, customer);
+    if (found) {
+      logInfo('Fiche Deciplus existante réutilisée', {
+        order_id: order.order_id,
+        member_id: found.member_id,
+        site: label,
+        action: found.action,
+      });
+      return { ...found, gymConfig: site };
+    }
   }
 
-  if (customer.phone) {
-    const byPhone = await searchMember(page, customer.phone);
-    const accepted = await acceptHit(byPhone, 'found_phone');
-    if (accepted) return accepted;
-  }
+  const createLabel = gymConfig.deciplus_label || gymConfig.label;
+  await switchDeciplusSite(page, createLabel).catch((err) => {
+    logWarn('Retour site création Deciplus impossible', {
+      site: createLabel,
+      error: err.message,
+    });
+  });
+  await resetMemberSearchContext(page);
 
   await openNewMemberForm(page, customer);
   await fillMemberForm(page, customer, gymConfig, order);
@@ -1190,14 +1608,8 @@ async function findOrCreateMember(page, order, gymConfig) {
   const duplicateMsg = await detectDuplicateError(page);
   if (duplicateMsg) {
     logWarn('Doublon à la création — recherche membre existant', { order_id: order.order_id });
-    if (customer.email) {
-      const accepted = await acceptHit(await searchMember(page, customer.email), 'found_after_duplicate');
-      if (accepted) return accepted;
-    }
-    if (customer.phone) {
-      const accepted = await acceptHit(await searchMember(page, customer.phone), 'found_after_duplicate');
-      if (accepted) return accepted;
-    }
+    const accepted = await findExistingMemberOnCurrentSite(page, customer);
+    if (accepted) return { ...accepted, gymConfig };
     return { duplicate: true, message: duplicateMsg };
   }
 
@@ -1222,7 +1634,16 @@ async function findOrCreateMember(page, order, gymConfig) {
   }
 
   logInfo('Membre Deciplus créé', { member_id: memberId, order_id: order.order_id });
-  return { member_id: memberId, action: 'created' };
+  return { member_id: memberId, action: 'created', gymConfig };
+}
+
+function sniffImageExt(buf) {
+  if (!buf || buf.length < 12) return '.jpg';
+  if (buf[0] === 0xff && buf[1] === 0xd8) return '.jpg';
+  if (buf[0] === 0x89 && buf[1] === 0x50) return '.png';
+  if (buf[0] === 0x47 && buf[1] === 0x49) return '.gif';
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[8] === 0x57 && buf[9] === 0x45) return '.webp';
+  return '.jpg';
 }
 
 async function resolvePhotoFile(photoPath, photoBase64, photoUrl) {
@@ -1232,24 +1653,32 @@ async function resolvePhotoFile(photoPath, photoBase64, photoUrl) {
 
   if (photoPath && fs.existsSync(photoPath)) return { path: photoPath, cleanup: false };
 
-  if (photoUrl && /^https?:\/\//i.test(String(photoUrl))) {
-    const res = await fetch(String(photoUrl));
-    if (!res.ok) return null;
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length < 32) return null;
-    const dest = path.join(os.tmpdir(), `bc-member-photo-${Date.now()}.jpg`);
-    fs.writeFileSync(dest, buf);
-    return { path: dest, cleanup: true };
-  }
-
   if (photoBase64) {
     const raw = String(photoBase64);
     const m = raw.match(/^data:(image\/[\w+.-]+);base64,(.+)$/i);
     const b64 = m ? m[2] : raw.replace(/^data:[^;]+;base64,/, '');
-    const ext = m && /png/i.test(m[1]) ? '.png' : m && /webp/i.test(m[1]) ? '.webp' : '.jpg';
+    const buf = Buffer.from(b64, 'base64');
+    const ext =
+      m && /png/i.test(m[1]) ? '.png' : m && /webp/i.test(m[1]) ? '.webp' : sniffImageExt(buf);
     const dest = path.join(os.tmpdir(), `bc-member-photo-${Date.now()}${ext}`);
-    fs.writeFileSync(dest, Buffer.from(b64, 'base64'));
+    fs.writeFileSync(dest, buf);
     return { path: dest, cleanup: true };
+  }
+
+  if (photoUrl && /^https?:\/\//i.test(String(photoUrl))) {
+    try {
+      const res = await fetch(String(photoUrl));
+      if (res.ok) {
+        const buf = Buffer.from(await res.arrayBuffer());
+        if (buf.length >= 32) {
+          const dest = path.join(os.tmpdir(), `bc-member-photo-${Date.now()}${sniffImageExt(buf)}`);
+          fs.writeFileSync(dest, buf);
+          return { path: dest, cleanup: true };
+        }
+      }
+    } catch {
+      /* URL injoignable depuis le bot (localhost, DNS) */
+    }
   }
 
   return null;
@@ -1259,7 +1688,7 @@ function fileToDataUrl(filePath) {
   const fs = require('fs');
   const path = require('path');
   const buf = fs.readFileSync(filePath);
-  const ext = path.extname(filePath).toLowerCase();
+  const ext = sniffImageExt(buf) || path.extname(filePath).toLowerCase();
   const mime =
     ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
   return `data:${mime};base64,${buf.toString('base64')}`;
@@ -1275,10 +1704,17 @@ async function getStaffAccessToken(page) {
 }
 
 /** Upscale / downscale via canvas navigateur (min 200px côté Deciplus). */
+function isJpegDataUrl(dataUrl) {
+  const raw = String(dataUrl || '');
+  const m = raw.match(/^data:image\/jpeg;base64,([A-Za-z0-9+/=\s]+)$/i);
+  if (!m) return false;
+  const buf = Buffer.from(m[1].replace(/\s/g, ''), 'base64');
+  return buf.length >= 32 && buf[0] === 0xff && buf[1] === 0xd8;
+}
+
 async function normalizePhotoDataUrl(page, dataUrl, { min = 200, max = 1000, quality = 0.9 } = {}) {
-  // Les photos caméra de la boutique sont déjà des JPEG 200–900 px.
-  // Évite page.evaluate pendant les redirections Deciplus qui détruisaient le contexte.
-  if (/^data:image\/jpeg;base64,/i.test(String(dataUrl || ''))) return dataUrl;
+  // JPEG déjà valide → ne pas passer par canvas (contexte détruit pendant les redirections).
+  if (isJpegDataUrl(dataUrl)) return dataUrl;
   return page.evaluate(
     async ({ src, minSize, maxSize, q }) => {
       const img = new Image();
@@ -1321,7 +1757,14 @@ async function uploadMemberPhotoViaApi(page, memberId, dataUrl) {
   if (!token) return { ok: false, reason: 'no_staff_token' };
   if (!memberId) return { ok: false, reason: 'no_member_id' };
 
-  const normalized = await normalizePhotoDataUrl(page, dataUrl);
+  let normalized = dataUrl;
+  try {
+    normalized = await normalizePhotoDataUrl(page, dataUrl);
+  } catch (err) {
+    if (!/^data:image\/jpeg;base64,/i.test(String(dataUrl || ''))) {
+      return { ok: false, reason: err.message || 'normalize_failed' };
+    }
+  }
   const url = `https://api.deciplus.pro/staff/v1/member/${memberId}/photo`;
   const res = await page.context().request.fetch(url, {
     method: 'PUT',
@@ -1340,46 +1783,110 @@ async function uploadMemberPhotoViaApi(page, memberId, dataUrl) {
     return { ok: false, reason: `api_${status}`, body: String(text).slice(0, 200) };
   }
 
-  // Vérifier que Deciplus a bien stocké la photo
-  let hasPhoto = false;
-  for (let attempt = 0; attempt < 5 && !hasPhoto; attempt += 1) {
-    const check = await page.context().request.get(
-      `https://api.deciplus.pro/staff/v1/member/${memberId}`,
-      {
-        headers: {
-          'x-access-token': token,
-          'Deciplus-Client-Type': 'manager',
-          Accept: 'application/json',
-        },
-      }
-    );
-    try {
-      const body = await check.json();
-      hasPhoto = Boolean(
-        body?.response?.photo ||
-          body?.photo ||
-          body?.member?.photo ||
-          body?.data?.photo ||
-          body?.picture ||
-          body?.avatar
-      );
-    } catch {
-      hasPhoto = false;
-    }
-    if (!hasPhoto) await page.waitForTimeout(500);
+  let storedBytes = 0;
+  for (let attempt = 0; attempt < 5 && storedBytes < MIN_STORED_PHOTO_BYTES; attempt += 1) {
+    storedBytes = await measureStoredMemberPhoto(page, memberId, token);
+    if (storedBytes < MIN_STORED_PHOTO_BYTES) await page.waitForTimeout(500);
   }
-  logInfo('Photo membre uploadée (API Deciplus)', {
-    member_id: memberId,
-    status,
-    verified: hasPhoto,
-  });
+  const ok = storedBytes >= MIN_STORED_PHOTO_BYTES;
+  if (ok) {
+    logInfo('Photo membre uploadée (API Deciplus)', {
+      member_id: memberId,
+      status,
+      verified: ok,
+      stored_bytes: storedBytes,
+    });
+  } else {
+    logWarn('Photo API Deciplus blanche ou trop légère', {
+      member_id: memberId,
+      status,
+      stored_bytes: storedBytes,
+    });
+  }
   return {
-    ok: hasPhoto,
+    ok,
     via: 'api',
     status,
-    verified: hasPhoto,
-    reason: hasPhoto ? null : 'api_photo_not_visible_after_upload',
+    verified: ok,
+    stored_bytes: storedBytes,
+    reason: ok ? null : 'api_photo_blank_or_missing',
   };
+}
+
+async function measureStoredMemberPhoto(page, memberId, token) {
+  const origin = new URL(process.env.DECIPLUS_URL || page.url() || 'https://boxingcenter.deciplus.pro/').origin;
+
+  const sizeIfReal = (buf) => {
+    if (!buf || buf.length < 12) return 0;
+    const jpeg = buf[0] === 0xff && buf[1] === 0xd8;
+    const png = buf[0] === 0x89 && buf[1] === 0x50;
+    if (!(jpeg || png)) return 0;
+    return buf.length >= MIN_STORED_PHOTO_BYTES ? buf.length : 0;
+  };
+
+  const fetchBuf = async (url, headers = { Accept: 'image/*,*/*' }) => {
+    const res = await page.context().request.get(url, { headers, timeout: 12000 });
+    if (!res.ok()) return null;
+    return Buffer.from(await res.body());
+  };
+
+  try {
+    const htmlBuf = await fetchBuf(`${origin}/get_photo.php?idj=${encodeURIComponent(memberId)}`);
+    if (htmlBuf) {
+      const direct = sizeIfReal(htmlBuf);
+      if (direct) return direct;
+      const html = htmlBuf.toString('utf8');
+      const src = (html.match(/src=['"]([^'"]+)['"]/i) || [])[1] || '';
+      if (src && !/charte\/photo_xy|photo_xy\.png|nophoto|placeholder/i.test(src)) {
+        const abs = /^https?:\/\//i.test(src) ? src : new URL(src, `${origin}/`).href;
+        const img = await fetchBuf(abs);
+        const n = sizeIfReal(img);
+        if (n) return n;
+      }
+    }
+  } catch {
+    /* essayer l’URL suivante */
+  }
+
+  const urls = [
+    `${origin}/photomembre.php?idj=${encodeURIComponent(memberId)}`,
+    `${origin}/photos/${memberId}.jpg`,
+    `https://api.deciplus.pro/staff/v1/member/${memberId}/photo`,
+  ];
+  for (const url of urls) {
+    try {
+      const headers = url.includes('api.deciplus.pro')
+        ? { 'x-access-token': token, 'Deciplus-Client-Type': 'manager', Accept: '*/*' }
+        : { Accept: 'image/*,*/*' };
+      const buf = await fetchBuf(url, headers);
+      const n = sizeIfReal(buf);
+      if (n) return n;
+    } catch {
+      /* essayer l’URL suivante */
+    }
+  }
+  try {
+    const check = await page.context().request.get(`https://api.deciplus.pro/staff/v1/member/${memberId}`, {
+      headers: { 'x-access-token': token, 'Deciplus-Client-Type': 'manager', Accept: 'application/json' },
+    });
+    const body = await check.json();
+    const photo =
+      body?.response?.photo || body?.photo || body?.member?.photo || body?.data?.photo || body?.picture || null;
+    if (typeof photo === 'string' && photo.startsWith('data:image')) {
+      const b64 = photo.replace(/^data:image\/[^;]+;base64,/, '');
+      const buf = Buffer.from(b64, 'base64');
+      const n = sizeIfReal(buf);
+      if (n) return n;
+    }
+    if (typeof photo === 'string' && /^https?:\/\//i.test(photo) && !/photo_xy/i.test(photo)) {
+      const buf = await fetchBuf(photo);
+      const n = sizeIfReal(buf);
+      if (n) return n;
+    }
+  } catch {
+    /* ignore */
+  }
+  return 0;
 }
 
 /** Repli legacy : Greybox photo_upload.php via bouton openUpload. */
@@ -1415,8 +1922,20 @@ async function uploadMemberPhotoViaLegacyUi(page, photoPath, memberId) {
           ).catch(() => false);
           if (!submitted) continue;
           await randomDelay(900, 1400);
-          logInfo('Photo membre envoyée (legacy photo_upload)', { member_id: memberId, url });
-          return { ok: true, via: 'legacy_ui', url };
+          const token = await getStaffAccessToken(page);
+          let storedBytes = 0;
+          for (let attempt = 0; attempt < 5 && storedBytes < MIN_STORED_PHOTO_BYTES; attempt += 1) {
+            storedBytes = await measureStoredMemberPhoto(page, memberId, token);
+            if (storedBytes < MIN_STORED_PHOTO_BYTES) await page.waitForTimeout(500);
+          }
+          const ok = storedBytes >= MIN_STORED_PHOTO_BYTES;
+          logInfo('Photo membre envoyée (legacy photo_upload)', {
+            member_id: memberId,
+            url,
+            verified: ok,
+            stored_bytes: storedBytes,
+          });
+          return { ok, via: 'legacy_ui', url, verified: ok, stored_bytes: storedBytes, reason: ok ? null : 'legacy_photo_blank_or_missing' };
         } catch {
           /* frame legacy remplacée pendant le chargement : essayer le contexte suivant */
         }
@@ -1482,27 +2001,138 @@ async function uploadMemberPhoto(page, photoPath, photoBase64 = null, memberId =
   }
 }
 
+async function downloadMemberPhoto(page, memberId) {
+  if (!memberId) return null;
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const token = await getStaffAccessToken(page);
+  const origin = new URL(process.env.DECIPLUS_URL || page.url() || 'https://boxingcenter.deciplus.pro/').origin;
+  const isReal = (buf) => {
+    if (!buf || buf.length < MIN_STORED_PHOTO_BYTES) return false;
+    const jpeg = buf[0] === 0xff && buf[1] === 0xd8;
+    const png = buf[0] === 0x89 && buf[1] === 0x50;
+    return jpeg || png;
+  };
+  const fetchBuf = async (url, headers = { Accept: 'image/*,*/*' }) => {
+    const res = await page.context().request.get(url, { headers, timeout: 12000 });
+    if (!res.ok()) return null;
+    return Buffer.from(await res.body());
+  };
+  const candidates = [
+    { url: `${origin}/photomembre.php?idj=${encodeURIComponent(memberId)}`, headers: { Accept: 'image/*,*/*' } },
+    { url: `${origin}/get_photo.php?idj=${encodeURIComponent(memberId)}`, headers: { Accept: 'image/*,*/*' } },
+    {
+      url: `https://api.deciplus.pro/staff/v1/member/${memberId}/photo`,
+      headers: token
+        ? { 'x-access-token': token, 'Deciplus-Client-Type': 'manager', Accept: '*/*' }
+        : { Accept: '*/*' },
+    },
+  ];
+  let buf = null;
+  for (const c of candidates) {
+    try {
+      const raw = await fetchBuf(c.url, c.headers);
+      if (isReal(raw)) {
+        buf = raw;
+        break;
+      }
+      if (raw && raw.length > 80) {
+        const html = raw.toString('utf8');
+        const src = (html.match(/src=['"]([^'"]+)['"]/i) || [])[1] || '';
+        if (src && !/charte\/photo_xy|photo_xy\.png|nophoto|placeholder/i.test(src)) {
+          const abs = /^https?:\/\//i.test(src) ? src : new URL(src, `${origin}/`).href;
+          const img = await fetchBuf(abs);
+          if (isReal(img)) {
+            buf = img;
+            break;
+          }
+        }
+      }
+    } catch {
+      /* essayer l’URL suivante */
+    }
+  }
+  if (!buf && token) {
+    try {
+      const check = await page.context().request.get(`https://api.deciplus.pro/staff/v1/member/${memberId}`, {
+        headers: { 'x-access-token': token, 'Deciplus-Client-Type': 'manager', Accept: 'application/json' },
+      });
+      const body = await check.json();
+      const photo =
+        body?.response?.photo || body?.photo || body?.member?.photo || body?.data?.photo || body?.picture || null;
+      if (typeof photo === 'string' && photo.startsWith('data:image')) {
+        const b64 = photo.replace(/^data:image\/[^;]+;base64,/, '');
+        const decoded = Buffer.from(b64, 'base64');
+        if (isReal(decoded)) buf = decoded;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  if (!buf) return null;
+  const ext = buf[0] === 0x89 ? '.png' : '.jpg';
+  const dest = path.join(os.tmpdir(), `bc-balma-photo-${memberId}-${Date.now()}${ext}`);
+  fs.writeFileSync(dest, buf);
+  const mime = ext === '.png' ? 'image/png' : 'image/jpeg';
+  return {
+    path: dest,
+    cleanup: true,
+    dataUrl: `data:${mime};base64,${buf.toString('base64')}`,
+  };
+}
+
 module.exports = {
   navigateToMembers,
   searchMember,
   searchMemberByName,
   findMemberByIdentity,
+  findAventureBalmaMember,
+  pickAventureBalmaMatch,
   computeIdentityMismatches,
   DEFAULT_MATCH_FIELDS,
   CHANGE_MATCH_FIELDS,
+  AVENTURE_MATCH_FIELDS,
   getMemberFormContext,
+  setMemberGymZone,
   openMemberEditForm,
   startNewMemberFromSelect,
   openNewMemberForm,
   fillMemberForm,
   submitMemberForm,
+  clickCreerQuandMeme,
+  detectHardDuplicatePage,
   findOrCreateMember,
+  findExistingMemberOnCurrentSite,
+  detectMemberGymConfig,
   extractMemberId,
+  resolveCreatedMemberId,
   extractMemberIdFromUrl,
   expandDeciplusUrl,
   detectDuplicateError,
   phoneForDeciplus,
   resetMemberSearchContext,
   uploadMemberPhoto,
+  downloadMemberPhoto,
   resolvePhotoFile,
+  isJpegDataUrl,
+  defaultSeancePhotoPath,
+  memberHasRealPhoto,
+  measureStoredMemberPhoto,
 };
+
+function defaultSeancePhotoPath() {
+  const fs = require('fs');
+  const path = require('path');
+  const candidates = [
+    path.join(__dirname, '..', 'assets', 'seance-essai-photo.jpg'),
+    path.join(process.cwd(), 'assets', 'seance-essai-photo.jpg'),
+  ];
+  return candidates.find((p) => fs.existsSync(p)) || null;
+}
+
+async function memberHasRealPhoto(page, memberId) {
+  const token = await getStaffAccessToken(page);
+  if (!token || !memberId) return false;
+  return (await measureStoredMemberPhoto(page, memberId, token)) >= MIN_STORED_PHOTO_BYTES;
+}

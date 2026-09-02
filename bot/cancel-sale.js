@@ -914,8 +914,8 @@ async function waitAppliquerEnabled(page, timeoutMs = 12000) {
   return false;
 }
 
-async function voidPendingSaleIfPossible(page, contract) {
-  if (!isPendingOrFutureContract(contract?.label)) return false;
+async function voidPendingSaleIfPossible(page, contract, { allowStarted = false } = {}) {
+  if (!allowStarted && !isPendingOrFutureContract(contract?.label)) return false;
   const mode = await clickActionTile(page, [/^Annuler la vente$/i]);
   if (!mode) {
     logWarn('Tuile Annuler la vente introuvable', { idc: contract?.idc || null });
@@ -977,9 +977,19 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
     return { cancelled: false, reason: 'action_panel_missing', idc: contract.idc };
   }
 
-  if (isPendingOrFutureContract(contract.label)) {
-    const voided = await voidPendingSaleIfPossible(page, contract);
-    if (voided) return { cancelled: true, reason: 'pending_voided', idc: contract.idc };
+  if (contract.isBadge || isPendingOrFutureContract(contract.label)) {
+    const voided = await voidPendingSaleIfPossible(page, contract, {
+      allowStarted: Boolean(contract.isBadge),
+    });
+    if (voided) {
+      return {
+        cancelled: true,
+        reason: contract.isBadge ? 'badge_voided' : 'pending_voided',
+        idc: contract.idc,
+      };
+    }
+    await openContractPage(page, contract).catch(() => {});
+    await waitActionPanel(page);
   }
 
   // IMPORTANT : Résilier — jamais « Annuler la vente » sur un abo déjà commencé
