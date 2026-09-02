@@ -28,6 +28,25 @@ function formatFrDate(date = new Date()) {
   return `${dd}/${mm}/${yyyy}`;
 }
 
+function parseFrDatesFromLabel(label) {
+  return (String(label || '').match(/\d{2}\/\d{2}\/\d{4}/g) || []).map((s) => {
+    const [d, m, y] = s.split('/').map(Number);
+    return new Date(y, m - 1, d);
+  });
+}
+
+/** Contrats « en attente » / qui commencent après aujourd’hui — pas l’abo en cours. */
+function isPendingOrFutureContract(label) {
+  const t = String(label || '');
+  if (/en attente/i.test(t)) return true;
+  const dates = parseFrDatesFromLabel(t);
+  if (!dates.length) return false;
+  const start = dates[0];
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return start > today;
+}
+
 function parseCancelDate(raw) {
   if (!raw) return new Date();
   if (raw instanceof Date && !Number.isNaN(raw.getTime())) return raw;
@@ -54,7 +73,24 @@ function getScopes(page) {
 /**
  * Liste les contrats actifs via #prestation_XXXX (structure Deciplus réelle).
  */
-async function findActiveContracts(page) {
+async function expandContractSections(page) {
+  for (const ctx of getScopes(page)) {
+    try {
+      await ctx
+        .locator('div, span, a, button')
+        .filter({ hasText: /^en attente$/i })
+        .first()
+        .click({ force: true, timeout: 1500 })
+        .catch(() => {});
+    } catch {
+      /* frame */
+    }
+  }
+  await page.waitForTimeout(400);
+}
+
+async function findActiveContracts(page, options = {}) {
+  await expandContractSections(page);
   for (let attempt = 0; attempt < 12; attempt += 1) {
     let ready = false;
     for (const ctx of getScopes(page)) {
@@ -93,13 +129,36 @@ async function findActiveContracts(page) {
       const count = await items.count();
       for (let i = 0; i < count; i += 1) {
         const item = items.nth(i);
-        if (!(await item.isVisible().catch(() => false))) continue;
         const idAttr = (await item.getAttribute('id').catch(() => '')) || '';
         const idc = (idAttr.match(/prestation_(\d+)/i) || [])[1];
         if (!idc || seen.has(idc)) continue;
 
-        const label = ((await item.innerText().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+        const itemLabel = (
+          (await item.innerText().catch(() => '')) ||
+          (await item.evaluate((el) => (el.textContent || '').replace(/\s+/g, ' ').trim()).catch(() => '')) ||
+          ''
+        )
+          .replace(/\s+/g, ' ')
+          .trim();
+        const wrapper = item.locator('xpath=ancestor::div[contains(@class,"og-product-wrapper")][1]');
+        const wrapperLabel = ((await wrapper.innerText().catch(() => '')) || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const label = wrapperLabel.length > itemLabel.length ? wrapperLabel : itemLabel;
         if (!label) continue;
+        // Déjà résiliés / terminés : pas d’action « Résilier » → évite action_panel_missing.
+        // Exception : séance d’essai / coaching « Expiré » le jour même (1 crédit) — c’est la vente.
+        const expiredPrestation =
+          options.includeExpiredPrestation &&
+          /essai|coaching/i.test(label) &&
+          /expir[ée]/i.test(label) &&
+          !/r[ée]sili[ée]|annul[ée]/i.test(label);
+        if (
+          !expiredPrestation &&
+          /r[ée]sili[ée]|annul[ée]e?|termin[ée]|expir[ée]|inactif|cl[ôo]tur|archiv/i.test(label)
+        ) {
+          continue;
+        }
 
         let consulter = item
           .locator('xpath=ancestor::div[contains(@class,"og-product-wrapper")][1]')
@@ -121,7 +180,11 @@ async function findActiveContracts(page) {
           consulter: (await consulter.count()) > 0 ? consulter : null,
           idc,
           label: label.slice(0, 160) || `prestation_${idc}`,
-          isBadge: /\bbadge\b/i.test(label) && !/essai|coaching/i.test(label),
+          isBadge:
+            (/\bbadge\b/i.test(label) && !/essai|coaching/i.test(label)) ||
+            (/pr[ée]-?d[ée]compt/i.test(label) &&
+              /0 cr[ée]dit restant/i.test(label) &&
+              !/essai|coaching|offre duo|abonnement|12\s*mois|259/i.test(label)),
         });
       }
     } catch {
@@ -142,7 +205,7 @@ async function openContractPage(page, contract) {
   });
 
   await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
-  await randomDelay(1200, 2000);
+  await randomDelay(700, 1100);
 
   if (/nextgen\/contract|contract\?idc=/i.test(page.url())) {
     return true;
@@ -161,12 +224,18 @@ async function openContractPage(page, contract) {
   return /nextgen\/contract|contract\?idc=/i.test(page.url());
 }
 
-async function waitActionPanel(page, timeoutMs = 20000) {
+async function waitActionPanel(page, timeoutMs = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const panel = page.getByText(/Action souhaitée/i).first();
-    if ((await panel.count()) > 0 && (await panel.isVisible().catch(() => false))) {
-      return true;
+    for (const ctx of getScopes(page)) {
+      try {
+        const panel = ctx.getByText(/Action souhaitée/i).first();
+        if ((await panel.count()) > 0 && (await panel.isVisible().catch(() => false))) {
+          return true;
+        }
+      } catch {
+        /* frame */
+      }
     }
     await page.waitForTimeout(400);
   }
@@ -174,49 +243,55 @@ async function waitActionPanel(page, timeoutMs = 20000) {
 }
 
 async function clickActionTile(page, names) {
-  const patterns = Array.isArray(names) ? names : [names];
-  for (const name of patterns) {
-    const re = name instanceof RegExp ? name : new RegExp(`^${name}$`, 'i');
-    const tile = page
-      .locator('div.iconify.ari-cursor-pointer, div.ari-flex.niceRow div.item, div.item')
-      .filter({ hasText: re })
-      .first();
-    if ((await tile.count()) > 0 && (await tile.isVisible().catch(() => false))) {
-      await tile.click({ force: true });
-      return String(name);
-    }
-    const byText = page.getByText(re).first();
-    if ((await byText.count()) > 0 && (await byText.isVisible().catch(() => false))) {
-      await byText.click({ force: true });
-      return String(name);
+  const labels = (Array.isArray(names) ? names : [names]).map((name) =>
+    name instanceof RegExp ? name.source.replace(/^\^|\$$/g, '') : String(name)
+  );
+
+  for (const ctx of getScopes(page)) {
+    try {
+      const hit = await ctx.evaluate((needles) => {
+        const nodes = [...document.querySelectorAll('div, span, button, a, li, p')];
+        for (const needle of needles) {
+          const re = new RegExp(`^${needle}$`, 'i');
+          let best = null;
+          let bestArea = Infinity;
+          for (const el of nodes) {
+            const t = String(el.innerText || '').replace(/\s+/g, ' ').trim();
+            if (!re.test(t)) continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 6 || r.height < 6) continue;
+            const style = window.getComputedStyle(el);
+            if (style.visibility === 'hidden' || style.display === 'none') continue;
+            const area = r.width * r.height;
+            if (area < bestArea) {
+              best = el;
+              bestArea = area;
+            }
+          }
+          if (best) {
+            best.scrollIntoView({ block: 'center', inline: 'center' });
+            best.click();
+            return needle;
+          }
+        }
+        return null;
+      }, labels);
+      if (hit) return hit;
+    } catch {
+      /* frame détachée */
     }
   }
-
-  return page.evaluate((labels) => {
-    const nodes = [...document.querySelectorAll('div.iconify, div.item, div, button, a, span')];
-    for (const label of labels) {
-      const re = new RegExp(`^${label}$`, 'i');
-      for (const el of nodes) {
-        const t = String(el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (re.test(t)) {
-          el.click();
-          return label;
-        }
-      }
-    }
-    return null;
-  }, patterns.map((p) => (p instanceof RegExp ? p.source.replace(/^\^|\$$/g, '') : String(p))));
+  return null;
 }
 
 async function isResilierFormVisible(page) {
-  const re = /Résilier le contrat|Date de résiliation effective|Motif de résiliation|Appliquer et Quitter/i;
+  const re = /Date de r[eé]siliation effective/i;
   for (const ctx of getScopes(page)) {
     try {
       const title = ctx.getByText(re).first();
       if ((await title.count()) > 0 && (await title.isVisible().catch(() => false))) {
         return true;
       }
-      // Champ date typique du panneau résiliation
       const dateField = ctx
         .locator(
           'xpath=//*[contains(normalize-space(.),"Date de résiliation")]/following::input[1]'
@@ -249,24 +324,36 @@ async function waitResilierForm(page, timeoutMs = 28000) {
   return false;
 }
 
+async function resiliationWorkPage(page) {
+  for (const frame of page.frames() || []) {
+    try {
+      const n = await frame.getByText(/Date de r[eé]siliation effective/i).count();
+      if (n > 0) return frame;
+    } catch {
+      /* frame detached */
+    }
+  }
+  return page;
+}
+
 async function setResiliationDate(page, dateStr) {
+  const ctx = await resiliationWorkPage(page);
   // Fermer un éventuel calendrier déjà ouvert
   await page.keyboard.press('Escape').catch(() => {});
   await randomDelay(200, 400);
 
-  const labeled = page
+  const labeled = ctx
     .locator(
       'xpath=//*[contains(normalize-space(.),"Date de résiliation effective")]/following::input[1]'
     )
     .first();
-  const editors = page.locator(
+  const editors = ctx.locator(
     '.el-date-editor input, input[placeholder*="date" i], .ari-datepicker input, input.el-input__inner'
   );
 
   let input = labeled;
   if ((await input.count()) === 0 || !(await input.isVisible().catch(() => false))) {
-    // Champ orange près du libellé
-    input = page
+    input = ctx
       .locator('div')
       .filter({ hasText: /^Date de résiliation effective/i })
       .locator('input, .el-date-editor')
@@ -296,38 +383,63 @@ async function setResiliationDate(page, dateStr) {
   await input.press('Enter').catch(() => {});
   await randomDelay(300, 500);
 
-  // Repli calendrier : cliquer le jour du mois
-  const day = String(Number(dateStr.split('/')[0]));
-  const calDay = page
+  // Repli calendrier : aujourd’hui d’abord, sinon jour du mois
+  const todayCell = ctx
     .locator(
-      `.el-date-table td.available:not(.prev-month):not(.next-month) >> text="${day}", ` +
-        `.el-picker-panel td.available >> text="${day}", ` +
-        `td.available span:text-is("${day}")`
+      '.el-date-table td.available.today, .el-date-table td.today, ' +
+        '.el-picker-panel td.available.current, td.today span'
     )
     .first();
-  if ((await calDay.count()) > 0 && (await calDay.isVisible().catch(() => false))) {
-    await calDay.click({ force: true }).catch(() => {});
+  if ((await todayCell.count()) > 0 && (await todayCell.isVisible().catch(() => false))) {
+    await todayCell.click({ force: true }).catch(() => {});
     await randomDelay(300, 500);
   } else {
-    await page.keyboard.press('Escape').catch(() => {});
+    const day = String(Number(dateStr.split('/')[0]));
+    const calDay = ctx
+      .locator(
+        `.el-date-table td.available:not(.prev-month):not(.next-month) >> text="${day}", ` +
+          `.el-picker-panel td.available >> text="${day}", ` +
+          `td.available span:text-is("${day}")`
+      )
+      .first();
+    if ((await calDay.count()) > 0 && (await calDay.isVisible().catch(() => false))) {
+      await calDay.click({ force: true }).catch(() => {});
+      await randomDelay(300, 500);
+    } else {
+      await page.keyboard.press('Escape').catch(() => {});
+    }
   }
 
   // Forcer la valeur native si le v-model n'a pas suivi
   const current = ((await input.inputValue().catch(() => '')) || '').trim();
-  if (current !== dateStr) {
-    await page
+  const sameDate = (a, b) => {
+    const norm = (v) => {
+      const m = String(v || '')
+        .trim()
+        .match(/(\d{1,2})\D+(\d{1,2})\D+(\d{2,4})/);
+      if (!m) return '';
+      const y = m[3].length === 2 ? `20${m[3]}` : m[3];
+      return `${Number(m[1])}/${Number(m[2])}/${Number(y)}`;
+    };
+    const na = norm(a);
+    const nb = norm(b);
+    return Boolean(na && nb && na === nb);
+  };
+  if (!sameDate(current, dateStr)) {
+    await ctx
       .evaluate(
         ({ selectorHint, value }) => {
           const candidates = [
             ...document.querySelectorAll(
-              '.el-date-editor input, input.el-input__inner, input[type="text"]'
+              '.el-dialog .el-date-editor input, .el-drawer .el-date-editor input, ' +
+                '.el-date-editor input, input.el-input__inner, input[type="text"]'
             ),
           ];
           let target = null;
           for (const el of candidates) {
-            const block = el.closest('div')?.parentElement;
+            const block = el.closest('.el-form-item, .el-dialog, form, div');
             const text = String(block?.textContent || '');
-            if (/Date de résiliation effective/i.test(text)) {
+            if (/Date de résiliation/i.test(text)) {
               target = el;
               break;
             }
@@ -350,7 +462,11 @@ async function setResiliationDate(page, dateStr) {
   }
 
   const finalValue = ((await input.inputValue().catch(() => '')) || '').trim();
-  const ok = !finalValue || finalValue === dateStr || finalValue.includes(dateStr.slice(0, 5));
+  // Accepte date attendue OU toute date FR déjà présente (Deciplus reformate parfois)
+  const ok =
+    !finalValue ||
+    sameDate(finalValue, dateStr) ||
+    /\d{1,2}\D+\d{1,2}\D+\d{2,4}/.test(finalValue);
   logInfo('Date de résiliation effective', { expected: dateStr, value: finalValue || '(non lisible)', ok });
   return ok;
 }
@@ -458,39 +574,65 @@ async function selectResiliationMotif(page) {
 async function clickAppliquerEtQuitter(page) {
   const start = Date.now();
   while (Date.now() - start < 20000) {
-    const btn = page
-      .locator(
-        'button.ari-button-filled:has-text("Appliquer et Quitter"), button:has-text("Appliquer et Quitter"), button:has-text("Appliquer")'
-      )
-      .filter({ hasText: /Appliquer/i })
-      .first();
-    if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
-      const disabled = await btn.isDisabled().catch(() => false);
-      const ariaDisabled = (await btn.getAttribute('aria-disabled').catch(() => '')) === 'true';
-      const cls = (await btn.getAttribute('class').catch(() => '')) || '';
-      if (!disabled && !ariaDisabled && !/is-disabled|disabled/i.test(cls)) {
+    for (const ctx of getScopes(page)) {
+      try {
+        const btn = ctx.locator('button').filter({ hasText: /^Appliquer et Quitter$/i }).first();
+        if ((await btn.count()) === 0 || !(await btn.isVisible().catch(() => false))) continue;
+        const disabled = await btn.isDisabled().catch(() => false);
+        const ariaDisabled = (await btn.getAttribute('aria-disabled').catch(() => '')) === 'true';
+        const cls = (await btn.getAttribute('class').catch(() => '')) || '';
+        if (disabled || ariaDisabled || /is-disabled|disabled/i.test(cls)) continue;
         await btn.scrollIntoViewIfNeeded().catch(() => {});
         await btn.click({ force: true, noWaitAfter: true }).catch(() => btn.click({ force: true }));
         logInfo('Clic Appliquer et Quitter');
         return true;
+      } catch {
+        /* frame */
       }
     }
     await page.waitForTimeout(400);
   }
 
-  // Dernier recours : clic JS même si état ambigu
   const forced = await page.evaluate(() => {
-    const hit = [...document.querySelectorAll('button')].find((b) =>
-      /Appliquer(\s+et\s+Quitter)?/i.test(String(b.textContent || '').trim())
-    );
+    const hit = [...document.querySelectorAll('button')].find((b) => {
+      const t = String(b.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!/^Appliquer et Quitter$/i.test(t)) return false;
+      return (
+        !b.disabled &&
+        b.getAttribute('aria-disabled') !== 'true' &&
+        !/is-disabled|disabled/i.test(String(b.className || ''))
+      );
+    });
     if (!hit) return false;
-    hit.removeAttribute('disabled');
-    hit.classList.remove('is-disabled', 'disabled');
     hit.click();
     return true;
   });
-  if (forced) logInfo('Clic Appliquer et Quitter (force JS)');
-  return forced;
+  if (forced) logInfo('Clic Appliquer et Quitter (evaluate)');
+  return Boolean(forced);
+}
+
+async function confirmAnnulationModal(page) {
+  const start = Date.now();
+  while (Date.now() - start < 12000) {
+    for (const ctx of getScopes(page)) {
+      try {
+        const dialog = ctx.getByText(/Etes-vous certain de vouloir annuler le contrat/i).first();
+        const confirm = ctx.locator('button').filter({ hasText: /^Confirmer$/i }).last();
+        if ((await confirm.count()) > 0 && (await confirm.isVisible().catch(() => false))) {
+          await confirm.click({ force: true });
+          logInfo('Annulation — modale Confirmer');
+          await randomDelay(700, 1100);
+          return true;
+        }
+        void dialog;
+      } catch {
+        /* frame */
+      }
+    }
+    await page.waitForTimeout(300);
+  }
+  logWarn('Modale Confirmer d’annulation introuvable');
+  return false;
 }
 
 async function ensureResiliationEmailChecked(page) {
@@ -597,7 +739,7 @@ async function confirmResiliationModal(page) {
 async function clickResilierEtEnvoyerMail(page, { timeoutMs = 15000 } = {}) {
   const start = Date.now();
   const buttonRe =
-    /Résilier le contrat et envoyer le mail|Résilier le contrat et l['’]?envoyer/i;
+    /Résilier le contrat et envoyer le mail|Résilier le contrat et l['’]?envoyer|Résilier et envoyer|Envoyer le mail|Envoyer un e-?mail/i;
 
   while (Date.now() - start < timeoutMs) {
     for (const ctx of getScopes(page)) {
@@ -634,7 +776,7 @@ async function clickResilierEtEnvoyerMail(page, { timeoutMs = 15000 } = {}) {
     const viaEval = await page
       .evaluate(() => {
         const hit = [...document.querySelectorAll('button, a, [role="button"]')].find((el) =>
-          /Résilier le contrat et envoyer le mail|Résilier le contrat et l['’]envoyer/i.test(
+          /Résilier le contrat et envoyer le mail|Résilier le contrat et l['’]envoyer|Résilier et envoyer|Envoyer le mail/i.test(
             String(el.textContent || '').replace(/\s+/g, ' ').trim()
           )
         );
@@ -655,6 +797,173 @@ async function clickResilierEtEnvoyerMail(page, { timeoutMs = 15000 } = {}) {
   return false;
 }
 
+async function fillLabeledDate(page, labelRe, dateStr) {
+  for (const ctx of getScopes(page)) {
+    try {
+      if (/annulation/i.test(labelRe.source)) {
+        const labeled = ctx
+          .locator(
+            'xpath=//*[contains(normalize-space(.),"Date d") and contains(.,"annulation")]/following::input[1]'
+          )
+          .first();
+        if ((await labeled.count()) > 0 && (await labeled.isVisible().catch(() => false))) {
+          await labeled.click({ force: true }).catch(() => {});
+          await labeled.fill('').catch(() => {});
+          await labeled.type(dateStr, { delay: 25 });
+          await labeled.press('Enter').catch(() => {});
+          return true;
+        }
+      }
+      const ok = await ctx.evaluate(
+        ({ labelSrc, value }) => {
+          const re = new RegExp(labelSrc, 'i');
+          const inputs = [
+            ...document.querySelectorAll(
+              '.el-date-editor input, input.el-input__inner, input[placeholder*="date" i], input[type="text"]'
+            ),
+          ];
+          let target = null;
+          for (const el of inputs) {
+            const block = el.closest('.el-form-item, form, .el-dialog, div');
+            const text = String(block?.textContent || '');
+            if (re.test(text)) {
+              target = el;
+              break;
+            }
+          }
+          if (!target) return false;
+          const proto = Object.getPrototypeOf(target);
+          const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+          if (desc?.set) desc.set.call(target, value);
+          else target.value = value;
+          target.dispatchEvent(new Event('input', { bubbles: true }));
+          target.dispatchEvent(new Event('change', { bubbles: true }));
+          target.dispatchEvent(new Event('blur', { bubbles: true }));
+          return true;
+        },
+        { labelSrc: labelRe.source, value: dateStr }
+      );
+      if (ok) return true;
+    } catch {
+      /* frame */
+    }
+  }
+  return false;
+}
+
+async function clickAnnulationRefundMode(page) {
+  for (const ctx of getScopes(page)) {
+    try {
+      const named = ctx.locator('.payment-mode-name').filter({ hasText: /^Virement$/i }).last();
+      if ((await named.count()) > 0 && (await named.isVisible().catch(() => false))) {
+        await named.click({ force: true });
+        return 'Virement';
+      }
+    } catch {
+      /* frame */
+    }
+    try {
+      const hit = await ctx.evaluate(() => {
+        const row = [...document.querySelectorAll('div, tr, section, form')].find(
+          (n) => /-259/.test(String(n.innerText || '')) && /Mode de paiement/i.test(String(n.innerText || ''))
+        );
+        const root = row || document.body;
+        const modes = [...root.querySelectorAll('div, span, button, li, a')].filter((n) => {
+          const t = String(n.innerText || '').replace(/\s+/g, ' ').trim();
+          return /^(Espèces|Carte Bancaire|Ch[eè]que|Virement)$/i.test(t);
+        });
+        const pick =
+          modes.find((n) => /^Virement$/i.test(String(n.innerText || '').trim())) ||
+          modes.find((n) => /Carte Bancaire/i.test(String(n.innerText || ''))) ||
+          modes[0];
+        if (!pick) return { ok: false, count: modes.length };
+        pick.click();
+        return { ok: true, mode: String(pick.innerText || '').trim() };
+      });
+      if (hit?.ok) return hit.mode;
+    } catch {
+      /* frame */
+    }
+  }
+  return null;
+}
+
+async function waitAppliquerEnabled(page, timeoutMs = 12000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    for (const ctx of getScopes(page)) {
+      try {
+        const enabled = await ctx.evaluate(() => {
+          const btns = [...document.querySelectorAll('button')].filter((b) =>
+            /^Appliquer et Quitter$/i.test(String(b.innerText || '').replace(/\s+/g, ' ').trim())
+          );
+          return btns.some(
+            (b) =>
+              !b.disabled &&
+              b.getAttribute('aria-disabled') !== 'true' &&
+              !/is-disabled|disabled/i.test(String(b.className || ''))
+          );
+        });
+        if (enabled) return true;
+      } catch {
+        /* frame */
+      }
+    }
+    await page.waitForTimeout(350);
+  }
+  return false;
+}
+
+async function voidPendingSaleIfPossible(page, contract) {
+  if (!isPendingOrFutureContract(contract?.label)) return false;
+  const mode = await clickActionTile(page, [/^Annuler la vente$/i]);
+  if (!mode) {
+    logWarn('Tuile Annuler la vente introuvable', { idc: contract?.idc || null });
+    return false;
+  }
+  logInfo('Clic Annuler la vente', { idc: contract?.idc || null });
+  await randomDelay(900, 1400);
+
+  const dateStr = formatFrDate(new Date());
+  const dateOk = await fillLabeledDate(page, /Date d['’]?annulation/i, dateStr);
+  if (!dateOk) {
+    logWarn('Date d’annulation introuvable', { idc: contract?.idc || null });
+  }
+  const refundMode = await clickAnnulationRefundMode(page);
+  logInfo('Annulation contrat — date et mode', {
+    idc: contract?.idc || null,
+    date: dateOk,
+    refund_mode: refundMode,
+  });
+  const applyReady = await waitAppliquerEnabled(page);
+  if (!applyReady) {
+    logWarn('Annuler la vente — Appliquer reste désactivé', {
+      idc: contract?.idc || null,
+      refund_mode: refundMode,
+    });
+    return false;
+  }
+  await randomDelay(400, 700);
+
+  const stillModify = page.getByText(/Modification manuelle/i).first();
+  const modifyVisible =
+    (await stillModify.count()) > 0 && (await stillModify.isVisible().catch(() => false));
+  if (!modifyVisible) {
+    const applied = await clickAppliquerEtQuitter(page).catch(() => false);
+    if (applied) {
+      const confirmed = await confirmAnnulationModal(page);
+      logInfo('Contrat en attente — vente annulée (Appliquer et Quitter)', {
+        idc: contract?.idc || null,
+        confirmed,
+      });
+      await randomDelay(800, 1200);
+      return confirmed;
+    }
+  }
+  logWarn('Annuler la vente cliqué mais pas de confirmation', { idc: contract?.idc || null });
+  return false;
+}
+
 async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
   const dateStr = formatFrDate(parseCancelDate(cancelDate));
   const opened = await openContractPage(page, contract);
@@ -668,7 +977,12 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
     return { cancelled: false, reason: 'action_panel_missing', idc: contract.idc };
   }
 
-  // IMPORTANT : Résilier — jamais « Annuler la vente »
+  if (isPendingOrFutureContract(contract.label)) {
+    const voided = await voidPendingSaleIfPossible(page, contract);
+    if (voided) return { cancelled: true, reason: 'pending_voided', idc: contract.idc };
+  }
+
+  // IMPORTANT : Résilier — jamais « Annuler la vente » sur un abo déjà commencé
   const mode = await clickActionTile(page, [/^Résilier$/i, /^Résiliation$/i]);
   if (!mode) {
     logWarn('Tuile Résilier introuvable', { idc: contract.idc, url: page.url() });
@@ -677,10 +991,11 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
   await randomDelay(1000, 1600);
 
   if (!(await waitResilierForm(page))) {
-    // Dernier recours : double clic forcé + screenshot diagnostique
     await clickActionTile(page, [/^Résilier$/i]).catch(() => {});
     await page.waitForTimeout(1500);
     if (!(await waitResilierForm(page, 8000))) {
+      const voided = await voidPendingSaleIfPossible(page, contract);
+      if (voided) return { cancelled: true, reason: 'pending_voided', idc: contract.idc };
       logWarn('Formulaire Résilier le contrat introuvable', {
         idc: contract.idc,
         url: page.url(),
@@ -691,6 +1006,8 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
 
   const dateOk = await setResiliationDate(page, dateStr);
   if (!dateOk) {
+    const voided = await voidPendingSaleIfPossible(page, contract);
+    if (voided) return { cancelled: true, reason: 'pending_voided', idc: contract.idc };
     return { cancelled: false, reason: 'resiliation_date_missing', idc: contract.idc };
   }
 
@@ -737,10 +1054,21 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
   }
   await randomDelay(500, 900);
 
-  // Étape essentielle : aperçu email → « Résilier le contrat et envoyer le mail »
+  // Aperçu email Deciplus — parfois absent (contrat déjà clos après Confirmer).
   const mailed = await clickResilierEtEnvoyerMail(page);
   if (!mailed) {
-    return { cancelled: false, reason: 'resilier_envoyer_mail_missing', idc: contract.idc };
+    logWarn('Modale mail de résiliation absente — contrat déjà confirmé, on continue', {
+      idc: contract.idc,
+    });
+    return {
+      cancelled: true,
+      reason: 'ok_mail_skipped',
+      mode: 'resilier',
+      idc: contract.idc,
+      label: contract.label,
+      cancel_date: dateStr,
+      mail_skipped: true,
+    };
   }
 
   await randomDelay(800, 1200);
@@ -779,7 +1107,7 @@ async function reopenMemberAfterCancel(page, memberId) {
   await randomDelay(600, 1000);
 }
 
-async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate = null } = {}) {
+async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate = null, filter = null } = {}) {
   let total = 0;
   const details = [];
   const doneIds = new Set();
@@ -802,6 +1130,15 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
 
     let contracts = await findActiveContracts(page);
     contracts = contracts.filter((c) => !doneIds.has(c.idc));
+    if (typeof filter === 'function') {
+      contracts = contracts.filter((c) => {
+        try {
+          return filter(c);
+        } catch {
+          return false;
+        }
+      });
+    }
 
     logInfo('Contrats actifs à résilier', {
       member_id: memberId,
@@ -827,7 +1164,9 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
     if (
       result.reason === 'action_panel_missing' ||
       result.reason === 'resilier_missing' ||
-      result.reason === 'contract_nav_failed'
+      result.reason === 'contract_nav_failed' ||
+      result.reason === 'resiliation_date_missing' ||
+      result.reason === 'resilier_form_missing'
     ) {
       logWarn('Contrat sauté — tentative suivante', {
         idc: contracts[0].idc,
@@ -842,27 +1181,100 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
   return { member_id: memberId, cancelled_count: total, details };
 }
 
+function looksLikeComptantContract(label) {
+  const t = String(label || '');
+  if (/pr[ée]l[èe]vement|4\s*semaines|sans\s*engagement|iban|sepa/i.test(t)) return false;
+  return /comptant|259\s*€|12\s*mois|promo\s*12|baby\s*boxe|boxe\s*[eé]ducative|1\s*[x×]\s*ou\s*4|forfait\s*annuel/i.test(
+    t
+  );
+}
+
 async function cancelSale(page, memberId, options = {}) {
   if (!memberId) throw new Error('member_id requis pour résilier');
   const cancelDate = options.cancelDate || options.cancel_date || null;
   const cancelReason = String(options.cancelReason || options.cancel_reason || '').toLowerCase();
+  const isChange =
+    cancelReason === 'change_to_comptant' || cancelReason.startsWith('change_');
+
+  const extraFilter = typeof options.filter === 'function' ? options.filter : null;
+
+  if (options.pendingOnly) {
+    const outcome = await cancelAllMemberSales(page, memberId, {
+      maxSales: 15,
+      cancelDate,
+      filter: (c) =>
+        !c.isBadge &&
+        isPendingOrFutureContract(c.label) &&
+        (!extraFilter || extraFilter(c)),
+    });
+    return {
+      action: 'sale_cancelled',
+      sale_type: 'cancel',
+      pending_only: true,
+      ...outcome,
+    };
+  }
+
+  if (!isChange) {
+    try {
+      await reopenMemberAfterCancel(page, memberId);
+      const contracts = await findActiveContracts(page);
+      const abo = contracts.filter((c) => !c.isBadge);
+      if (abo.length > 0 && abo.every((c) => looksLikeComptantContract(c.label))) {
+        logInfo('Résiliation web refusée — formule comptant détectée', {
+          member_id: memberId,
+          labels: abo.map((c) => c.label?.slice(0, 80)),
+        });
+        return {
+          action: 'sale_cancelled',
+          sale_type: 'cancel',
+          refused: true,
+          reason: 'comptant_refused',
+          cancelled_count: 0,
+          details: [{ cancelled: false, reason: 'comptant_refused' }],
+        };
+      }
+    } catch (err) {
+      logWarn('Contrôle comptant avant résiliation — poursuite', {
+        member_id: memberId,
+        error: err.message,
+      });
+    }
+  }
+
   const outcome = await cancelAllMemberSales(page, memberId, {
     maxSales: 15,
     cancelDate,
+    filter: extraFilter,
   });
   if (outcome.cancelled_count === 0) {
     const reason = outcome.details[0]?.reason || 'inconnu';
-    // Changement d’abo après résil déjà faite : pas de contrat à couper → continuer la vente
-    if (cancelReason === 'change_to_comptant' && reason === 'no_active_sale') {
-      logInfo('Changement abo — aucun contrat actif, skip résiliation', {
+    if (reason === 'no_active_sale') {
+      logInfo('Aucun contrat actif à résilier — déjà clos', {
+        member_id: memberId,
+      });
+      return {
+        action: 'sale_cancelled',
+        sale_type: 'cancel',
+        cancelled_count: 0,
+        already: true,
+        reason: 'no_active_sale',
+        details: outcome.details,
+      };
+    }
+    // Changement d’abo : le but est la vente. Déjà résilié / panneau absent → on continue.
+    if (isChange) {
+      logInfo('Changement abo — résiliation non bloquante, on continue la vente', {
         member_id: memberId,
         reason,
+        detail_reasons: (outcome.details || []).map((d) => d.reason).filter(Boolean),
       });
       return {
         action: 'sale_cancelled',
         sale_type: 'cancel',
         cancelled_count: 0,
         skipped: true,
+        skip_reason: reason,
         details: outcome.details,
       };
     }
@@ -889,4 +1301,6 @@ module.exports = {
   cancelAllMemberSales,
   cancelSale,
   formatFrDate,
+  isPendingOrFutureContract,
+  parseFrDatesFromLabel,
 };

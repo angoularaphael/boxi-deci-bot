@@ -64,9 +64,25 @@ async function clickFirst(ctx, selectors, opts = {}) {
   for (const s of list) {
     const el = ctx.locator(s).first();
     if ((await el.count()) > 0 && (await el.isVisible().catch(() => false))) {
-      await el.click({ ...opts, timeout: 15000 });
-      await randomDelay();
-      return true;
+      const clickOpts = { timeout: 15000, ...opts };
+      try {
+        await el.click(clickOpts);
+        await randomDelay();
+        return true;
+      } catch (err) {
+        if (clickOpts.force) {
+          logWarn('Clic Deciplus échoué', { selector: s.slice(0, 80), error: err.message });
+          continue;
+        }
+        const forced = await el
+          .click({ ...clickOpts, force: true, timeout: 8000 })
+          .then(() => true)
+          .catch(() => false);
+        if (forced) {
+          await randomDelay();
+          return true;
+        }
+      }
     }
   }
   return false;
@@ -165,11 +181,12 @@ async function openMemberDetail(page, memberId) {
   throw lastErr || new Error(`openMemberDetail failed for ${memberId}`);
 }
 
-async function openMemberCheck(page, memberId) {
+async function openMemberCheck(page, memberId, gymConfig = {}) {
   const base = process.env.DECIPLUS_URL || 'https://boxingcenter.deciplus.pro/';
   const urls = memberCheckUrls(memberId);
   const timeout = Math.min(navTimeoutMs(), 60000);
   let lastErr = null;
+  const { isChooseZoneScreen, ensureDeciplusSaleZone } = require('./deciplus-zone');
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const target = urls[attempt % urls.length];
@@ -180,11 +197,18 @@ async function openMemberCheck(page, memberId) {
       });
       await page.waitForLoadState('domcontentloaded', { timeout: 15000 }).catch(() => {});
       await randomDelay();
+      if (await isChooseZoneScreen(page) || /choose-zone/i.test(page.url())) {
+        await ensureDeciplusSaleZone(page, gymConfig);
+        continue;
+      }
       // Fiche membre : bouton Achat Abonnement / iframe nextgen
       const readyDeadline = Date.now() + 12000;
       while (Date.now() < readyDeadline) {
         if (/login\.php/i.test(page.url())) {
           throw new Error(`Session Deciplus expirée (login.php) — check.php idj=${memberId}`);
+        }
+        if (await isChooseZoneScreen(page) || /choose-zone/i.test(page.url())) {
+          break;
         }
         for (const ctx of [page, ...page.frames()]) {
           try {
@@ -201,11 +225,14 @@ async function openMemberCheck(page, memberId) {
             /* frame détachée */
           }
         }
-        if (/check\.php|idj=/i.test(page.url())) {
-          // Page chargée même si boutons lents — OK pour continuer
+        if (/check\.php|\/legacy/i.test(page.url()) && !/choose-zone/i.test(page.url())) {
           return;
         }
         await page.waitForTimeout(400);
+      }
+      if (await isChooseZoneScreen(page) || /choose-zone/i.test(page.url())) {
+        await ensureDeciplusSaleZone(page, gymConfig);
+        continue;
       }
       return;
     } catch (err) {
@@ -795,6 +822,7 @@ module.exports = {
   openRibForm,
   getRibFrame,
   ribAddressFields,
+  ensureMemberPostalAddress,
   clickFirst,
   fillFirst,
   sel,

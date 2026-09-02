@@ -26,7 +26,8 @@ const {
   syncLoadedStorageMtime,
   hasActiveBrowser,
 } = require('./browser-pool');
-const { findOrCreateMember, resetMemberSearchContext, uploadMemberPhoto, findMemberByIdentity } = require('./member');
+const { findOrCreateMember, detectMemberGymConfig, resetMemberSearchContext, uploadMemberPhoto, findMemberByIdentity, defaultSeancePhotoPath } = require('./member');
+const { createGymConfig, isEtatsUnisDeciplusSite } = require('../lib/deciplus-sites');
 const { recordSale } = require('./sale');
 const { setMemberIban, openMemberCheck } = require('./wallet');
 const { isValidFrenchIban } = require('../lib/iban');
@@ -94,7 +95,7 @@ async function maybePushCatalog() {
 
 async function processCancelJob(page, order) {
   const { cancelSale } = require('./cancel-sale');
-  const { findMemberByIdentity, searchMember } = require('./member');
+  const { searchMember } = require('./member');
 
   const identity = {
     first_name: order.customer?.first_name || order.first_name,
@@ -158,7 +159,7 @@ async function processCancelJob(page, order) {
       <p>Nous avons bien reçu votre demande de résiliation, mais <strong>les informations renseignées ne correspondent pas</strong> à celles enregistrées sur votre fiche adhérent Boxing Center.</p>
       <p>Pour des raisons de sécurité, une seule information incorrecte (nom, prénom, téléphone ou date de naissance) empêche le traitement automatique.</p>
       ${fields.length ? `<p>Champ(s) en cause : <strong>${fields.join(', ')}</strong>.</p>` : ''}
-      <p>Merci de vérifier vos informations puis de renouveler la demande depuis <a href="https://box-plus.vercel.app/gerer-abonnement">Gérer mon abonnement</a>.</p>
+      <p>Merci de vérifier vos informations puis de renouveler la demande depuis <a href="https://boutique.boxingcenter.fr/gerer-abonnement">Gérer mon abonnement</a>.</p>
       <p>Sportivement,<br/>Boxing Center</p>`;
     try {
       const res = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -199,13 +200,19 @@ async function processCancelJob(page, order) {
   let memberId = order.deciplus_member_id || null;
   if (!memberId && (identity.first_name || identity.last_name)) {
     const { CHANGE_MATCH_FIELDS } = require('./member');
+    const { findMemberOnBoxingCenterGyms } = require('./search-bc-gyms');
+    const { isBalmaGymSlug } = require('../lib/gym-slugs');
     const cancelReason = String(order.cancel_reason || '').toLowerCase();
     // Changement d’abo : même règle que verify_identity (nom/prénom/naissance, pas téléphone)
     const matchFields =
       cancelReason === 'change_to_comptant' || cancelReason.startsWith('change_')
         ? CHANGE_MATCH_FIELDS
         : undefined;
-    const match = await findMemberByIdentity(page, identity, { matchFields });
+    const match = await findMemberOnBoxingCenterGyms(page, identity, {
+      matchFields,
+      preferredGym: isBalmaGymSlug(order.gym) ? 'balma' : order.gym,
+      includeBalma: isBalmaGymSlug(order.gym),
+    });
     if (!match.found) {
       await notifyMismatch(match.reason || 'identity_mismatch', match.mismatch_fields || []);
       return {
@@ -309,19 +316,43 @@ async function processSaleJob(page, order, jobMeta = {}) {
       error: 'Salle (gym) manquante sur la commande',
     };
   }
-  const gymConfig = getGymConfig(order.gym);
+  let gymConfig = getGymConfig(order.gym);
+  const { isBalmaSaleTarget, BALMA_SALE_ERROR } = require('../lib/gym-slugs');
+  if (isBalmaSaleTarget(gymConfig, order)) {
+    return {
+      status: STATUS.MANUAL_REVIEW,
+      error: BALMA_SALE_ERROR,
+    };
+  }
 
   if (isCartePrestationConfig(productConfig)) {
     productConfig.auto_badge = false;
+  } else {
+    const { isOffre29Product } = require('../lib/sale-contract-match');
+    if (isOffre29Product(productConfig) || isOffre29Product(order)) {
+      productConfig.auto_badge = true;
+    }
   }
 
   let badgeProductConfig = null;
   if (productConfig.auto_badge && !isCartePrestationConfig(productConfig)) {
     try {
-      badgeProductConfig = resolveBadgeProductConfig(catalog, {
-        badge_timing: 'deferred',
-        badge_method: 'iban',
+      const { shouldGiftBadgeComptant } = require('../lib/balma');
+      const giftBadge = shouldGiftBadgeComptant(order, {
+        id: order.product_id,
+        name: order.product_name,
       });
+      badgeProductConfig = resolveBadgeProductConfig(catalog, giftBadge
+        ? {
+            badge_timing: 'immediate',
+            badge_method: 'comptant',
+            paiement_comptant: true,
+            prelevement_delay_days: 0,
+          }
+        : {
+            badge_timing: order.badge_timing || order.payment?.badge_timing || 'deferred',
+            badge_method: order.badge_method || order.payment?.badge_method || 'iban',
+          });
     } catch (err) {
       logWarn('Badge non ajouté automatiquement', { order_id: order.order_id, error: err.message });
     }
@@ -355,6 +386,7 @@ async function processSaleJob(page, order, jobMeta = {}) {
     }
 
     memberId = memberResult.member_id;
+    if (memberResult.gymConfig) gymConfig = memberResult.gymConfig;
     if (!memberId) {
       return {
         status: STATUS.MANUAL_REVIEW,
@@ -374,7 +406,49 @@ async function processSaleJob(page, order, jobMeta = {}) {
     mark('member_resume');
   }
 
+  await openMemberCheck(page, memberId, gymConfig).catch(() => {});
+  const memberSite = await detectMemberGymConfig(page, gymConfig);
+
+  if (String(order.gym || '').toLowerCase() === 'etats-unis') {
+    const saleGym = createGymConfig('etats-unis');
+    if (memberSite && isEtatsUnisDeciplusSite(memberSite)) {
+      const { migrateMemberToGym } = require('./migrate-gym');
+      await migrateMemberToGym(page, memberId, saleGym);
+      logInfo('Migration États-Unis → Minimes avant vente', {
+        order_id: order.order_id,
+        member_id: memberId,
+        from_zone: memberSite.deciplus_zone_id || null,
+      });
+    }
+    gymConfig = saleGym;
+  } else if (
+    memberSite?.deciplus_label &&
+    memberSite.deciplus_label !== gymConfig.deciplus_label
+  ) {
+    logInfo('Vente alignée sur le club Deciplus de la fiche', {
+      order_id: order.order_id,
+      member_id: memberId,
+      from: gymConfig.deciplus_label,
+      to: memberSite.deciplus_label,
+      zone: memberSite.deciplus_zone_id || null,
+    });
+    gymConfig = memberSite;
+  }
+
   let photoResult = null;
+  const gratuit =
+    String(order.product_id || '').includes('offerte') ||
+    /GRATUITE WEB/i.test(String(order.product_name || '')) ||
+    (Number(order.payment?.amount || 0) === 0 && /essai/i.test(String(order.product_name || '')));
+  if (gratuit) {
+    const fallback = defaultSeancePhotoPath();
+    if (fallback) {
+      const fs = require('fs');
+      order.photo_path = fallback;
+      order.photo_base64 = `data:image/jpeg;base64,${fs.readFileSync(fallback).toString('base64')}`;
+      order.photo_url = 'https://seance-offerte.boxingcenter.fr/seance-essai-photo.jpg';
+    }
+  }
   if (!checkpoint.photo_done && (order.photo_path || order.photo_base64 || order.photo_url)) {
     // Attendre la fin des redirections de création membre avant l'appel API photo.
     // Ne pas rouvrir la fiche ici : cela détruisait le contexte pendant page.evaluate.
@@ -472,17 +546,49 @@ async function processSaleJob(page, order, jobMeta = {}) {
     }
   }
 
-  if (checkpoint.sale_done) {
+  const paid = String(order.payment?.status || '').toLowerCase() === 'paid';
+  const needsSale =
+    productConfig.create_sale !== false && String(productConfig.sale_type || '').toLowerCase() !== 'none';
+
+  const badgeDone =
+    !badgeProductConfig ||
+    /created|already_on_file/i.test(String(checkpoint.badge_action || saleResult?.badge_action || ''));
+  if (checkpoint.sale_done && checkpoint.deciplus_sale_id && badgeDone) {
     logInfo('Reprise job — vente déjà enregistrée', {
       order_id: order.order_id,
-      sale_id: checkpoint.deciplus_sale_id || null,
+      sale_id: checkpoint.deciplus_sale_id,
     });
     saleResult = {
-      sale_id: checkpoint.deciplus_sale_id || null,
+      sale_id: checkpoint.deciplus_sale_id,
       action: 'checkpoint_resume',
       badge_action: checkpoint.badge_action || null,
     };
-  } else if (productConfig.requires_payment !== false && order.payment.status === 'paid') {
+  } else if (productConfig.requires_payment !== false && paid) {
+    if (ibanError) {
+      productConfig.paiement_comptant = true;
+      productConfig.requires_iban = false;
+      productConfig.skip_rib_prompt = true;
+      logWarn('IBAN absent — vente Deciplus en comptant (1er mois déjà payé)', {
+        order_id: order.order_id,
+        member_id: memberId,
+      });
+    }
+    saleResult = await recordSale(page, order, productConfig, memberId, gymConfig, {
+      badgeProductConfig,
+    });
+    const saleOk = Boolean(saleResult.sale_id);
+    mark('sale');
+    saveCheckpoint({
+      step: 'sale',
+      deciplus_member_id: memberId,
+      sale_done: saleOk,
+      deciplus_sale_id: saleResult.sale_id || null,
+      badge_action: saleResult.badge_action || null,
+    });
+    if (needsSale && !saleOk && !saleResult.manual_review) {
+      throw new Error('Vente Deciplus non confirmée (sale_id manquant)');
+    }
+  } else if (productConfig.sale_type === 'none') {
     saleResult = await recordSale(page, order, productConfig, memberId, gymConfig, {
       badgeProductConfig,
     });
@@ -491,12 +597,12 @@ async function processSaleJob(page, order, jobMeta = {}) {
       step: 'sale',
       deciplus_member_id: memberId,
       sale_done: true,
-      deciplus_sale_id: saleResult.sale_id || null,
-      badge_action: saleResult.badge_action || null,
+      deciplus_sale_id: null,
     });
-  } else if (productConfig.sale_type === 'none') {
-    saleResult = { action: 'trial_only' };
-    saveCheckpoint({ step: 'sale', deciplus_member_id: memberId, sale_done: true });
+  }
+
+  if (paid && needsSale && !saleResult.sale_id && !saleResult.manual_review && !ibanError) {
+    throw new Error('Vente Deciplus non confirmée (sale_id manquant)');
   }
 
   const finalStatus =
@@ -607,13 +713,14 @@ async function processInscriptionNudgeJob(order) {
   const resumeUrl = order.raw?.resume_url || '';
   const subject =
     order.raw?.email_subject ||
-    'Gong ! Ton inscription Boxing Center n’est pas encore sur le ring';
+    'Dernière étape : validez votre inscription Boxing Center';
   const html =
     order.raw?.email_html ||
-    `<p>Salut ${first || 'champion'},</p>
-     <p>Tu as payé, mais le round n’est pas fini : dossier + signature. Tant que ce n’est pas bouclé, tu n’es pas inscrit en salle.</p>
-     <p><a href="${resumeUrl}">Finir le round</a></p>
-     <p>À tout de suite sur le ring,<br/>Boxing Center</p>`;
+    `<p>Bonjour ${first || ''},</p>
+     <p>Votre règlement est bien reçu. Il reste le dossier et la signature. Tant que ce n’est pas validé, vous n’êtes pas encore inscrit en salle.</p>
+     <p><a href="${resumeUrl}">Terminer mon inscription</a></p>
+     <p>Si le bouton ne s’affiche pas, copiez ce lien : ${resumeUrl}</p>
+     <p>Sportivement,<br/>L’équipe Boxing Center</p>`;
 
   const apiKey = String(process.env.BREVO_API_KEY || '').trim().replace(/^["']|["']$/g, '');
   if (apiKey.startsWith('xkeysib-')) {
@@ -681,6 +788,20 @@ async function processMemberPhotoJob(page, order) {
     memberId = match.member_id;
   }
 
+  const gratuit =
+    String(order.product_id || '').includes('offerte') ||
+    /GRATUITE WEB/i.test(String(order.product_name || '')) ||
+    (Number(order.payment?.amount || 0) === 0 && /essai/i.test(String(order.product_name || '')));
+  if (gratuit || (!order.photo_path && !order.photo_base64 && !order.photo_url)) {
+    const fallback = defaultSeancePhotoPath();
+    if (fallback) {
+      const fs = require('fs');
+      order.photo_path = fallback;
+      order.photo_base64 = `data:image/jpeg;base64,${fs.readFileSync(fallback).toString('base64')}`;
+      order.photo_url = order.photo_url || 'https://seance-offerte.boxingcenter.fr/seance-essai-photo.jpg';
+    }
+  }
+
   await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
   await page.waitForTimeout(400);
   const photoResult = await uploadMemberPhoto(
@@ -742,8 +863,147 @@ async function maybeTriggerInscriptionNudges() {
   }
 }
 
+async function maybeTriggerEssaiFollowup() {
+  const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
+  if (role === 'sales') return;
+  const storeBase = (
+    process.env.BOXPLUS_STORE_URL ||
+    process.env.STORE_URL ||
+    ''
+  ).replace(/\/$/, '');
+  const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+  if (!storeBase || !secret) return;
+  try {
+    const res = await fetch(`${storeBase}/api/cron/essai-followup`, {
+      method: 'GET',
+      headers: { 'x-sync-secret': secret },
+    });
+    if (!res.ok) {
+      logWarn('Poll essai 10 € followup HTTP', { status: res.status });
+    }
+  } catch (err) {
+    logWarn('Poll essai 10 € followup', { error: err.message });
+  }
+}
+
+async function maybeTriggerDeciplusSaleReconcile() {
+  // Vercel Hobby n’exécute pas le cron */15 — le bot ventes relance les fiches absentes.
+  const storeBase = (
+    process.env.BOXPLUS_STORE_URL ||
+    process.env.STORE_URL ||
+    ''
+  ).replace(/\/$/, '');
+  const secret = process.env.SYNC_SECRET || process.env.ADMIN_SECRET || '';
+  if (!storeBase || !secret) return;
+  try {
+    const res = await fetch(`${storeBase}/api/cron/deciplus-sale-reconcile`, {
+      method: 'GET',
+      headers: { 'x-sync-secret': secret },
+    });
+    if (!res.ok) {
+      logWarn('Poll ventes Deciplus HTTP', { status: res.status });
+    }
+  } catch (err) {
+    logWarn('Poll ventes Deciplus', { error: err.message });
+  }
+}
+
 let lastNudgePollAt = 0;
 const NUDGE_POLL_MS = Number(process.env.BOT_NUDGE_POLL_MS || 60 * 1000);
+let lastEssaiFollowupPollAt = 0;
+const ESSAI_FOLLOWUP_POLL_MS = Number(process.env.BOT_ESSAI_FOLLOWUP_POLL_MS || 2 * 60 * 1000);
+let lastSaleReconcilePollAt = 0;
+const SALE_RECONCILE_POLL_MS = Number(process.env.BOT_SALE_RECONCILE_POLL_MS || 10 * 60 * 1000);
+
+async function processCheckSaleJob(page, order) {
+  const { findActiveContracts } = require('./cancel-sale');
+  const { isMembershipContract } = require('../storefront/lib/essai-followup');
+  const essaiFollowup =
+    Boolean(order.essai_followup) ||
+    String(order.check_kind || '') === 'abo' ||
+    /#essai-abo$/i.test(String(order.order_id || ''));
+
+  let memberId = order.deciplus_member_id || null;
+  if (!memberId) {
+    const found = await findMemberByIdentity(page, {
+      first_name: order.customer?.first_name,
+      last_name: order.customer?.last_name,
+      birthdate: order.customer?.birthdate,
+      phone: order.customer?.phone,
+      email: order.customer?.email,
+    }).catch(() => null);
+    memberId = found?.found ? found.member_id : found?.member_id || null;
+  }
+
+  const storeBase = String(
+    order.status_callback_base ||
+      (essaiFollowup
+        ? process.env.BOXPLUS_STORE_URL || process.env.STORE_URL
+        : process.env.SEANCE_OFFERTE_URL) ||
+      ''
+  ).replace(/\/$/, '');
+  const secret = process.env.SYNC_SECRET || process.env.BRIDGE_SECRET || '';
+  const callbackPath = essaiFollowup ? '/api/internal/essai-followup' : '/api/internal/relance-check';
+
+  const postCheck = async (payload) => {
+    if (!storeBase || !secret) return;
+    await fetch(`${storeBase}${callbackPath}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-sync-secret': secret },
+      body: JSON.stringify(payload),
+    }).catch((err) => {
+      logWarn('Callback vérif abo/vente échoué', {
+        error: err.message,
+        order_id: order.order_id,
+        path: callbackPath,
+      });
+    });
+  };
+
+  if (!memberId) {
+    if (essaiFollowup) {
+      await postCheck({
+        order_id: order.order_id,
+        deciplus_member_id: null,
+        has_abo: false,
+        has_sale: false,
+        contracts: [],
+        reason: 'membre introuvable',
+      });
+    }
+    return { status: STATUS.MANUAL_REVIEW, action: 'check_sale', error: 'membre introuvable', has_sale: false };
+  }
+
+  await openMemberCheck(page, memberId).catch(() => {});
+  const contracts = await findActiveContracts(page).catch(() => []);
+  const hasAbo = contracts.some((c) => isMembershipContract(c));
+  const hasSale = essaiFollowup ? hasAbo : contracts.some((c) => c && !c.isBadge);
+  const paidLike = contracts.length > 0;
+  const converted = essaiFollowup ? hasAbo : hasSale || paidLike;
+
+  await postCheck({
+    order_id: order.order_id,
+    deciplus_member_id: memberId,
+    has_abo: hasAbo,
+    has_sale: converted,
+    contracts: contracts.map((c) => c.label).slice(0, 8),
+  });
+
+  logInfo(essaiFollowup ? 'Vérif abo après essai 10 €' : 'Vérif vente séance offerte', {
+    order_id: order.order_id,
+    member_id: memberId,
+    has_abo: hasAbo,
+    has_sale: converted,
+    contracts: contracts.length,
+  });
+  return {
+    status: STATUS.SUCCESS,
+    action: 'check_sale',
+    deciplus_member_id: memberId,
+    has_abo: hasAbo,
+    has_sale: converted,
+  };
+}
 
 async function processJob(page, job) {
   const order = normalizeOrder(job);
@@ -784,6 +1044,18 @@ async function processJob(page, job) {
     return processVerifyIdentityJob(page, order);
   }
 
+  if (order.action === 'check_sale') {
+    return processCheckSaleJob(page, order);
+  }
+
+  if (order.action === 'balma_switch') {
+    if (role === 'sales') {
+      throw new Error('Bot ventes refuse « balma_switch » — utiliser BOXPLUS_BOT_URL_OPS');
+    }
+    const { runBalmaSwitch } = require('./aventure-clone');
+    return runBalmaSwitch(page, order);
+  }
+
   return processSaleJob(page, order, {
     file: job.file,
     checkpoint: job.checkpoint || {},
@@ -792,7 +1064,7 @@ async function processJob(page, job) {
 
 /** Vérif identité seule (changement d’abo / pré-check) — même statut mismatch que résiliation. */
 async function processVerifyIdentityJob(page, order) {
-  const { findMemberByIdentity, CHANGE_MATCH_FIELDS } = require('./member');
+  const { CHANGE_MATCH_FIELDS } = require('./member');
   const identity = {
     first_name: order.customer?.first_name || order.first_name,
     last_name: order.customer?.last_name || order.last_name,
@@ -833,7 +1105,13 @@ async function processVerifyIdentityJob(page, order) {
   // Changement d’abo : nom + prénom + date de naissance (pas le téléphone)
   const matchFields =
     matchMode === 'cancel' || matchMode === 'full' ? undefined : CHANGE_MATCH_FIELDS;
-  const match = await findMemberByIdentity(page, identity, { matchFields });
+  const { findMemberOnBoxingCenterGyms } = require('./search-bc-gyms');
+  const { isBalmaGymSlug } = require('../lib/gym-slugs');
+  const match = await findMemberOnBoxingCenterGyms(page, identity, {
+    matchFields,
+    preferredGym: isBalmaGymSlug(order.gym) ? 'balma' : order.gym,
+    includeBalma: isBalmaGymSlug(order.gym),
+  });
   if (!match.found) {
     await pushStatus('mismatch', {
       mismatchFields: match.mismatch_fields || [],
@@ -891,9 +1169,9 @@ async function pushBotSaleStatus(order, outcome = {}) {
       body: JSON.stringify({
         order_id: order.order_id,
         status: outcome.status || null,
-        error: outcome.error || null,
+        error: outcome.error || outcome.sale?.error || null,
         deciplus_member_id: outcome.deciplus_member_id || null,
-        deciplus_sale_id: outcome.deciplus_sale_id || null,
+        deciplus_sale_id: outcome.deciplus_sale_id || outcome.sale?.sale_id || null,
         action,
       }),
     });
@@ -947,6 +1225,26 @@ async function processOneJob(job) {
   }
 
   const order = normalizeOrder(job);
+  if (
+    job.skip_bot ||
+    job.manual_migration ||
+    String(job.bot_status || '').toLowerCase() === 'manual_ok'
+  ) {
+    const skipOutcome = {
+      status: STATUS.SUCCESS,
+      action: job.action || 'sale',
+      skipped: 'manual_migration',
+      deciplus_member_id: job.deciplus_member_id || order.deciplus_member_id || null,
+      deciplus_sale_id: job.deciplus_sale_id || null,
+    };
+    markProcessed(jobId, skipOutcome);
+    removeJob(filePath);
+    logInfo('Job ignoré — migration déjà faite à la main', {
+      job_id: jobId,
+      order_id: order.order_id,
+    });
+    return { ok: true, skipped: true };
+  }
   const validationErrors = validateOrder(order);
   if (validationErrors.length) {
     rejectJob(job, filePath, validationErrors.join(', '));
@@ -1133,13 +1431,21 @@ async function runLoop(once = false) {
     }
 
     const pending = listPending();
+    if (Date.now() - lastNudgePollAt >= NUDGE_POLL_MS) {
+      lastNudgePollAt = Date.now();
+      await maybeTriggerInscriptionNudges();
+    }
+    if (Date.now() - lastEssaiFollowupPollAt >= ESSAI_FOLLOWUP_POLL_MS) {
+      lastEssaiFollowupPollAt = Date.now();
+      await maybeTriggerEssaiFollowup();
+    }
+    if (Date.now() - lastSaleReconcilePollAt >= SALE_RECONCILE_POLL_MS) {
+      lastSaleReconcilePollAt = Date.now();
+      await maybeTriggerDeciplusSaleReconcile();
+    }
     if (pending.length === 0) {
       if (once) break;
       await maybeKeepSessionAlive();
-      if (Date.now() - lastNudgePollAt >= NUDGE_POLL_MS) {
-        lastNudgePollAt = Date.now();
-        await maybeTriggerInscriptionNudges();
-      }
       await sleep(POLL_MS);
       continue;
     }
@@ -1171,4 +1477,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { processJob, processOneJob, runLoop, processCancelJob, processSaleJob, processMemberPhotoJob };
+module.exports = { processJob, processOneJob, runLoop, processCancelJob, processSaleJob, processMemberPhotoJob, processCheckSaleJob };
