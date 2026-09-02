@@ -17,13 +17,11 @@ function imapConfig() {
   )
     .trim()
     .replace(/^["']|["']$/g, '');
-  // Mot de passe d’app Gmail : espaces d’affichage ignorés
   const pass = String(
     process.env.DECIPLUS_IMAP_PASS || process.env.IMAP_PASS || ''
   )
     .trim()
-    .replace(/^["']|["']$/g, '')
-    .replace(/\s+/g, '');
+    .replace(/^["']|["']$/g, '');
   return {
     host: process.env.DECIPLUS_IMAP_HOST || process.env.IMAP_HOST || 'imap.gmail.com',
     port: Number(process.env.DECIPLUS_IMAP_PORT || process.env.IMAP_PORT || 993),
@@ -88,14 +86,11 @@ async function fetchDeciplusEmailCode(opts = {}) {
   let ImapFlow;
   let simpleParser;
   try {
-    const { ensureOtpDeps } = require('../lib/ensure-deps');
-    ensureOtpDeps();
     ImapFlow = require('imapflow').ImapFlow;
     simpleParser = require('mailparser').simpleParser;
-  } catch (err) {
+  } catch {
     logWarn(
-      'imapflow/mailparser absents — npm install imapflow mailparser (lecture auto code Deciplus)',
-      { error: err.message }
+      'imapflow/mailparser absents — npm install imapflow mailparser (lecture auto code Deciplus)'
     );
     return null;
   }
@@ -125,10 +120,7 @@ async function fetchDeciplusEmailCode(opts = {}) {
       logger: false,
       tls: { rejectUnauthorized: false },
     });
-    // Évite un crash process si Gmail coupe la socket après logout / return
-    client.on('error', () => {});
 
-    let foundCode = null;
     try {
       await client.connect();
       const lock = await client.getMailboxLock('INBOX');
@@ -172,32 +164,24 @@ async function fetchDeciplusEmailCode(opts = {}) {
               age_s: ageSec,
               attempt,
             });
-            foundCode = code;
-            break;
+            return code;
           }
         }
       } finally {
         lock.release();
       }
+      await client.logout().catch(() => {});
     } catch (err) {
       logWarn('IMAP code Deciplus — tentative échouée', {
         attempt,
         error: err.message,
       });
-    } finally {
       try {
         await client.logout();
       } catch {
         /* ignore */
       }
-      try {
-        client.close();
-      } catch {
-        /* ignore */
-      }
     }
-
-    if (foundCode) return foundCode;
 
     await new Promise((r) => setTimeout(r, pollMs));
   }

@@ -60,7 +60,7 @@ function matchesTestMemberRecord(member, { strict = false } = {}) {
   if (isObviousTestEmail(email)) return true;
   if (isAzertyLikeMember(nom, prenom)) return true;
   if (/^badge/i.test(nom) && /^test$/i.test(prenom)) return true;
-  if (/^box/i.test(nom) && /^test$/i.test(prenom)) return true;
+  if (/^testofferte/i.test(nom) || /^testofferte/i.test(prenom)) return true;
 
   if (strict) return false;
 

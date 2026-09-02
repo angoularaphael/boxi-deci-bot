@@ -14,11 +14,12 @@
     "prenom": "#i_prenom, input[name=\"prenom\"]",
     "email": "#i_email, input[name=\"email\"]",
     "tel": "#i_tel, input[name=\"tel\"]",
+    "code": "#i_code, input[name=\"code\"]",
     "new_button": "#buttonNew, input#buttonNew"
   },
   "member_form_selectors": {
     "nom": "input[name=\"nom\"]",
-    "prenom": "input[name=\"prenom\"]",
+    "prenom": "form[name=\"db1_form\"] input[name=\"prenom\"]:not(#i_prenom)",
     "email": "input[name=\"email\"]",
     "date_naissance": "input[name=\"date_naissance\"]",
     "sexe": "select[name=\"sexe\"]",
@@ -94,5 +95,22 @@
     "confirmer_resiliation": "button:has-text(\"Confirmer\"), button.ari-button:has-text(\"Confirmer\"), text=Confirmer",
     "resilier_envoyer_mail": "button:has-text(\"Résilier le contrat et envoyer le mail\"), text=Résilier le contrat et envoyer le mail",
     "annuler_vente": "text=Annuler la vente, [aria-label=\"Annuler la vente\"]"
+  },
+  "member_migrate": {
+    "icon": "div.bouton_change_zone, [title=\"Migrer ce membre\"], [onclick*=\"sendToZone\"]",
+    "page": "moveMember.php",
+    "picker": "select#idz",
+    "site_minimes": "Minimes",
+    "confirm": "input.fichemembre_button[value*=\"Changer le site de ce membre\"]"
+  },
+  "member_unpaid": {
+    "row": "tr:has-text(\"Impayé\"), tr:has-text(\"Impayée\"), tr:has-text(\"Rejeté\"), .echeance:has-text(\"Impay\"), div:has-text(\"Impayé\")",
+    "delete": "button:has-text(\"Supprimer\"), a:has-text(\"Supprimer\"), input[value=\"Supprimer\"], button:has-text(\"Annuler l'échéance\")",
+    "confirm": "button:has-text(\"Confirmer\"), button:has-text(\"Oui\"), button.ari-button:has-text(\"Confirmer\")"
+  },
+  "contract_dates": {
+    "valide_du": ":text(\"Valide du\") >> xpath=following::input[1]",
+    "valide_au": ":text(\"Valide du\") >> xpath=following::div[contains(@class,\"el-date-editor\")][2] >> input",
+    "echeance": "text=/prochaine [eé]ch[eé]ance/i"
   }
 }

@@ -20,8 +20,8 @@ describe('phoneForDeciplus', () => {
     assert.equal(phoneForDeciplus('+33612345678'), '0612345678');
   });
 
-  it('corrige saisie 11 chiffres sans 0 (cas nowa)', () => {
-    assert.equal(phoneForDeciplus('76233478493'), '0762334784');
+  it('corrige saisie 11 chiffres sans 0 (cas nowa) — trop long, pas de faux numéro', () => {
+    assert.equal(phoneForDeciplus('76233478493'), '');
   });
 
   it('ajoute 0 si 9 chiffres', () => {

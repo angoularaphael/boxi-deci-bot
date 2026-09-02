@@ -151,14 +151,23 @@ async function fetchDeciplusCatalog(page, { force = false } = {}) {
   return products;
 }
 
+const MATCH_STOP = new Set(['a', 'de', 'du', 'au', 'et', 'le', 'la', 'les', 'des', 'en']);
+
+function matchTokens(text) {
+  return normalizeText(text)
+    .replace(/\b(\d+)e\b/g, '$1')
+    .split(' ')
+    .filter((t) => t && !MATCH_STOP.has(t));
+}
+
 function scoreMatch(query, product) {
   const q = normalizeText(query);
   const title = normalizeText(product.title);
   if (!q || !title) return 0;
   if (q === title) return 100;
   if (title.includes(q) || q.includes(title)) return 80;
-  const qTokens = q.split(' ').filter(Boolean);
-  const tTokens = new Set(title.split(' ').filter(Boolean));
+  const qTokens = matchTokens(query);
+  const tTokens = new Set(matchTokens(product.title));
   const overlap = qTokens.filter((t) => tTokens.has(t)).length;
   if (overlap >= 2) return 50 + overlap * 5;
   if (overlap === 1 && qTokens.length === 1) return 40;
@@ -167,11 +176,14 @@ function scoreMatch(query, product) {
 
 function findProductInCatalog(catalog, order) {
   const wantBadge = isBadgeCatalogTitle(order.product_name || order.offer || '');
+  const hint = `${order.product_name || ''} ${order.offer || ''} ${order.deciplus_product_search || ''}`;
+  const wantStudent = /etudiant/i.test(hint);
+  const wantAdult = /adulte/i.test(hint);
   const candidates = [
-    order.deciplus_product_search,
-    order.deciplus_product_name,
     order.product_name,
+    order.deciplus_product_name,
     order.offer,
+    order.deciplus_product_search,
     order.product_reference,
   ].filter(Boolean);
 
@@ -190,8 +202,19 @@ function findProductInCatalog(catalog, order) {
       }
       if (order.payment?.amount > 0 && product.price > 0) {
         const diff = Math.abs(product.price - order.payment.amount);
-        if (diff < 1) score += 15;
+        if (diff < 0.05) score += 25;
+        else if (diff < 1) score += 15;
         else if (diff < 5) score += 5;
+        else score -= 20;
+      }
+      const title = product.title || '';
+      if (wantStudent) {
+        if (/etudiant/i.test(title)) score += 40;
+        else score -= 25;
+      }
+      if (wantAdult) {
+        if (/adulte/i.test(title)) score += 40;
+        else if (/etudiant/i.test(title)) score -= 30;
       }
       if (score > bestScore) {
         bestScore = score;
@@ -276,10 +299,13 @@ function resolveBadgeProductConfig(catalog, overrides = {}) {
     amount: Number(matched.price) || 34.99,
     ...defaults,
     sale_type: 'carte',
-    paiement_comptant: false,
-    badge_timing: 'deferred',
-    badge_method: 'iban',
-    prelevement_delay_days: delayDays,
+    paiement_comptant: overrides.paiement_comptant === true,
+    badge_timing: overrides.badge_timing || 'deferred',
+    badge_method: overrides.badge_method || 'iban',
+    prelevement_delay_days:
+      overrides.paiement_comptant === true || overrides.badge_timing === 'immediate'
+        ? 0
+        : delayDays,
     requires_iban: false,
     skip_rib_prompt: true,
     auto_badge: false,

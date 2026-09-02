@@ -3,15 +3,18 @@
     "id": "offre-duo",
     "category": "Abonnements",
     "name": "OFFRE A 29€",
-    "tagline": "Offre DUO rentrée 2026",
-    "description": "Inscrivez-vous à deux : 29 € par personne toutes les 4 semaines, sans engagement. Accès aux 5 salles et à toutes les disciplines.",
+    "tagline": "Sans engagement — 29 € / 4 sem.",
+    "description": "29 € toutes les 4 semaines, sans engagement et sans préavis en cas de résiliation. Accès aux 5 salles et à toutes les disciplines.",
     "price_cents": 2900,
-    "price_label": "29,00 €",
+    "price_label": "29 €",
+    "price_was_cents": 4499,
+    "price_was_label": "44,99 €",
     "deciplus_total_note": "Total contrat Deciplus : 419,86 € (échéances)",
     "badge": "Rentrée 2026",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "1ʳᵉ échéance par carte · ensuite prélèvement automatique"
+    "duration_label": "Sans engagement",
+    "installments_note": "29 € / 4 semaines — 1ʳᵉ échéance CB puis prélèvement"
   },
   {
     "id": "offre-promo-9",
@@ -35,7 +38,7 @@
     "deciplus_total_note": "Total contrat Deciplus : 545,86 €",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "1ʳᵉ échéance par carte · ensuite prélèvement automatique"
+    "installments_note": "1ʳᵉ échéance par carte · prélèvement sans engagement"
   },
   {
     "id": "offre-promo-etudiant",
@@ -48,7 +51,7 @@
     "deciplus_total_note": "Total contrat Deciplus : 489,86 €",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "1ʳᵉ échéance par carte · ensuite prélèvement automatique"
+    "installments_note": "1ʳᵉ échéance par carte · prélèvement sans engagement"
   },
   {
     "id": "offre-saison",
@@ -58,6 +61,8 @@
     "description": "12 mois d’accès illimité aux 5 salles et à toutes les disciplines pour 259 €. Payez en une fois ou en 4× sans frais — sans prélèvement mensuel.",
     "price_cents": 25900,
     "price_label": "259,00 €",
+    "price_was_cents": 40000,
+    "price_was_label": "400,00 €",
     "deciplus_total_note": "Deciplus affiche 295,00 € (12 mois)",
     "badge": "1× ou 4× sans frais",
     "requires_iban": false,
@@ -70,22 +75,30 @@
     "category": "Abonnements",
     "name": "BOXE EDUCATIVE",
     "tagline": "Boxe éducative",
-    "description": "Boxe éducative enfants & ados : apprentissage ludique et progressif, sans coups portés. Saison complète encadrée par nos coachs.",
+    "description": "Boxe éducative enfants & ados : apprentissage ludique et progressif, sans coups portés. Saison complète. Paiement comptant en une fois ou en 4× sans frais.",
     "price_cents": 29500,
     "price_label": "295,00 €",
-    "requires_iban": true,
-    "requires_payment": true
+    "badge": "1× ou 4× sans frais",
+    "requires_iban": false,
+    "requires_payment": true,
+    "supports_installment_choice": true,
+    "installments_note": "En une fois ou en 4× sans frais",
+    "duration_label": "Saison"
   },
   {
     "id": "baby-boxe",
     "category": "Abonnements",
     "name": "BABY BOXE",
     "tagline": "Baby boxe",
-    "description": "Éveil sportif par la boxe pour les plus petits : motricité, coordination et confiance en soi. Saison complète.",
+    "description": "Éveil sportif par la boxe pour les plus petits : motricité, coordination et confiance en soi. Saison complète. Paiement comptant en une fois ou en 4× sans frais.",
     "price_cents": 25000,
     "price_label": "250,00 €",
-    "requires_iban": true,
-    "requires_payment": true
+    "badge": "1× ou 4× sans frais",
+    "requires_iban": false,
+    "requires_payment": true,
+    "supports_installment_choice": true,
+    "installments_note": "En une fois ou en 4× sans frais",
+    "duration_label": "Saison"
   },
   {
     "id": "etudiants-4-semaines",
@@ -97,9 +110,10 @@
     "price_cents": 3699,
     "price_label": "36,99 €",
     "deciplus_total_note": "Total contrat Deciplus : 443,88 €",
+    "badge": "Sans engagement",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "1ʳᵉ échéance par carte · ensuite prélèvement automatique"
+    "installments_note": "1ʳᵉ échéance par carte · prélèvement sans engagement"
   },
   {
     "id": "44-99-4-semaines",
@@ -110,9 +124,10 @@
     "price_cents": 4499,
     "price_label": "44,99 €",
     "deciplus_total_note": "Total contrat Deciplus : 539,88 €",
+    "badge": "Sans engagement",
     "requires_iban": true,
     "requires_payment": true,
-    "installments_note": "1ʳᵉ échéance par carte · ensuite prélèvement automatique"
+    "installments_note": "1ʳᵉ échéance par carte · prélèvement sans engagement"
   },
   {
     "id": "comptant-12-mois",
@@ -122,6 +137,7 @@
     "description": "Payez en une seule fois et entraînez-vous 12 mois en illimité — aucun prélèvement ensuite. Accès aux 5 salles.",
     "price_cents": 40000,
     "price_label": "400,00 €",
+    "badge": "Paiement comptant",
     "requires_iban": false,
     "requires_payment": true,
     "installments_note": "Paiement unique par carte ou PayPal"
@@ -134,6 +150,7 @@
     "description": "Payez en une seule fois et entraînez-vous 6 mois en illimité — aucun prélèvement ensuite. Accès aux 5 salles.",
     "price_cents": 25000,
     "price_label": "250,00 €",
+    "badge": "Paiement comptant",
     "requires_iban": false,
     "requires_payment": true,
     "installments_note": "Paiement unique par carte ou PayPal"
@@ -146,6 +163,7 @@
     "description": "Payez en une seule fois et entraînez-vous 3 mois en illimité — aucun prélèvement ensuite. Accès aux 5 salles.",
     "price_cents": 15000,
     "price_label": "150,00 €",
+    "badge": "Paiement comptant",
     "requires_iban": false,
     "requires_payment": true,
     "installments_note": "Paiement unique par carte ou PayPal"
@@ -188,12 +206,60 @@
   {
     "id": "seance-essai",
     "category": "Essai",
-    "name": "Séance d'essai gratuite",
+    "name": "SEANCE D'ESSAI",
     "tagline": "Séance d'essai",
     "description": "Venez découvrir le club : une séance pour tester l’ambiance, les coachs et la discipline qui vous attire.",
-    "price_cents": 0,
-    "price_label": "Gratuit",
+    "price_cents": 1000,
+    "price_label": "10,00 €",
     "requires_iban": false,
-    "requires_payment": false
+    "requires_payment": true,
+    "sale_type": "carte",
+    "auto_badge": false,
+    "deciplus_product_search": "essai"
+  },
+  {
+    "id": "coaching-1",
+    "category": "Coachings",
+    "name": "Coaching privé — 1 séance",
+    "tagline": "1 séance coaching",
+    "description": "Séance individuelle avec un coach — progression technique adaptée à votre niveau.",
+    "price_cents": 5500,
+    "price_label": "55,00 €",
+    "requires_iban": false,
+    "requires_payment": true,
+    "sale_type": "carte",
+    "auto_badge": false,
+    "deciplus_product_search": "coaching",
+    "image": "/img/bc/disc/boxing-training.webp"
+  },
+  {
+    "id": "coaching-5",
+    "category": "Coachings",
+    "name": "Coaching privé — 5 séances",
+    "tagline": "Pack 5 séances",
+    "description": "Pack de 5 séances de coaching privé pour un suivi régulier.",
+    "price_cents": 25000,
+    "price_label": "250,00 €",
+    "requires_iban": false,
+    "requires_payment": true,
+    "sale_type": "carte",
+    "auto_badge": false,
+    "deciplus_product_search": "coaching",
+    "image": "/img/bc/disc/boxe-anglaise.webp"
+  },
+  {
+    "id": "coaching-10",
+    "category": "Coachings",
+    "name": "Coaching privé — 10 séances",
+    "tagline": "Pack 10 séances",
+    "description": "Pack de 10 séances de coaching privé — accompagnement complet.",
+    "price_cents": 45000,
+    "price_label": "450,00 €",
+    "requires_iban": false,
+    "requires_payment": true,
+    "sale_type": "carte",
+    "auto_badge": false,
+    "deciplus_product_search": "coaching",
+    "image": "/img/bc/disc/mma.webp"
   }
 ]
