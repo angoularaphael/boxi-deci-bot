@@ -917,7 +917,7 @@ const SALE_RECONCILE_POLL_MS = Number(process.env.BOT_SALE_RECONCILE_POLL_MS || 
 
 async function processCheckSaleJob(page, order) {
   const { findActiveContracts } = require('./cancel-sale');
-  const { isMembershipContract } = require('../storefront/lib/essai-followup');
+  const { isMembershipContract } = require('../lib/sale-contract-match');
   const essaiFollowup =
     Boolean(order.essai_followup) ||
     String(order.check_kind || '') === 'abo' ||
