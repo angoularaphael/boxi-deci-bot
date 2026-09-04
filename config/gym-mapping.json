@@ -8,11 +8,13 @@
   "ramonville": {
     "label": "Boxing Center Ramonville",
     "deciplus_label": "Ramonville",
+    "deciplus_zone_id": "4",
     "address": "33 rue des Ormes, 31530 Ramonville"
   },
   "st-cyprien": {
     "label": "Boxing Center St-Cyprien",
     "deciplus_label": "St-Cyprien",
+    "deciplus_zone_id": "5",
     "address": "11 Rue Sainte-Lucie, 31300 Toulouse"
   },
   "etats-unis": {
@@ -33,6 +35,7 @@
   "portet": {
     "label": "Boxing Center Portet",
     "deciplus_label": "Portet",
+    "deciplus_zone_id": "3",
     "address": "61 route d'Espagne, 31120 Portet-sur-Garonne"
   }
 }

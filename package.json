@@ -1,20 +1,16 @@
-{
+﻿{
   "name": "boxi-deci-bot",
   "version": "1.0.0",
   "private": true,
-  "description": "Bot RPA Deciplus — Boxing Center",
+  "description": "Bot RPA Deciplus â€” Boxing Center",
   "main": "start.js",
   "scripts": {
     "start": "node start.js",
-    "bootstrap": "node bootstrap.js",
-    "bot:run": "node bot/index.js",
-    "test": "node --test test/*.test.js"
+    "bot:run": "node bot/index.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "imapflow": "^1.6.6",
-    "mailparser": "^3.9.15",
     "playwright": "^1.51.1"
   }
 }

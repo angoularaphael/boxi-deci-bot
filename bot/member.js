@@ -1070,7 +1070,12 @@ async function fillMemberForm(page, customer, gymConfig, order) {
     await fillFirst(ctx, sel.utm_campaign || 'input[name="utm_campaign"]', order.utm.campaign);
   }
 
-  await setMemberZone(ctx, gymConfig);
+  const zoneOk = await setMemberZone(ctx, gymConfig);
+  if (!zoneOk) {
+    throw new Error(
+      `Impossible de fixer la salle Deciplus ${gymConfig.deciplus_label || gymConfig.key || '?'} sur la fiche membre`
+    );
+  }
 }
 
 /**
@@ -1569,6 +1574,7 @@ async function findOrCreateMember(page, order, gymConfig) {
   const { uniqueDeciplusSearchConfigs } = require('../lib/deciplus-sites');
   const { switchDeciplusSite } = require('./deciplus-zone');
 
+  if (!order.force_new_member) {
   const sites = uniqueDeciplusSearchConfigs(order.gym || gymConfig.key);
   for (const site of sites) {
     const label = site.deciplus_label || site.label;
@@ -1590,6 +1596,12 @@ async function findOrCreateMember(page, order, gymConfig) {
       });
       return { ...found, gymConfig: site };
     }
+  }
+  } else {
+    logInfo('Création membre Deciplus forcée (nouvelle fiche)', {
+      order_id: order.order_id,
+      gym: gymConfig.key || gymConfig.deciplus_label,
+    });
   }
 
   const createLabel = gymConfig.deciplus_label || gymConfig.label;

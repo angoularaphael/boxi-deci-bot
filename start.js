@@ -6,11 +6,19 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { installPlaywrightBrowser } = require('./lib/playwright-install');
-const { ensureOtpDeps, moduleResolvable } = require('./lib/ensure-deps');
 
 function run(cmd) {
   console.log(`> ${cmd}`);
   execSync(cmd, { stdio: 'inherit', cwd: __dirname, env: process.env });
+}
+
+function moduleResolvable(name) {
+  try {
+    require.resolve(name, { paths: [__dirname] });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Toujours s’assurer des deps critiques (même si node_modules existe déjà). */
@@ -24,13 +32,6 @@ function ensureRequiredDeps() {
       console.log(`[BOXPLUS] Dépendances manquantes: ${missing.join(', ')} — npm install…`);
     }
     run('npm install --omit=dev --ignore-scripts');
-  }
-
-  // Deuxième filet : install ciblée OTP (node_modules partiel / vieux volume)
-  const otp = ensureOtpDeps();
-  if (!otp.ok) {
-    console.error('[BOXPLUS] Impossible d’installer imapflow/mailparser — lecture code email impossible');
-    process.exit(1);
   }
 
   const stillMissing = required.filter((name) => !moduleResolvable(name));
@@ -52,9 +53,4 @@ try {
   process.exit(1);
 }
 
-const bot = require('./bot/index.js');
-const once = process.argv.includes('--once');
-bot.runLoop(once).catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+require('./bot/index.js');

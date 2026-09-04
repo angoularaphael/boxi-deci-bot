@@ -2708,7 +2708,7 @@ async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
 }
 
 async function annotateMember(page, order, productConfig, memberId = null) {
-    const { buildFourXInfoComptaNote, buildSeanceOfferteInfoComptaNote } = require('../lib/info-compta-note');
+    const { buildFourXInfoComptaNote, buildSeanceOfferteInfoComptaNote, buildPaymentChannelInfoComptaNote } = require('../lib/info-compta-note');
   try {
     const { getMemberFormContext, openMemberEditForm } = require('./member');
     if (memberId) {
@@ -2733,7 +2733,8 @@ async function annotateMember(page, order, productConfig, memberId = null) {
 
     const current = String((await ta.inputValue().catch(() => '')) || '');
     const offreNote = buildSeanceOfferteInfoComptaNote(order, productConfig);
-    const fourXNote = buildFourXInfoComptaNote(order, productConfig);
+    const channelNote = buildPaymentChannelInfoComptaNote(order);
+    const fourXNote = channelNote || buildFourXInfoComptaNote(order, productConfig);
     const note = offreNote || fourXNote;
 
     if (note) {
