@@ -396,6 +396,11 @@ async function processSaleJob(page, order, jobMeta = {}) {
     };
   }
 
+  if (isPayplug4xPrelevementOrder(order)) {
+    productConfig.auto_badge = false;
+    productConfig.paiement_comptant = false;
+  }
+
   if (isCartePrestationConfig(productConfig)) {
     productConfig.auto_badge = false;
   } else {
