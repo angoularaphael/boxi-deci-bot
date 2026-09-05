@@ -19,7 +19,10 @@ const {
   getMemberFormContext,
   uploadMemberPhoto,
   downloadMemberPhoto,
+  findMemberByIdentity,
+  CHANGE_MATCH_FIELDS,
 } = require('./member');
+const { uniqueDeciplusSearchConfigs } = require('../lib/deciplus-sites');
 
 async function findBalmaMember(page, identity) {
   return findAventureBalmaMember(page, identity);
@@ -96,6 +99,9 @@ async function readMemberIban(page, memberId) {
 }
 
 async function createMinimesMember(page, customer, gymConfig, order, { excludeMemberId } = {}) {
+  if (!customer?.birthdate) {
+    throw new Error('Date de naissance manquante — création membre Aventure refusée');
+  }
   const excludeIds = [excludeMemberId].filter(Boolean);
   const patched = applyMinimesDuplicateIdentity(customer);
   logInfo('Création Minimes — prénom + Balma, sans mail ni téléphone', {
@@ -262,6 +268,56 @@ async function copyBalmaExtrasToMinimes(page, minimesId, extras, customer, gymCo
   return out;
 }
 
+async function findExistingAventureMember(page, identity, preferGym = 'minimes') {
+  const sites = uniqueDeciplusSearchConfigs(preferGym);
+  for (const site of sites) {
+    const label = site.deciplus_label || site.label;
+    const switched = await switchDeciplusSite(page, label).catch(() => false);
+    if (!switched) continue;
+    const hit = await findMemberByIdentity(page, identity, {
+      matchFields: CHANGE_MATCH_FIELDS,
+    });
+    if (hit.found && hit.member_id) {
+      logInfo('Aventure — fiche existante trouvée (pas de doublon)', {
+        member_id: hit.member_id,
+        site: label,
+      });
+      return hit;
+    }
+  }
+  return { found: false };
+}
+
+function buildAventureCustomer(identity, profile, order) {
+  return mergeCustomer(identity, profile || {}, order);
+}
+
+async function finishAventureWithSale(page, memberId, minimesConfig, order, customer, extra = {}) {
+  let sale = null;
+  if (shouldCreateChosenOfferSale(order)) {
+    sale = await createChosenOfferSale(page, memberId, minimesConfig, {
+      ...order,
+      gym: minimesConfig.key,
+      customer,
+    }).catch((err) => {
+      logWarn('Vente Aventure sur fiche existante échouée', { error: err.message });
+      return { error: err.message, sale_id: null };
+    });
+  }
+  const saleFailed = shouldCreateChosenOfferSale(order) && !sale?.sale_id;
+  return {
+    status: saleFailed ? STATUS.MANUAL_REVIEW : STATUS.SUCCESS,
+    action: 'balma_switch',
+    deciplus_member_id: memberId,
+    deciplus_sale_id: sale?.sale_id || null,
+    error: sale?.error || (saleFailed ? 'Vente Deciplus absente après identification membre' : null),
+    cancelled: false,
+    migrated: false,
+    sale,
+    ...extra,
+  };
+}
+
 async function runBalmaSwitch(page, order) {
   const policy = aventureBotPolicy();
   const identity = {
@@ -284,6 +340,16 @@ async function runBalmaSwitch(page, order) {
     ? { found: true, member_id: knownId }
     : await findBalmaMember(page, identity);
   if (!match.found) {
+    await switchDeciplusSite(page, minimesConfig.deciplus_label || 'Minimes').catch(() => false);
+    const existing = await findExistingAventureMember(page, identity, policy.create_gym);
+    if (existing.found) {
+      const customer = buildAventureCustomer(identity, null, order);
+      return finishAventureWithSale(page, existing.member_id, minimesConfig, order, customer, {
+        reused_existing: true,
+        balma_member_id: null,
+        duplicate: false,
+      });
+    }
     return {
       status: STATUS.MANUAL_REVIEW,
       action: 'balma_switch',
@@ -324,7 +390,11 @@ async function runBalmaSwitch(page, order) {
   await switchDeciplusSite(page, minimesConfig.deciplus_label || 'Minimes').then((ok) => {
     if (!ok) throw new Error('Impossible d’ouvrir la salle Minimes sur Deciplus');
   });
+  const existingBeforeCreate = await findExistingAventureMember(page, identity, policy.create_gym);
   let created;
+  if (existingBeforeCreate.found) {
+    created = { member_id: existingBeforeCreate.member_id, action: 'reused' };
+  } else {
   try {
     created = await createMinimesMember(
       page,
@@ -347,6 +417,7 @@ async function runBalmaSwitch(page, order) {
       cancelled: false,
       migrated: false,
     };
+  }
   }
   if (!created.member_id) {
     return {
@@ -389,7 +460,8 @@ async function runBalmaSwitch(page, order) {
     balma_member_id: match.member_id,
     cancelled: false,
     migrated: false,
-    duplicate: true,
+    duplicate: created.action !== 'reused',
+    reused_existing: created.action === 'reused',
     extras: extrasResult,
     sale,
   };
