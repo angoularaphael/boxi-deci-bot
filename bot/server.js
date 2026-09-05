@@ -4,8 +4,8 @@
 require('dotenv').config();
 
 const express = require('express');
-const { enqueue, getQueueStats, cancelJob, getProcessedRecord, findJobFile, STATUS } = require('../lib/queue');
-const { normalizeOrder, validateOrder } = require('../lib/normalize');
+const { enqueue, getQueueStats, cancelJob, getProcessedRecord, findJobFile, unmarkProcessed, removeJob, queuedJobIsBusy, STATUS } = require('../lib/queue');
+const { normalizeOrder, validateOrder, getJobId } = require('../lib/normalize');
 const { logInfo, logError } = require('../lib/logger');
 
 const PORT = Number(process.env.BOT_HTTP_PORT || process.env.PORT || 3050);
@@ -37,12 +37,17 @@ function createBotServer() {
         return res.status(400).json({ ok: false, error: errors.join(', ') });
       }
       const result = enqueue(order);
+      const processed =
+        !result.queued && (result.reason === 'already_processed' || result.reason === 'already_queued')
+          ? getProcessedRecord(result.job_id || order.order_id)
+          : null;
       logInfo('Job reçu depuis boutique', {
         order_id: order.order_id,
         job_id: result.job_id,
         queued: result.queued,
+        reason: result.reason || null,
       });
-      res.json({ ok: true, ...result });
+      res.json({ ok: true, ...result, processed });
     } catch (err) {
       logError('Ingest job échoué', { error: err.message });
       res.status(500).json({ ok: false, error: err.message });
@@ -76,6 +81,45 @@ function createBotServer() {
       res.json(result);
     } catch (err) {
       logError('Annulation job échouée', { error: err.message });
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  app.post('/api/jobs/force-requeue', (req, res) => {
+    if (!isAuthorized(req)) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    try {
+      const order = normalizeOrder(req.body);
+      const errors = validateOrder(order);
+      if (errors.length) {
+        return res.status(400).json({ ok: false, error: errors.join(', ') });
+      }
+      const jobId = order.job_id || getJobId(order);
+      const previous = getProcessedRecord(jobId);
+      if (previous) unmarkProcessed(jobId);
+      const found = findJobFile(jobId);
+      if (found?.file && !queuedJobIsBusy(found.file)) removeJob(found.file);
+      const result = enqueue({
+        ...order,
+        force_requeue: true,
+        force_sale_retry: true,
+      });
+      logInfo('Force requeue job', {
+        order_id: order.order_id,
+        job_id: jobId,
+        queued: result.queued,
+        reason: result.reason || null,
+        previous_status: previous?.status || null,
+      });
+      res.json({
+        ok: true,
+        forced: true,
+        ...result,
+        processed: previous || null,
+      });
+    } catch (err) {
+      logError('Force requeue échoué', { error: err.message });
       res.status(500).json({ ok: false, error: err.message });
     }
   });

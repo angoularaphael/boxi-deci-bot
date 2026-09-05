@@ -63,7 +63,7 @@ const MAX_RETRIES = Number(process.env.BOT_MAX_RETRIES || 3);
 const POLL_MS = Number(process.env.BOT_POLL_MS || 5000);
 const CATALOG_PUSH_MS = Number(process.env.BOT_CATALOG_PUSH_MS || 6 * 60 * 60 * 1000);
 const CATALOG_TTL_MS = Number(process.env.BOT_CATALOG_TTL_MS || 10 * 60 * 1000);
-const STALE_PROCESSING_MS = Number(process.env.BOT_STALE_PROCESSING_MS || 15 * 60 * 1000);
+const STALE_PROCESSING_MS = Number(process.env.BOT_STALE_PROCESSING_MS || 3 * 60 * 1000);
 
 let catalogCache = { at: 0, data: null };
 
