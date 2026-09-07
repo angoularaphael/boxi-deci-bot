@@ -52,6 +52,7 @@ const { fetchDeciplusCatalog, resolveProductConfig, resolveBadgeProductConfig } 
 const { applyBillingPlanToProductConfig, isPayplug4xPrelevementOrder } = require('../lib/billing-plan');
 const { isCartePrestationConfig } = require('../lib/catalog-sale');
 const { logInfo, logError, logWarn, sendAlert } = require('../lib/logger');
+const { getBotId, wrongSalesBotReject } = require('../lib/sales-bot');
 const { sleep } = require('../lib/utils');
 const {
   maybeKeepSessionAlive,
@@ -1330,6 +1331,17 @@ async function processOneJob(job) {
     });
     return { ok: true, skipped: true };
   }
+  const wrongBot = wrongSalesBotReject(order);
+  if (wrongBot) {
+    removeJob(filePath);
+    logWarn('Job retiré — destiné à un autre bot ventes', {
+      job_id: jobId,
+      order_id: order.order_id,
+      sales_bot: wrongBot.sales_bot,
+      bot_id: wrongBot.bot_id,
+    });
+    return { ok: false, skipped: true, reason: 'wrong_bot' };
+  }
   const validationErrors = validateOrder(order);
   if (validationErrors.length) {
     rejectJob(job, filePath, validationErrors.join(', '));
@@ -1545,7 +1557,13 @@ async function runLoop(once = false) {
     try {
       await processOneJob(job);
     } catch (err) {
-      logError('Erreur fatale boucle bot', { error: err.message });
+      logError('Erreur fatale boucle bot', { error: err.message, order_id: job.order_id });
+      await sendAlert(`Erreur fatale boucle bot — ${job.order_id || job.job_id}`, {
+        job_id: job.job_id,
+        order_id: job.order_id,
+        action: job.action,
+        error: err.message,
+      }).catch(() => {});
       await closeBrowser();
     }
   } while (!once);
@@ -1554,12 +1572,47 @@ async function runLoop(once = false) {
   logInfo('Bot Deciplus arrêté', getQueueStats());
 }
 
-if (require.main === module) {
-  const once = process.argv.includes('--once');
-  runLoop(once).catch((err) => {
-    console.error(err);
-    process.exit(1);
+function installCrashGuards() {
+  if (installCrashGuards.done) return;
+  installCrashGuards.done = true;
+  process.on('uncaughtException', (err) => {
+    logError('uncaughtException — bot continue', { error: err.message });
+    sendAlert('uncaughtException — bot continue', { error: err.message }).catch(() => {});
+    closeBrowser().catch(() => {});
   });
+  process.on('unhandledRejection', (reason) => {
+    const error = reason && reason.message ? reason.message : String(reason);
+    logError('unhandledRejection — bot continue', { error });
+    sendAlert('unhandledRejection — bot continue', { error }).catch(() => {});
+  });
+}
+
+async function main() {
+  const once = process.argv.includes('--once');
+  installCrashGuards();
+  for (;;) {
+    try {
+      await runLoop(once);
+      if (once) return;
+      await sendAlert('Boucle bot arrêtée inattendue — reprise', {
+        error: 'runLoop ended',
+        bot_id: getBotId() || null,
+      }).catch(() => {});
+    } catch (err) {
+      console.error(err);
+      await sendAlert('Bot crash — reprise automatique dans 5s', {
+        error: err.message,
+        bot_id: getBotId() || null,
+      }).catch(() => {});
+      await closeBrowser().catch(() => {});
+      if (once) return;
+    }
+    await sleep(5000);
+  }
+}
+
+if (require.main === module) {
+  main();
 }
 
 module.exports = { processJob, processOneJob, runLoop, processCancelJob, processSaleJob, processMemberPhotoJob, processCheckSaleJob };

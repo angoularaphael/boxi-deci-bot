@@ -7,6 +7,7 @@ const express = require('express');
 const { enqueue, getQueueStats, cancelJob, getProcessedRecord, findJobFile, unmarkProcessed, removeJob, queuedJobIsBusy, STATUS } = require('../lib/queue');
 const { normalizeOrder, validateOrder, getJobId } = require('../lib/normalize');
 const { logInfo, logError } = require('../lib/logger');
+const { getBotId, wrongSalesBotReject } = require('../lib/sales-bot');
 
 const PORT = Number(process.env.BOT_HTTP_PORT || process.env.PORT || 3050);
 const SECRET = process.env.SYNC_SECRET || process.env.BRIDGE_SECRET || '';
@@ -23,7 +24,13 @@ function createBotServer() {
   app.use(express.json({ limit: '6mb' }));
 
   app.get('/health', (_req, res) => {
-    res.json({ ok: true, service: 'boxi-deci-bot', stats: getQueueStats() });
+    res.json({
+      ok: true,
+      service: 'boxi-deci-bot',
+      bot_id: getBotId() || null,
+      bot_role: String(process.env.BOT_ROLE || 'all').toLowerCase(),
+      stats: getQueueStats(),
+    });
   });
 
   app.post('/api/jobs', (req, res) => {
@@ -35,6 +42,15 @@ function createBotServer() {
       const errors = validateOrder(order);
       if (errors.length) {
         return res.status(400).json({ ok: false, error: errors.join(', ') });
+      }
+      const wrongBot = wrongSalesBotReject(order);
+      if (wrongBot) {
+        logInfo('Job refusé — autre bot ventes', {
+          order_id: order.order_id,
+          sales_bot: wrongBot.sales_bot,
+          bot_id: wrongBot.bot_id,
+        });
+        return res.json({ ok: true, ...wrongBot });
       }
       const result = enqueue(order);
       const processed =
@@ -94,6 +110,10 @@ function createBotServer() {
       const errors = validateOrder(order);
       if (errors.length) {
         return res.status(400).json({ ok: false, error: errors.join(', ') });
+      }
+      const wrongBot = wrongSalesBotReject(order);
+      if (wrongBot) {
+        return res.json({ ok: true, forced: false, ...wrongBot });
       }
       const jobId = order.job_id || getJobId(order);
       const previous = getProcessedRecord(jobId);
