@@ -1590,6 +1590,7 @@ function installCrashGuards() {
 async function main() {
   const once = process.argv.includes('--once');
   installCrashGuards();
+  console.log('[BOXPLUS] Lancement boucle bot Deciplus');
   for (;;) {
     try {
       await runLoop(once);
@@ -1615,4 +1616,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { processJob, processOneJob, runLoop, processCancelJob, processSaleJob, processMemberPhotoJob, processCheckSaleJob };
+module.exports = { processJob, processOneJob, runLoop, main, processCancelJob, processSaleJob, processMemberPhotoJob, processCheckSaleJob };

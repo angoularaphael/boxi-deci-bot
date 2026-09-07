@@ -53,4 +53,8 @@ try {
   process.exit(1);
 }
 
-require('./bot/index.js');
+const { main } = require('./bot/index.js');
+main().catch((err) => {
+  console.error('[BOXPLUS] Bot stoppe:', err);
+  process.exit(1);
+});
