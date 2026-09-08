@@ -471,7 +471,7 @@ async function processSaleJob(page, order, jobMeta = {}) {
   };
 
   if (!memberId) {
-    const { boutiqueSaleDispatchAllowed } = require('../storefront/lib/deciplus-sale-reconcile');
+    const { boutiqueSaleDispatchAllowed } = require('../lib/sale-dispatch-policy');
     if (!boutiqueSaleDispatchAllowed(order)) {
       const err =
         'Dispatch refusé — signature ou ready_for_dispatch requis avant création membre Deciplus';
