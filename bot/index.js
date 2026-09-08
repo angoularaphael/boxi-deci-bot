@@ -287,6 +287,17 @@ async function processCancelJob(page, order) {
       };
     }
     await pushCancelStatus('done', { cancelledCount: result?.cancelled_count ?? null, memberId });
+    try {
+      const { reconcileActiveBadges } = require('./sale');
+      const { resolveSaleGymConfig } = require('../lib/gym-slugs');
+      const gymConfig = resolveSaleGymConfig(getGymConfig(order.gym || 'minimes'));
+      await reconcileActiveBadges(page, memberId, gymConfig, { keepOne: true });
+    } catch (err) {
+      logWarn('Badges orphelins non alignés après résiliation', {
+        member_id: memberId,
+        error: err.message,
+      });
+    }
     return {
       status: STATUS.SUCCESS,
       action: 'cancel',

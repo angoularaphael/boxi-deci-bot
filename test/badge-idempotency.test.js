@@ -24,7 +24,17 @@ test('un badge pré-décompté à zéro crédit reste actif', () => {
   );
 });
 
-test('ignore les badges expirés ou réellement épuisés', () => {
+test('un badge à 0 crédit encore affiché reste un badge ouvert', () => {
+  assert.equal(
+    isActiveBadgeContract({
+      isBadge: true,
+      label: 'BADGE 0 crédit restant',
+    }),
+    true
+  );
+});
+
+test('ignore uniquement les badges expirés ou résiliés', () => {
   assert.equal(
     isActiveBadgeContract({
       isBadge: true,
@@ -32,13 +42,35 @@ test('ignore les badges expirés ou réellement épuisés', () => {
     }),
     false
   );
+});
+
+test('un badge sans abonnement actif est refusé', () => {
+  const {
+    isActiveMembershipContract,
+    memberHasActiveMembership,
+  } = require('../bot/sale');
   assert.equal(
-    isActiveBadgeContract({
-      isBadge: true,
-      label: 'BADGE 0 crédit restant',
+    isActiveMembershipContract({
+      isBadge: false,
+      label: 'OFFRE A 29€ CONTRAT N°C2026-043124',
+    }),
+    true
+  );
+  assert.equal(
+    isActiveMembershipContract({
+      isBadge: false,
+      label: "SEANCE D'ESSAI CONTRAT N°C2026-042873 Expiré",
     }),
     false
   );
+  assert.equal(
+    memberHasActiveMembership([
+      { isBadge: true, label: 'BADGE CONTRAT N°C2026-043144' },
+    ]),
+    false
+  );
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../bot/sale.js'), 'utf8');
+  assert.match(src, /Vente Badge refusée — aucun abonnement actif/);
 });
 
 test('ne confond pas un abonnement avec un badge', () => {

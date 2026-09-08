@@ -2784,11 +2784,25 @@ async function buyAbonnement(page, productConfig, gymConfig) {
   return { action: 'abonnement_created', sale_type: 'abonnement' };
 }
 
+function isClosedContractLabel(label) {
+  return /expir[eé]|r[eé]sili[eé]|annul[eé]|contrat clos/i.test(String(label || ''));
+}
+
 function isActiveBadgeContract(contract = {}) {
-  if (!contract.isBadge || /expir[eé]/i.test(String(contract.label || ''))) return false;
-  const label = String(contract.label || '');
-  if (/0 cr[eé]dit restant/i.test(label) && !/pr[ée]-?d[ée]compt/i.test(label)) return false;
+  if (!contract.isBadge || isClosedContractLabel(contract.label)) return false;
   return true;
+}
+
+function isActiveMembershipContract(contract = {}) {
+  if (!contract || contract.isBadge) return false;
+  const label = String(contract.label || '');
+  if (isClosedContractLabel(label)) return false;
+  if (/s[eé]ance d['’]?\s*essai|\bessai gratuite|\bessai offerte|\bcoaching\b/i.test(label)) return false;
+  return true;
+}
+
+function memberHasActiveMembership(contracts = []) {
+  return contracts.some(isActiveMembershipContract);
 }
 
 async function reconcileActiveBadges(page, memberId, gymConfig, { keepOne }) {
@@ -2796,11 +2810,12 @@ async function reconcileActiveBadges(page, memberId, gymConfig, { keepOne }) {
   await closeGreyboxIfOpen(page).catch(() => {});
   await openMemberCheck(page, memberId, gymConfig);
   const before = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
+  const allowKeep = Boolean(keepOne) && memberHasActiveMembership(before);
   const active = before
     .filter(isActiveBadgeContract)
     .sort((a, b) => Number(a.idc) - Number(b.idc));
-  const keeper = keepOne ? active[0] || null : null;
-  const toCancel = keepOne ? active.slice(1) : active;
+  const keeper = allowKeep ? active[0] || null : null;
+  const toCancel = allowKeep ? active.slice(1) : active;
   if (!toCancel.length) return { keeper, cancelled: 0 };
 
   const ids = new Set(toCancel.map((c) => String(c.idc)));
@@ -2814,7 +2829,7 @@ async function reconcileActiveBadges(page, memberId, gymConfig, { keepOne }) {
   await openMemberCheck(page, memberId, gymConfig);
   const after = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
   const remaining = after.filter(isActiveBadgeContract);
-  const maximum = keepOne ? 1 : 0;
+  const maximum = allowKeep ? 1 : 0;
   if (remaining.length > maximum) {
     throw new Error(
       `Politique Badge non respectée après correction (${remaining.length} actif(s), maximum ${maximum})`
@@ -2831,6 +2846,9 @@ async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
     const existing = await findActiveContracts(page, {
       includeExpiredPrestation: true,
     }).catch(() => []);
+    if (!memberHasActiveMembership(existing)) {
+      throw new Error('Vente Badge refusée — aucun abonnement actif');
+    }
     const activeBadge = existing.find(isActiveBadgeContract);
     if (activeBadge) {
       logInfo('Badge déjà actif — achat ignoré (anti-doublon)', {
@@ -3475,6 +3493,8 @@ module.exports = {
   buyCarteBadge,
   isBadgeSale,
   isActiveBadgeContract,
+  isActiveMembershipContract,
+  memberHasActiveMembership,
   isTrialPrestationConfig,
   annotateMember,
 };
