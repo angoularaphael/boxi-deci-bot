@@ -71,6 +71,8 @@ test('un badge sans abonnement actif est refusé', () => {
   );
   const src = require('fs').readFileSync(require('path').join(__dirname, '../bot/sale.js'), 'utf8');
   assert.match(src, /Vente Badge refusée — aucun abonnement actif/);
+  assert.match(src, /le badge payé conservé n’est pas recréé/);
+  assert.match(src, /keepOne\) \{\s*keeper = active\[0\]/);
 });
 
 test('ne confond pas un abonnement avec un badge', () => {

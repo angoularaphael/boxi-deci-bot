@@ -2805,18 +2805,29 @@ function memberHasActiveMembership(contracts = []) {
   return contracts.some(isActiveMembershipContract);
 }
 
-async function reconcileActiveBadges(page, memberId, gymConfig, { keepOne }) {
+async function reconcileActiveBadges(page, memberId, gymConfig, { keepOne = false, removeAll = false } = {}) {
   const { findActiveContracts } = require('./cancel-sale');
   await closeGreyboxIfOpen(page).catch(() => {});
   await openMemberCheck(page, memberId, gymConfig);
   const before = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
-  const allowKeep = Boolean(keepOne) && memberHasActiveMembership(before);
   const active = before
     .filter(isActiveBadgeContract)
     .sort((a, b) => Number(a.idc) - Number(b.idc));
-  const keeper = allowKeep ? active[0] || null : null;
-  const toCancel = allowKeep ? active.slice(1) : active;
-  if (!toCancel.length) return { keeper, cancelled: 0 };
+  let keeper = null;
+  let toCancel = [];
+  if (removeAll) {
+    toCancel = active;
+  } else if (keepOne) {
+    keeper = active[0] || null;
+    toCancel = active.slice(1);
+  }
+  if (!toCancel.length) return { keeper, cancelled: 0, kept_existing: Boolean(keeper) };
+
+  logWarn('Badges en trop à annuler — le badge payé conservé n’est pas recréé', {
+    member_id: memberId,
+    keep: keeper?.idc || null,
+    void: toCancel.map((c) => c.idc),
+  });
 
   const ids = new Set(toCancel.map((c) => String(c.idc)));
   await cancelSale(page, memberId, {
@@ -2829,13 +2840,12 @@ async function reconcileActiveBadges(page, memberId, gymConfig, { keepOne }) {
   await openMemberCheck(page, memberId, gymConfig);
   const after = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
   const remaining = after.filter(isActiveBadgeContract);
-  const maximum = allowKeep ? 1 : 0;
-  if (remaining.length > maximum) {
+  if (keepOne && remaining.length > 1) {
     throw new Error(
-      `Politique Badge non respectée après correction (${remaining.length} actif(s), maximum ${maximum})`
+      `Politique Badge non respectée après correction (${remaining.length} actif(s), maximum 1)`
     );
   }
-  return { keeper: remaining[0] || null, cancelled: toCancel.length };
+  return { keeper: remaining[0] || keeper, cancelled: toCancel.length, kept_existing: remaining.length > 0 };
 }
 
 async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
@@ -3249,6 +3259,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
 
     const badgePolicy = await reconcileActiveBadges(page, memberId, gymConfig, {
       keepOne: Boolean(badgeProductConfig),
+      removeAll: productConfig.sale_type === 'abonnement' && !badgeProductConfig,
     });
 
     if (badgeProductConfig) {
