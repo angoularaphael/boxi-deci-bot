@@ -23,7 +23,14 @@ function moduleResolvable(name) {
 
 /** Toujours s’assurer des deps critiques (même si node_modules existe déjà). */
 function ensureRequiredDeps() {
-  const required = ['dotenv', 'express', 'playwright', 'imapflow', 'mailparser'];
+  const required = [
+    '@supabase/supabase-js',
+    'dotenv',
+    'express',
+    'playwright',
+    'imapflow',
+    'mailparser',
+  ];
   const missing = required.filter((name) => !moduleResolvable(name));
   const nodeModules = path.join(__dirname, 'node_modules');
 
