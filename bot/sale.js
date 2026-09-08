@@ -3003,6 +3003,8 @@ async function verifyCreatedContract(
 }
 
 async function recordSale(page, order, productConfig, memberId, gymConfig = {}, options = {}) {
+  const { assertNotBalmaSale, resolveSaleGymConfig } = require('../lib/gym-slugs');
+  gymConfig = resolveSaleGymConfig(gymConfig, order);
   assertNotBalmaSale(gymConfig, order);
   if (productConfig.create_sale === false || productConfig.sale_type === 'none') {
     logInfo('Essai — fiche membre seulement', { order_id: order.order_id });
@@ -3148,7 +3150,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
     }
   } else if (productConfig.sale_type === 'abonnement') {
     const { findActiveContracts } = require('./cancel-sale');
-    const before = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
+    const before = await findActiveContracts(page).catch(() => []);
     const classified = classifyMemberContracts(before, productConfig, {
       isPendingOrFuture: isPendingOrFutureContract,
       skipCancel: false,
@@ -3176,7 +3178,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       });
       await closeGreyboxIfOpen(page);
       await openMemberCheck(page, memberId, gymConfig);
-      const stillThere = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(
+      const stillThere = await findActiveContracts(page).catch(
         () => []
       );
       leftover = classifyMemberContracts(stillThere, productConfig, {
@@ -3200,7 +3202,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
         });
         await closeGreyboxIfOpen(page);
         await openMemberCheck(page, memberId, gymConfig);
-        const stillAfterRetry = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(
+        const stillAfterRetry = await findActiveContracts(page).catch(
           () => []
         );
         leftover = classifyMemberContracts(stillAfterRetry, productConfig, {
@@ -3218,7 +3220,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
     }
 
     const afterCancel = classified.toCancel.length
-      ? await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => [])
+      ? await findActiveContracts(page).catch(() => [])
       : before;
     const afterClassified = classifyMemberContracts(afterCancel, productConfig, {
       isPendingOrFuture: isPendingOrFutureContract,
@@ -3311,6 +3313,9 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
     sale_type: productConfig.sale_type,
     badge_action: result.badge_action || null,
   });
+
+  const { assertMemberNotOnBalmaSite } = require('./deciplus-zone');
+  await assertMemberNotOnBalmaSite(page, memberId, gymConfig, 'post_vente');
 
   return { sale_id: result.sale_id || null, ...result, member_id: memberId };
 }

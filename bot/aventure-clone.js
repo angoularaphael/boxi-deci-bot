@@ -321,7 +321,7 @@ async function runBalmaSwitch(page, order) {
   minimesConfig.key = policy.create_gym;
   const balmaConfig = getGymConfig(policy.search_gym) || getGymConfig('balma');
 
-  await switchDeciplusSite(page, balmaConfig.deciplus_label || 'Balma').then((ok) => {
+  await switchDeciplusSite(page, balmaConfig.deciplus_label || 'Balma', { allowBalmaLookup: true }).then((ok) => {
     if (!ok) throw new Error('Impossible d’ouvrir la salle Balma sur Deciplus');
   });
 

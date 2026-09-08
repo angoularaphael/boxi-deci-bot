@@ -397,9 +397,16 @@ async function openChooseZonePicker(page, origin, timeout) {
   return isChooseZoneScreen(page);
 }
 
-async function switchDeciplusSite(page, siteLabel) {
+async function switchDeciplusSite(page, siteLabel, options = {}) {
   const label = String(siteLabel || '').trim();
   if (!label) return false;
+  const { matchGymLabel, balmaMigrationLookupAllowed, BALMA_DESTINATION_FORBIDDEN } = require('../lib/gym-slugs');
+  const slug = matchGymLabel(label);
+  const isBalma = slug === 'balma' || /\bbalma\b/i.test(label);
+  const allowBalma = Boolean(options.allowBalmaLookup) || balmaMigrationLookupAllowed();
+  if (isBalma && !allowBalma) {
+    throw new Error(`${BALMA_DESTINATION_FORBIDDEN} (switchDeciplusSite: ${label})`);
+  }
   const origin = deciplusOrigin();
   const timeout = Number(process.env.DECIPLUS_NAV_TIMEOUT || 60000);
   const picker = await openChooseZonePicker(page, origin, timeout);
@@ -425,12 +432,25 @@ async function switchDeciplusSite(page, siteLabel) {
   return true;
 }
 
+async function assertMemberNotOnBalmaSite(page, memberId, gymConfig = {}, context = 'operation') {
+  const { assertNeverBalmaDestination } = require('../lib/gym-slugs');
+  const { detectMemberGymConfig } = require('./member');
+  const { openMemberCheck } = require('./wallet');
+  if (memberId) {
+    await openMemberCheck(page, memberId, gymConfig).catch(() => {});
+  }
+  const live = await detectMemberGymConfig(page, gymConfig).catch(() => null);
+  assertNeverBalmaDestination(live || gymConfig, {}, context);
+  return live;
+}
+
 module.exports = {
   isChooseZoneScreen,
   selectSiteInPicker,
   clickSellOnSite,
   ensureDeciplusSaleZone,
   switchDeciplusSite,
+  assertMemberNotOnBalmaSite,
   normalizeSiteLabel,
   siteLabelsMatch,
   zonePickerUrls,

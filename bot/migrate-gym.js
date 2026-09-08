@@ -302,15 +302,9 @@ async function confirmMigrate(page) {
 }
 
 async function migrateMemberToGym(page, memberId, gymConfig) {
-  const { resolveSaleGymConfig, isBalmaSaleTarget } = require('../lib/gym-slugs');
-  const requested = gymConfig;
+  const { resolveSaleGymConfig, assertNeverBalmaDestination } = require('../lib/gym-slugs');
+  assertNeverBalmaDestination(gymConfig, {}, 'migration');
   gymConfig = resolveSaleGymConfig(gymConfig);
-  if (isBalmaSaleTarget(requested, {})) {
-    logWarn('Migration vers Balma interdite — destination forcée Minimes', {
-      member_id: memberId,
-      requested: requested?.deciplus_label || requested?.key || 'Balma',
-    });
-  }
   await openMemberCheck(page, memberId, gymConfig).catch(() => {});
   await randomDelay(400, 700);
   let onMovePage = false;
@@ -502,6 +496,7 @@ module.exports = {
   findBalmaMember,
   snapshotContracts,
   migrateMemberToGym,
+  migrateMemberViaApi,
   restoreContracts,
   runBalmaSwitch,
   parseFrDates,

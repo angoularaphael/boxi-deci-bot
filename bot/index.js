@@ -214,7 +214,7 @@ async function processCancelJob(page, order) {
   if (!memberId && (identity.first_name || identity.last_name)) {
     const { CHANGE_MATCH_FIELDS } = require('./member');
     const { findMemberOnBoxingCenterGyms } = require('./search-bc-gyms');
-    const { isBalmaGymSlug } = require('../lib/gym-slugs');
+    const { resolveSearchGymSlug } = require('../lib/gym-slugs');
     const cancelReason = String(order.cancel_reason || '').toLowerCase();
     // Changement d’abo : même règle que verify_identity (nom/prénom/naissance, pas téléphone)
     const matchFields =
@@ -223,8 +223,8 @@ async function processCancelJob(page, order) {
         : undefined;
     const match = await findMemberOnBoxingCenterGyms(page, identity, {
       matchFields,
-      preferredGym: isBalmaGymSlug(order.gym) ? 'balma' : order.gym,
-      includeBalma: isBalmaGymSlug(order.gym),
+      preferredGym: resolveSearchGymSlug(order.gym),
+      allowBalmaLookup: false,
     });
     if (!match.found) {
       await notifyMismatch(match.reason || 'identity_mismatch', match.mismatch_fields || []);
@@ -1256,11 +1256,11 @@ async function processVerifyIdentityJob(page, order) {
   const matchFields =
     matchMode === 'cancel' || matchMode === 'full' ? undefined : CHANGE_MATCH_FIELDS;
   const { findMemberOnBoxingCenterGyms } = require('./search-bc-gyms');
-  const { isBalmaGymSlug } = require('../lib/gym-slugs');
+  const { resolveSearchGymSlug } = require('../lib/gym-slugs');
   const match = await findMemberOnBoxingCenterGyms(page, identity, {
     matchFields,
-    preferredGym: isBalmaGymSlug(order.gym) ? 'balma' : order.gym,
-    includeBalma: isBalmaGymSlug(order.gym),
+    preferredGym: resolveSearchGymSlug(order.gym),
+    allowBalmaLookup: false,
   });
   if (!match.found) {
     await pushStatus('mismatch', {

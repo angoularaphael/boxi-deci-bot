@@ -3,6 +3,7 @@
 const { logInfo, logWarn } = require('../lib/logger');
 const { uniqueDeciplusSearchConfigs } = require('../lib/deciplus-sites');
 const { getGymConfig } = require('../lib/normalize');
+const { resolveSearchGymSlug, balmaMigrationLookupAllowed } = require('../lib/gym-slugs');
 const { switchDeciplusSite } = require('./deciplus-zone');
 const { findMemberByIdentity } = require('./member');
 
@@ -20,23 +21,24 @@ async function memberZoneLooksBalma(page) {
   return false;
 }
 
+function allowBalmaLookup(options = {}) {
+  return Boolean(options.allowBalmaLookup) && balmaMigrationLookupAllowed();
+}
+
 /**
  * Identité résil / changement d’abo : clubs Deciplus Boxing Center.
- * Club États-Unis inclus même si les inscriptions neuves se créent à Minimes.
- * Balma seulement si includeBalma.
+ * Balma exclu par défaut — lookup Balma réservé aux scripts ops (env + option).
  */
 async function findMemberOnBoxingCenterGyms(page, identity, options = {}) {
-  const sites = uniqueDeciplusSearchConfigs(options.preferredGym);
-  if (options.includeBalma) {
-    const balma = getGymConfig('balma');
-    if (!sites.some((s) => String(s.deciplus_zone_id) === String(balma.deciplus_zone_id))) {
-      sites.unshift(balma);
-    }
-  }
+  const preferred = resolveSearchGymSlug(options.preferredGym || 'minimes');
+  const balmaLookup = allowBalmaLookup(options);
+  const sites = uniqueDeciplusSearchConfigs(preferred, { allowBalmaLookup: balmaLookup });
   let last = { found: false, reason: 'not_found', mismatch_fields: [] };
   for (const gym of sites) {
     const label = gym?.deciplus_label || gym?.label;
-    const switched = await switchDeciplusSite(page, label).catch((err) => {
+    const switched = await switchDeciplusSite(page, label, {
+      allowBalmaLookup: balmaLookup,
+    }).catch((err) => {
       logWarn('Site BC non ouvert pour vérif', { gym: gym.key, error: err.message });
       return false;
     });
@@ -46,7 +48,7 @@ async function findMemberOnBoxingCenterGyms(page, identity, options = {}) {
       last = match;
       continue;
     }
-    if (!options.includeBalma && (await memberZoneLooksBalma(page))) {
+    if (!balmaLookup && (await memberZoneLooksBalma(page))) {
       logInfo('Fiche Balma ignorée (résil / changement)', { member_id: match.member_id, gym: gym.key });
       last = { found: false, reason: 'balma_skipped', member_id: match.member_id };
       continue;
@@ -57,4 +59,4 @@ async function findMemberOnBoxingCenterGyms(page, identity, options = {}) {
   return last;
 }
 
-module.exports = { findMemberOnBoxingCenterGyms, memberZoneLooksBalma };
+module.exports = { findMemberOnBoxingCenterGyms, memberZoneLooksBalma, allowBalmaLookup };
