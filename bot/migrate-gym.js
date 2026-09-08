@@ -162,11 +162,78 @@ async function openMoveMemberPage(page, memberId) {
   ];
   for (const rel of paths) {
     await gotoDeciplus(page, rel).catch(() => {});
-    await randomDelay(500, 900);
-    for (const ctx of getScopes(page)) {
-      if ((await ctx.locator('select#idz, #moveMemCheck').count().catch(() => 0)) > 0) {
-        return true;
+    await randomDelay(800, 1400);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      for (const ctx of getScopes(page)) {
+        if ((await ctx.locator('select#idz, select[name="idz"], #moveMemCheck').count().catch(() => 0)) > 0) {
+          return true;
+        }
       }
+      await page.waitForTimeout(400);
+    }
+  }
+  return false;
+}
+
+async function selectMigrateZoneInContext(ctx, { zoneId, label, needle }) {
+  const pickerSelectors = ['select#idz', 'select[name="idz"]'];
+  for (const pickerSel of pickerSelectors) {
+    const picker = ctx.locator(pickerSel).first();
+    if ((await picker.count()) === 0) continue;
+
+    const byDom = await ctx
+      .evaluate(
+        ({ selector, zone, labelRe }) => {
+          const scopes = [document, ...Array.from(document.querySelectorAll('iframe')).map((f) => {
+            try {
+              return f.contentDocument;
+            } catch {
+              return null;
+            }
+          }).filter(Boolean)];
+          for (const doc of scopes) {
+            const sel = doc.querySelector(selector);
+            if (!sel) continue;
+            const opts = Array.from(sel.options || []);
+            let target = opts.find((o) => String(o.value) === String(zone));
+            if (!target) {
+              target = opts.find((o) => new RegExp(labelRe, 'i').test(String(o.textContent || '').trim()));
+            }
+            if (!target?.value) continue;
+            sel.value = target.value;
+            sel.dispatchEvent(new Event('input', { bubbles: true }));
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            return {
+              zone_id: target.value,
+              site: String(target.textContent || '').trim(),
+            };
+          }
+          return null;
+        },
+        { selector: pickerSel, zone: zoneId, labelRe: String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+      )
+      .catch(() => null);
+    if (byDom?.zone_id) {
+      logInfo('Site destination Deciplus (idz DOM)', byDom);
+      return true;
+    }
+
+    await picker.scrollIntoViewIfNeeded().catch(() => {});
+    const byValue = await picker.selectOption(zoneId, { force: true }).then(() => true).catch(() => false);
+    if (byValue) {
+      logInfo('Site destination Deciplus (idz)', { zone_id: zoneId, site: label });
+      return true;
+    }
+
+    const options = await picker.locator('option').all();
+    for (const opt of options) {
+      const text = ((await opt.textContent().catch(() => '')) || '').trim();
+      if (!needle.test(text)) continue;
+      const value = await opt.getAttribute('value');
+      if (!value) continue;
+      await picker.selectOption(value, { force: true }).catch(() => {});
+      logInfo('Site destination Deciplus (label)', { site: text, zone_id: value });
+      return true;
     }
   }
   return false;
@@ -177,23 +244,7 @@ async function pickMinimesInMigratePicker(page, gymConfig = {}) {
   const zoneId = String(gymConfig.deciplus_zone_id || '2');
   const needle = new RegExp(String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
   for (const ctx of getScopes(page)) {
-    const picker = ctx.locator('select#idz').first();
-    if ((await picker.count()) === 0) continue;
-    const byValue = await picker.selectOption(zoneId).then(() => true).catch(() => false);
-    if (byValue) {
-      logInfo('Site destination Deciplus (idz)', { zone_id: zoneId, site: label });
-      return true;
-    }
-    const options = await picker.locator('option').all();
-    for (const opt of options) {
-      const text = ((await opt.textContent().catch(() => '')) || '').trim();
-      if (!needle.test(text)) continue;
-      const value = await opt.getAttribute('value');
-      if (!value) continue;
-      await picker.selectOption(value);
-      logInfo('Site destination Deciplus (label)', { site: text, zone_id: value });
-      return true;
-    }
+    if (await selectMigrateZoneInContext(ctx, { zoneId, label, needle })) return true;
   }
   return false;
 }
@@ -202,6 +253,39 @@ async function confirmMigrate(page) {
   page.once('dialog', async (dialog) => {
     await dialog.accept().catch(() => {});
   });
+
+  for (const ctx of getScopes(page)) {
+    const clicked = await ctx
+      .evaluate(() => {
+        const scopes = [document, ...Array.from(document.querySelectorAll('iframe')).map((f) => {
+          try {
+            return f.contentDocument;
+          } catch {
+            return null;
+          }
+        }).filter(Boolean)];
+        for (const doc of scopes) {
+          const candidates = [
+            ...doc.querySelectorAll('input.fichemembre_button'),
+            ...doc.querySelectorAll('input[type="button"]'),
+            ...doc.querySelectorAll('input[type="submit"]'),
+          ];
+          for (const btn of candidates) {
+            const value = String(btn.value || btn.getAttribute('value') || '').trim();
+            if (!/Changer le site/i.test(value)) continue;
+            btn.click();
+            return true;
+          }
+        }
+        return false;
+      })
+      .catch(() => false);
+    if (clicked) {
+      await randomDelay(1000, 1600);
+      return true;
+    }
+  }
+
   const builders = [];
   for (const ctx of getScopes(page)) {
     builders.push(
@@ -222,7 +306,7 @@ async function migrateMemberToGym(page, memberId, gymConfig) {
   if (await clickMigrateIcon(page)) {
     await randomDelay(700, 1200);
     for (const ctx of getScopes(page)) {
-      if ((await ctx.locator('select#idz, #moveMemCheck').count().catch(() => 0)) > 0) {
+      if ((await ctx.locator('select#idz, select[name="idz"], #moveMemCheck').count().catch(() => 0)) > 0) {
         onMovePage = true;
         break;
       }

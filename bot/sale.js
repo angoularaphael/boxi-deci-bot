@@ -1335,18 +1335,42 @@ async function getBadgeEditorScopes(page) {
   const modal = await getBadgeConfigModal(page);
   if (modal) return [modal];
 
+  const out = [];
+  const seen = new Set();
+  const pushScope = (scope) => {
+    if (!scope || seen.has(scope)) return;
+    seen.add(scope);
+    out.push(scope);
+  };
+
+  pushScope(await resolveDeciplusWorkPage(page).catch(() => null));
+
+  for (const frame of page.frames?.() || []) {
+    try {
+      const hit = await frame.evaluate(() =>
+        /Action souhaitée|Date de fin|Configuration de Badge|Modifier la date de fin/i.test(
+          document.body?.innerText || ''
+        )
+      );
+      if (hit) pushScope(frame);
+    } catch {
+      /* frame détaché */
+    }
+  }
+
   const locators = [
     page.locator('#GB_window').first(),
     page.locator('[role="dialog"]').first(),
     page.locator('.swal2-popup').first(),
     page.locator('.modal-content').first(),
   ];
-  const out = [];
   for (const scope of locators) {
     if ((await scope.count()) > 0 && (await scope.isVisible().catch(() => false))) {
-      out.push(scope);
+      pushScope(scope);
     }
   }
+
+  if (!out.length) pushScope(page);
   return out;
 }
 
@@ -2073,6 +2097,35 @@ async function configureBadgeDeferredDates(page, scheduleOrDays) {
     scheduleOrDays && typeof scheduleOrDays === 'object' && scheduleOrDays.endStr
       ? scheduleOrDays
       : badgeScheduleDates(3);
+
+  // Repli nextgen/vente : rouvrir « Configuration de Badge » (pas le panneau legacy Action souhaitée)
+  try {
+    if (!(await isBadgeConfigModalOpen(page))) {
+      await reopenBadgeConfigModal(page);
+      await randomDelay(400, 700);
+    }
+    if (await isBadgeConfigModalOpen(page)) {
+      const ctx = await resolveDeciplusWorkPage(page);
+      await badgeDomEvaluate(ctx, 'fillDu', schedule.startStr).catch(() => false);
+      await badgeDomEvaluate(ctx, 'fillAu', schedule.endStr).catch(() => false);
+      await fillBadgePaymentDate(page, schedule.payStr);
+      await randomDelay(400, 700);
+      await waitForBadgeWarningGone(page, 6000).catch(() => {});
+      if (await clickBadgeModalAppliquer(page)) {
+        await waitForBadgeModalClosed(page, 8000);
+        await dismissPostApplyDialogs(page, { allowRib: false }).catch(() => {});
+        logInfo('Badge — dates via modale (repli post-Appliquer)', {
+          date_debut: schedule.startStr,
+          date_fin: schedule.endStr,
+          date_paiement: schedule.payStr,
+        });
+        return true;
+      }
+    }
+  } catch (err) {
+    logWarn('Badge — repli modale dates', { error: err.message });
+  }
+
   if (await waitForModifierDateFinPopup(page, schedule)) return true;
   if (await fillBadgeContractDates(page, schedule)) return true;
 
@@ -2080,11 +2133,13 @@ async function configureBadgeDeferredDates(page, scheduleOrDays) {
     return true;
   }
 
+  const work = await resolveDeciplusWorkPage(page).catch(() => page);
   logWarn('Badge — panneau date introuvable sur vente', {
     url: page.url(),
-    has_action: (await page.getByText(/Action souhaitée/i).count()) > 0,
-    has_date_fin: (await page.getByText(/Date de fin/i).count()) > 0,
-    has_virement: (await page.getByText(/Virement/i).count()) > 0,
+    has_action: (await work.getByText(/Action souhaitée/i).count().catch(() => 0)) > 0,
+    has_date_fin: (await work.getByText(/Date de fin/i).count().catch(() => 0)) > 0,
+    has_virement: (await work.getByText(/Virement/i).count().catch(() => 0)) > 0,
+    modal_open: await isBadgeConfigModalOpen(page).catch(() => false),
   });
   return false;
 }
@@ -2166,10 +2221,17 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
     await ensurePaiementComptantOff(page, { strict: true });
     await randomDelay(200, 400);
     const ctx = await resolveDeciplusWorkPage(page);
+    await fillBadgeValideDuDate(ctx, startStr).catch(() => false);
+    await fillBadgeAuDate(page, ctx, endStr).catch(() => false);
     await badgeDomEvaluate(ctx, 'fillDu', startStr).catch(() => false);
     await badgeDomEvaluate(ctx, 'fillAu', endStr).catch(() => false);
     await fillBadgePaymentDate(page, payStr);
-    await randomDelay(200, 400);
+    await randomDelay(400, 700);
+    await waitForBadgeWarningGone(page, 6000).catch(() => {});
+    const auReadback = await readBadgeAuValueFromModal(page).catch(() => null);
+    if (!isFrDateAtLeast(auReadback, endStr)) {
+      logWarn('Badge — Valide au non confirmée avant Appliquer', { expected: endStr, actual: auReadback });
+    }
   }
 
   const clicked = await clickBadgeModalAppliquer(page);
@@ -2674,9 +2736,18 @@ async function finalizePayment(page, productConfig, gymConfig = {}) {
     if (!done) done = await clickTerminerVente(page);
     if (!done) done = await clickVenteFooterAction(page, /\bTerminer\b/i);
     if (!done) {
-      logWarn('Vente virement — footer Terminer introuvable, vérification du contrat requise', {
-        screenshot: await captureSaleDebugScreenshot(page, 'virement-finalize-missing'),
+      await page.waitForTimeout(1500);
+      done = await clickTerminerVente(page);
+    }
+    if (!done) {
+      done = await clickVenteFooterAction(page, /\bTerminer\b/i, {
+        preferClass: 'verticalDocumentBar',
       });
+    }
+    if (!done) {
+      const screenshot = await captureSaleDebugScreenshot(page, 'virement-finalize-missing');
+      logWarn('Vente virement — footer Terminer introuvable', { screenshot });
+      throw new Error('Vente Deciplus — bouton Terminer introuvable après virement');
     }
   } else if (mode === 'card' || mode === 'cb') {
     await clickFirst(page, sel('payment_finalize.carte_bancaire'), { force: true });
@@ -2700,11 +2771,29 @@ async function buyAbonnement(page, productConfig, gymConfig) {
 
 async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
   await openSaleFlow(page, productConfig, gymConfig, 'carte');
-    await applyConfigModal(page, productConfig, memberId);
+  await applyConfigModal(page, productConfig, memberId);
   await finalizePayment(page, productConfig, gymConfig);
 
+  let badge_echeance_ok = true;
+  if (isBadgeSale(productConfig) && memberId) {
+    const timing = String(productConfig.badge_timing || 'deferred').toLowerCase();
+    if (timing !== 'immediate' && productConfig.paiement_comptant !== true) {
+      const enforce = await enforceBadgeEcheance(page, memberId, productConfig, gymConfig).catch((err) => ({
+        ok: false,
+        reason: err.message,
+      }));
+      badge_echeance_ok = Boolean(enforce.ok);
+      if (!badge_echeance_ok) {
+        logWarn('Badge — échéance non confirmée après vente script', {
+          member_id: memberId,
+          reason: enforce.reason || 'unknown',
+        });
+      }
+    }
+  }
+
   const action = isBadgeSale(productConfig) ? 'carte_badge_created' : 'carte_created';
-  return { action, sale_type: 'carte' };
+  return { action, sale_type: 'carte', badge_echeance_ok };
 }
 
 async function annotateMember(page, order, productConfig, memberId = null) {
@@ -2985,11 +3074,9 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
         }).toCancel.filter((c) => leftoverIds.has(String(c.idc)));
       }
       if (leftover.length) {
-        logWarn('Ancien abo toujours visible — on vend le nouveau quand même', {
-          order_id: order.order_id,
-          member_id: memberId,
-          labels: leftover.map((c) => String(c.label || '').slice(0, 80)),
-        });
+        throw new Error(
+          `Ancien abo toujours actif (${leftover.map((c) => c.idc).join(', ')}) — nouvelle vente reportée`
+        );
       }
     }
 

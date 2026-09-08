@@ -12,18 +12,25 @@
 const { logInfo, logWarn } = require('../lib/logger');
 
 function imapConfig() {
+  const host = String(
+    process.env.DECIPLUS_IMAP_HOST || process.env.IMAP_HOST || 'imap.gmail.com'
+  ).trim();
   const user = String(
     process.env.DECIPLUS_IMAP_USER || process.env.IMAP_USER || ''
   )
     .trim()
     .replace(/^["']|["']$/g, '');
-  const pass = String(
+  let pass = String(
     process.env.DECIPLUS_IMAP_PASS || process.env.IMAP_PASS || ''
   )
     .trim()
     .replace(/^["']|["']$/g, '');
+  // Les mots de passe d'application Gmail sont souvent copiés sous forme 4×4.
+  if (/gmail\.com$/i.test(host) && /^(?:[^\s]{4}\s){3}[^\s]{4}$/.test(pass)) {
+    pass = pass.replace(/\s/g, '');
+  }
   return {
-    host: process.env.DECIPLUS_IMAP_HOST || process.env.IMAP_HOST || 'imap.gmail.com',
+    host,
     port: Number(process.env.DECIPLUS_IMAP_PORT || process.env.IMAP_PORT || 993),
     user,
     pass,
@@ -67,11 +74,119 @@ function extractOtpCode(text = '') {
 
 function looksLikeDeciplusOtpMail({ subject = '', from = '', text = '' } = {}) {
   const blob = `${subject}\n${from}\n${text}`.toLowerCase();
-  if (/deciplus|boxing\s*center|boxingcenter/.test(blob)) return true;
+  if (/deciplus|xplor|boxing\s*center|boxingcenter/.test(blob)) return true;
   if (/(code|otp|vérification|verification|connexion|login|authent)/i.test(blob) && /\d{4,8}/.test(blob)) {
     return true;
   }
   return false;
+}
+
+function htmlToSafeText(html = '') {
+  return String(html || '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(?:p|div|td|li|h[1-6])>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;|&#160;|&#xA0;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>');
+}
+
+async function parseOtpMessage(source, envelope = {}) {
+  const { simpleParser } = require('mailparser');
+  const parsed = await simpleParser(source, {
+    skipTextToHtml: false,
+    skipImageLinks: true,
+  });
+  const subject = String(parsed.subject || envelope.subject || '');
+  const from = String(
+    parsed.from?.text || (envelope.from || []).map((item) => item.address || '').join(' ') || ''
+  );
+  const text = [parsed.text, htmlToSafeText(parsed.html)].filter(Boolean).join('\n');
+  const matches = looksLikeDeciplusOtpMail({ subject, from, text });
+  return {
+    matches,
+    code: matches ? extractOtpCode(`${subject}\n${text}`) : null,
+    hasText: Boolean(parsed.text),
+    hasHtml: Boolean(parsed.html),
+  };
+}
+
+function selectOtpMailboxes(boxes = []) {
+  const selected = [];
+  const add = (box, role) => {
+    if (box && !selected.some((item) => item.path === box.path)) {
+      selected.push({ path: box.path, role });
+    }
+  };
+  add(
+    boxes.find((box) => String(box.specialUse || '').toLowerCase() === '\\inbox') ||
+      boxes.find((box) => String(box.path || '').toUpperCase() === 'INBOX'),
+    'inbox'
+  );
+  add(
+    boxes.find((box) => String(box.specialUse || '').toLowerCase() === '\\all') ||
+      boxes.find((box) => /all mail|tous les messages/i.test(String(box.path || ''))),
+    'all'
+  );
+  add(
+    boxes.find((box) => String(box.specialUse || '').toLowerCase() === '\\junk') ||
+      boxes.find((box) => /spam|junk|indésirables/i.test(String(box.path || ''))),
+    'spam'
+  );
+  return selected;
+}
+
+async function scanOtpMailbox(client, mailbox, { sinceMs, notBeforeMs }) {
+  const lock = await client.getMailboxLock(mailbox.path);
+  let recentCount = 0;
+  let matchCount = 0;
+  try {
+    const since = new Date(Date.now() - sinceMs);
+    const uids = (await client.search({ since }, { uid: true })) || [];
+    recentCount = uids.length;
+    if (!uids.length) return { recentCount, matchCount, result: null };
+
+    const dated = [];
+    for await (const msg of client.fetch(
+      uids,
+      { uid: true, internalDate: true },
+      { uid: true }
+    )) {
+      dated.push({ uid: msg.uid, date: msg.internalDate || new Date(0) });
+    }
+    dated.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    for (const candidate of dated.slice(0, 20)) {
+      const mailAt = new Date(candidate.date).getTime();
+      if (notBeforeMs && mailAt + 5000 < notBeforeMs) continue;
+      for await (const msg of client.fetch(
+        candidate.uid,
+        { uid: true, source: true, envelope: true, internalDate: true },
+        { uid: true }
+      )) {
+        const parsed = await parseOtpMessage(msg.source, msg.envelope);
+        if (!parsed.matches) continue;
+        matchCount += 1;
+        if (!parsed.code) continue;
+        return {
+          recentCount,
+          matchCount,
+          result: {
+            code: parsed.code,
+            mailAt,
+            hasText: parsed.hasText,
+            hasHtml: parsed.hasHtml,
+          },
+        };
+      }
+    }
+    return { recentCount, matchCount, result: null };
+  } finally {
+    lock.release();
+  }
 }
 
 /**
@@ -84,10 +199,9 @@ async function fetchDeciplusEmailCode(opts = {}) {
   }
 
   let ImapFlow;
-  let simpleParser;
   try {
     ImapFlow = require('imapflow').ImapFlow;
-    simpleParser = require('mailparser').simpleParser;
+    require('mailparser').simpleParser;
   } catch {
     logWarn(
       'imapflow/mailparser absents — npm install imapflow mailparser (lecture auto code Deciplus)'
@@ -105,7 +219,6 @@ async function fetchDeciplusEmailCode(opts = {}) {
   let attempt = 0;
 
   logInfo('Lecture IMAP du code email Deciplus…', {
-    user: cfg.user,
     host: cfg.host,
     max_wait_s: Math.round(maxWaitMs / 1000),
   });
@@ -118,57 +231,36 @@ async function fetchDeciplusEmailCode(opts = {}) {
       secure: true,
       auth: { user: cfg.user, pass: cfg.pass },
       logger: false,
-      tls: { rejectUnauthorized: false },
     });
 
     try {
       await client.connect();
-      const lock = await client.getMailboxLock('INBOX');
-      try {
-        const since = new Date(Date.now() - sinceMs);
-        const uids = (await client.search({ since }, { uid: true })) || [];
-        if (uids.length) {
-          const dated = [];
-          for await (const msg of client.fetch(uids, { uid: true, internalDate: true }, { uid: true })) {
-            dated.push({ uid: msg.uid, date: msg.internalDate || new Date(0) });
-          }
-          dated.sort((a, b) => new Date(b.date) - new Date(a.date));
-          const batch = dated.slice(0, 12).map((d) => d.uid);
-
-          for await (const msg of client.fetch(
-            batch,
-            { uid: true, source: true, envelope: true, internalDate: true },
-            { uid: true }
-          )) {
-            const parsed = await simpleParser(msg.source, {
-              skipTextToHtml: false,
-              skipImageLinks: true,
-            });
-            const subject = String(parsed.subject || msg.envelope?.subject || '');
-            const from = String(
-              parsed.from?.text ||
-                (msg.envelope?.from || []).map((f) => f.address || '').join(' ') ||
-                ''
-            );
-            const text = [parsed.text, parsed.html ? String(parsed.html).replace(/<[^>]+>/g, ' ') : '']
-              .filter(Boolean)
-              .join('\n');
-            const mailAt = new Date(msg.internalDate || 0).getTime();
-            if (notBeforeMs && mailAt + 2000 < notBeforeMs) continue;
-            if (!looksLikeDeciplusOtpMail({ subject, from, text })) continue;
-            const code = extractOtpCode(`${subject}\n${text}`);
-            if (!code) continue;
-            const ageSec = Math.round((Date.now() - mailAt) / 1000);
-            logInfo('Code email Deciplus trouvé via IMAP', {
-              subject: subject.slice(0, 80),
-              age_s: ageSec,
-              attempt,
-            });
-            return code;
-          }
+      const mailboxes = selectOtpMailboxes(await client.list());
+      for (const mailbox of mailboxes) {
+        const scan = await scanOtpMailbox(client, mailbox, { sinceMs, notBeforeMs });
+        if (scan.result) {
+          const ageSec = Math.round((Date.now() - scan.result.mailAt) / 1000);
+          logInfo(`Code email Deciplus trouvé via IMAP (folder=${mailbox.role})`, {
+            folder: mailbox.role,
+            age_s: ageSec,
+            attempt,
+            has_text: scan.result.hasText,
+            has_html: scan.result.hasHtml,
+          });
+          await client.logout().catch(() => {});
+          return scan.result.code;
         }
-      } finally {
-        lock.release();
+        if (attempt === 1 || attempt % 5 === 0) {
+          logInfo(
+            `Diagnostic IMAP Deciplus (folder=${mailbox.role}, recent=${scan.recentCount}, matches=${scan.matchCount})`,
+            {
+              attempt,
+              folder: mailbox.role,
+              recent_count: scan.recentCount,
+              match_count: scan.matchCount,
+            }
+          );
+        }
       }
       await client.logout().catch(() => {});
     } catch (err) {
@@ -187,7 +279,6 @@ async function fetchDeciplusEmailCode(opts = {}) {
   }
 
   logWarn('Aucun code email Deciplus trouvé dans la boîte IMAP', {
-    user: cfg.user,
     waited_s: Math.round((Date.now() - startedAt) / 1000),
   });
   return null;
@@ -197,5 +288,9 @@ module.exports = {
   isImapOtpConfigured,
   extractOtpCode,
   looksLikeDeciplusOtpMail,
+  htmlToSafeText,
+  parseOtpMessage,
+  selectOtpMailboxes,
+  scanOtpMailbox,
   fetchDeciplusEmailCode,
 };

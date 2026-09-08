@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "boxi-deci-bot",
   "version": "1.0.0",
   "private": true,
@@ -9,6 +9,7 @@
     "bot:run": "node bot/index.js"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.49.8",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "imapflow": "^1.6.6",

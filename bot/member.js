@@ -25,7 +25,7 @@ function navTimeout() {
 }
 
 /** Deciplus stocke les portraits en 200×200 (~6–8 Ko). En dessous = blanc / vide. */
-const MIN_STORED_PHOTO_BYTES = 5000;
+const MIN_STORED_PHOTO_BYTES = 3000;
 
 function getSelectors() {
   try {
@@ -1796,9 +1796,9 @@ async function uploadMemberPhotoViaApi(page, memberId, dataUrl) {
   }
 
   let storedBytes = 0;
-  for (let attempt = 0; attempt < 5 && storedBytes < MIN_STORED_PHOTO_BYTES; attempt += 1) {
+  for (let attempt = 0; attempt < 12 && storedBytes < MIN_STORED_PHOTO_BYTES; attempt += 1) {
     storedBytes = await measureStoredMemberPhoto(page, memberId, token);
-    if (storedBytes < MIN_STORED_PHOTO_BYTES) await page.waitForTimeout(500);
+    if (storedBytes < MIN_STORED_PHOTO_BYTES) await page.waitForTimeout(attempt < 4 ? 700 : 1200);
   }
   const ok = storedBytes >= MIN_STORED_PHOTO_BYTES;
   if (ok) {
@@ -1936,9 +1936,9 @@ async function uploadMemberPhotoViaLegacyUi(page, photoPath, memberId) {
           await randomDelay(900, 1400);
           const token = await getStaffAccessToken(page);
           let storedBytes = 0;
-          for (let attempt = 0; attempt < 5 && storedBytes < MIN_STORED_PHOTO_BYTES; attempt += 1) {
+          for (let attempt = 0; attempt < 12 && storedBytes < MIN_STORED_PHOTO_BYTES; attempt += 1) {
             storedBytes = await measureStoredMemberPhoto(page, memberId, token);
-            if (storedBytes < MIN_STORED_PHOTO_BYTES) await page.waitForTimeout(500);
+            if (storedBytes < MIN_STORED_PHOTO_BYTES) await page.waitForTimeout(attempt < 4 ? 700 : 1200);
           }
           const ok = storedBytes >= MIN_STORED_PHOTO_BYTES;
           logInfo('Photo membre envoyée (legacy photo_upload)', {

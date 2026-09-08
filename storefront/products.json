@@ -68,7 +68,7 @@
     "requires_iban": false,
     "requires_payment": true,
     "supports_installment_choice": true,
-    "installments_note": "En une fois ou en 4× sans frais"
+    "installments_note": "Montant total : 259 € en 1× ou 4× sans frais via PayPal ou CB"
   },
   {
     "id": "boxe-educative",
@@ -90,7 +90,7 @@
     "category": "Abonnements",
     "name": "BABY BOXE",
     "tagline": "Baby boxe",
-    "description": "Éveil sportif par la boxe pour les plus petits : motricité, coordination et confiance en soi. Saison complète. Paiement en 1× ou 4× : 62,50 € (25 %) via PayPal ou PayPlug, puis RIB pour 3 prélèvements.",
+    "description": "Éveil sportif par la boxe pour les plus petits : motricité, coordination et confiance en soi. Saison complète. Paiement en 1× ou 4× : 62,50 € par CB puis RIB, ou via PayPal si éligible.",
     "price_cents": 25000,
     "price_label": "250,00 €",
     "badge": "1× ou 4× sans frais",

@@ -51,9 +51,16 @@ const {
 const { fetchDeciplusCatalog, resolveProductConfig, resolveBadgeProductConfig } = require('./catalog');
 const { applyBillingPlanToProductConfig, isPayplug4xPrelevementOrder } = require('../lib/billing-plan');
 const { isCartePrestationConfig } = require('../lib/catalog-sale');
-const { logInfo, logError, logWarn, sendAlert } = require('../lib/logger');
+const { logInfo, logError, logWarn, sendAlert, logJobEvent } = require('../lib/logger');
 const { getBotId, wrongSalesBotReject } = require('../lib/sales-bot');
 const { sleep } = require('../lib/utils');
+const idempotency = require('../lib/persistent-idempotency');
+const { STATES } = require('../lib/job-lifecycle');
+const { classifyError, backoffMs } = require('../lib/retry-policy');
+const {
+  shouldFailoverSale,
+  handoffFailedSale,
+} = require('../lib/bot-failover');
 const {
   maybeKeepSessionAlive,
   forceRefreshSession,
@@ -365,14 +372,27 @@ async function processSaleJob(page, order, jobMeta = {}) {
   const filePath = jobMeta.file || null;
   const checkpoint = jobMeta.checkpoint || order.checkpoint || {};
 
-  const saveCheckpoint = (patch) => {
-    if (!filePath) return;
+  const saveCheckpoint = async (patch) => {
     try {
       const next = { ...(checkpoint || {}), ...patch, at: new Date().toISOString() };
       Object.assign(checkpoint, next);
-      updateJob(filePath, { checkpoint: next });
+      if (filePath) updateJob(filePath, { checkpoint: next });
+      await idempotency.checkpoint(order.order_id, 'sale', {
+        status: 'processing',
+        lifecycle_state: patch.lifecycle_state || null,
+        attempt: Number(jobMeta.attempt || 1),
+        member_id: next.deciplus_member_id || null,
+        sale_id: next.deciplus_sale_id || null,
+        metadata: {
+          step: next.step || null,
+          photo_done: Boolean(next.photo_done),
+          iban_done: Boolean(next.iban_done),
+          sale_done: Boolean(next.sale_done),
+        },
+      });
     } catch (err) {
-      logWarn('Checkpoint job non enregistré', { order_id: order.order_id, error: err.message });
+      err.message = `Checkpoint persistant requis — ${err.message}`;
+      throw err;
     }
   };
 
@@ -402,10 +422,19 @@ async function processSaleJob(page, order, jobMeta = {}) {
     productConfig.paiement_comptant = false;
   }
 
+  const { isOffre29Product, isAnnualPromoProduct } = require('../lib/sale-contract-match');
+  if (isAnnualPromoProduct(productConfig) || isAnnualPromoProduct(order)) {
+    productConfig.auto_badge = false;
+    if (!isPayplug4xPrelevementOrder(order)) {
+      productConfig.paiement_comptant = true;
+      productConfig.requires_iban = false;
+      productConfig.skip_rib_prompt = true;
+    }
+  }
+
   if (isCartePrestationConfig(productConfig)) {
     productConfig.auto_badge = false;
   } else {
-    const { isOffre29Product } = require('../lib/sale-contract-match');
     if (isOffre29Product(productConfig) || isOffre29Product(order)) {
       const { shouldGiftBadgeComptant } = require('../lib/balma');
       const giftBadge = shouldGiftBadgeComptant(order, {
@@ -452,9 +481,23 @@ async function processSaleJob(page, order, jobMeta = {}) {
   };
 
   if (!memberId) {
-    if (order.reuse_deciplus_member !== true) {
-      order.force_new_member = order.force_new_member !== false;
+    const { boutiqueSaleDispatchAllowed } = require('../storefront/lib/deciplus-sale-reconcile');
+    if (!boutiqueSaleDispatchAllowed(order)) {
+      const err =
+        'Dispatch refusé — signature ou ready_for_dispatch requis avant création membre Deciplus';
+      logWarn('Création membre bloquée (commande non signée)', {
+        order_id: order.order_id,
+        signed_at: order.signature?.signed_at || null,
+        ready_for_dispatch: Boolean(order.ready_for_dispatch),
+      });
+      return {
+        status: STATUS.REJECTED,
+        error: err,
+      };
     }
+    // Toujours rechercher une fiche strictement concordante avant création.
+    // Un crash entre la création Deciplus et le checkpoint ne doit jamais créer un second membre.
+    if (order.force_new_member !== true) order.force_new_member = false;
     memberResult = await findOrCreateMember(page, order, gymConfig);
     mark('member');
 
@@ -486,7 +529,11 @@ async function processSaleJob(page, order, jobMeta = {}) {
         member_action: memberResult.action,
       };
     }
-    saveCheckpoint({ step: 'member', deciplus_member_id: memberId });
+    await saveCheckpoint({
+      step: 'member',
+      lifecycle_state: STATES.MEMBER_CREATED,
+      deciplus_member_id: memberId,
+    });
     if (memberResult.action === 'created') {
       logInfo('Nouveau membre Deciplus créé — pas d’alerte admin', {
         order_id: order.order_id,
@@ -550,7 +597,7 @@ async function processSaleJob(page, order, jobMeta = {}) {
         body: photoResult?.body,
       });
     } else {
-      saveCheckpoint({ step: 'photo', deciplus_member_id: memberId, photo_done: true });
+      await saveCheckpoint({ step: 'photo', deciplus_member_id: memberId, photo_done: true });
       if (memberId) {
         await openMemberCheck(page, memberId).catch(() => {});
       }
@@ -598,7 +645,12 @@ async function processSaleJob(page, order, jobMeta = {}) {
         try {
           await setMemberIban(page, memberId, iban, order.customer, gymConfig);
           mark('iban');
-          saveCheckpoint({ step: 'iban', deciplus_member_id: memberId, iban_done: true });
+          await saveCheckpoint({
+            step: 'iban',
+            lifecycle_state: STATES.MANDATE_SET,
+            deciplus_member_id: memberId,
+            iban_done: true,
+          });
         } catch (err) {
           if (!deferIbanIfPaid(err.message)) throw err;
         }
@@ -616,7 +668,12 @@ async function processSaleJob(page, order, jobMeta = {}) {
         try {
           await setMemberIban(page, memberId, iban, order.customer, gymConfig);
           mark('iban');
-          saveCheckpoint({ step: 'iban', deciplus_member_id: memberId, iban_done: true });
+          await saveCheckpoint({
+            step: 'iban',
+            lifecycle_state: STATES.MANDATE_SET,
+            deciplus_member_id: memberId,
+            iban_done: true,
+          });
         } catch (err) {
           if (!deferIbanIfPaid(err.message)) throw err;
         }
@@ -642,27 +699,31 @@ async function processSaleJob(page, order, jobMeta = {}) {
       badge_action: checkpoint.badge_action || null,
     };
   } else if (productConfig.requires_payment !== false && paid) {
-    if (ibanError && !isPayplug4xPrelevementOrder(order)) {
-      productConfig.paiement_comptant = true;
-      productConfig.requires_iban = false;
-      productConfig.skip_rib_prompt = true;
-      logWarn('IBAN absent — vente Deciplus en comptant (1er mois déjà payé)', {
-        order_id: order.order_id,
-        member_id: memberId,
-      });
-    } else if (ibanError && isPayplug4xPrelevementOrder(order)) {
-      logWarn('IBAN absent — vente Deciplus 4× prélèvement (1er quart déjà payé)', {
-        order_id: order.order_id,
-        member_id: memberId,
-      });
+    if (ibanError) {
+      const { shouldFallbackToComptantOnIbanError } = require('../lib/billing-plan');
+      if (shouldFallbackToComptantOnIbanError(order, productConfig)) {
+        productConfig.paiement_comptant = true;
+        productConfig.requires_iban = false;
+        productConfig.skip_rib_prompt = true;
+        logWarn('IBAN absent — vente Deciplus en comptant (1er mois déjà payé)', {
+          order_id: order.order_id,
+          member_id: memberId,
+        });
+      } else {
+        logWarn('IBAN absent — vente Deciplus en prélèvement (échéancier requis, 1er mois déjà payé)', {
+          order_id: order.order_id,
+          member_id: memberId,
+        });
+      }
     }
     saleResult = await recordSale(page, order, productConfig, memberId, gymConfig, {
       badgeProductConfig,
     });
     const saleOk = Boolean(saleResult.sale_id);
     mark('sale');
-    saveCheckpoint({
+    await saveCheckpoint({
       step: 'sale',
+      lifecycle_state: saleOk ? STATES.SALE_CREATED : null,
       deciplus_member_id: memberId,
       sale_done: saleOk,
       deciplus_sale_id: saleResult.sale_id || null,
@@ -676,8 +737,9 @@ async function processSaleJob(page, order, jobMeta = {}) {
       badgeProductConfig,
     });
     mark('sale');
-    saveCheckpoint({
+    await saveCheckpoint({
       step: 'sale',
+      lifecycle_state: STATES.VERIFIED,
       deciplus_member_id: memberId,
       sale_done: true,
       deciplus_sale_id: null,
@@ -1113,6 +1175,9 @@ async function processJob(page, job) {
   if (role === 'sales' && !salesAllowed) {
     throw new Error(`Bot ventes refuse « ${action} » — utiliser BOXPLUS_BOT_URL_OPS`);
   }
+  if (role === 'ops' && salesAllowed) {
+    throw new Error(`Bot maintenance refuse les ventes inscription — utiliser BOXPLUS_BOT_URL`);
+  }
 
   if (order.action === 'inscription_nudge') {
     return processInscriptionNudgeJob(order);
@@ -1140,6 +1205,12 @@ async function processJob(page, job) {
     }
     const { runBalmaSwitch } = require('./aventure-clone');
     return runBalmaSwitch(page, order);
+  }
+
+  if (order.action === 'encaisser' || order.action === 'echeancier') {
+    throw new Error(
+      `Action « ${order.action} » — utiliser BOXPLUS_BOT_URL_OPS (bot échéancier / résiliation)`
+    );
   }
 
   return processSaleJob(page, order, {
@@ -1239,7 +1310,8 @@ async function pushBotSaleStatus(order, outcome = {}) {
     action === 'inscription_nudge' ||
     action === 'cancel' ||
     action === 'verify_identity' ||
-    action === 'echeancier'
+    action === 'echeancier' ||
+    action === 'encaisser'
   ) {
     return;
   }
@@ -1259,6 +1331,12 @@ async function pushBotSaleStatus(order, outcome = {}) {
         deciplus_member_id: outcome.deciplus_member_id || null,
         deciplus_sale_id: outcome.deciplus_sale_id || outcome.sale?.sale_id || null,
         action,
+        source_bot: getBotId() || null,
+        sales_bot: outcome.sales_bot || order.sales_bot || null,
+        attempts: Number(outcome.attempts || order.attempts || 0),
+        error_classification: outcome.error_classification || null,
+        failover_count: Number(outcome.failover_count || order.failover_count || 0),
+        failover_from: outcome.failover_from || order.failover_from || null,
       }),
     });
     if (!res.ok) {
@@ -1275,7 +1353,55 @@ async function pushBotSaleStatus(order, outcome = {}) {
   }
 }
 
+async function failoverExhaustedJob(job, filePath, { policy, error, attempts } = {}) {
+  const order = normalizeOrder(job);
+  if (
+    !shouldFailoverSale(order, policy, {
+      action: order.action,
+      deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
+    })
+  ) {
+    return null;
+  }
+
+  const handoff = await handoffFailedSale(order, { error });
+  if (!handoff.handed_off) return null;
+  const transferred = {
+    status: STATUS.FAILED_OVER,
+    error: `Relais automatique vers ${handoff.target}`,
+    action: order.action || 'sale',
+    sales_bot: handoff.target,
+    failover_count: handoff.failover_count,
+    failover_from: getBotId() || order.sales_bot || null,
+    error_classification: policy.classification,
+    attempts: Number(attempts || 0),
+    deciplus_member_id: job.checkpoint?.deciplus_member_id || null,
+    deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
+  };
+  markProcessed(job.job_id || job.order_id, transferred);
+  removeJob(filePath);
+  await pushBotSaleStatus(job, {
+    ...transferred,
+    status: 'failover',
+    error: null,
+  });
+  logWarn('Job transféré au bot de secours', {
+    job_id: job.job_id || job.order_id,
+    order_id: order.order_id,
+    from: transferred.failover_from,
+    to: handoff.target,
+    classification: policy.classification,
+  });
+  return {
+    ok: false,
+    handed_off: true,
+    target: handoff.target,
+    failover_count: handoff.failover_count,
+  };
+}
+
 async function processOneJob(job) {
+  const processStartedAt = Date.now();
   const filePath = job.file;
   const jobId = job.job_id || job.order_id;
   const priorAttempts = Number(job.attempts || 0);
@@ -1298,6 +1424,21 @@ async function processOneJob(job) {
       deciplus_member_id: job.checkpoint?.deciplus_member_id || null,
       deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
     };
+    const policy = classifyError(error);
+    try {
+      const handedOff = await failoverExhaustedJob(job, filePath, {
+        policy,
+        error,
+        attempts: priorAttempts,
+      });
+      if (handedOff) return handedOff;
+    } catch (failoverErr) {
+      logError('Relais vers le second bot échoué', {
+        job_id: jobId,
+        order_id: job.order_id,
+        error: failoverErr.message,
+      });
+    }
     markProcessed(jobId, exhaustedOutcome);
     removeJob(filePath);
     await pushBotSaleStatus(job, exhaustedOutcome);
@@ -1348,9 +1489,77 @@ async function processOneJob(job) {
     return { ok: false, rejected: true, error: validationErrors.join(', ') };
   }
 
-  updateJob(filePath, { status: STATUS.PROCESSING, started_at: new Date().toISOString() });
-
   const action = String(order.action || job.action || 'sale').toLowerCase();
+  const requiresDistributedLease = action === 'sale' || action === 'balma_switch';
+  let lease = null;
+  if (requiresDistributedLease) {
+    try {
+      lease = await idempotency.acquire(order.order_id, action);
+    } catch (err) {
+      const policy = classifyError(err);
+      const outcome = {
+        status: STATUS.MANUAL_REVIEW,
+        error: `${err.message}. Déployer la migration 008 avant de relancer.`,
+        action,
+        error_classification: policy.classification,
+      };
+      updateJob(filePath, { status: STATUS.MANUAL_REVIEW, last_error: outcome.error });
+      markProcessed(jobId, outcome);
+      removeJob(filePath);
+      await pushBotSaleStatus(job, outcome);
+      await sendAlert(`Écriture Deciplus bloquée — registre idempotence indisponible`, {
+        job_id: jobId,
+        order_id: order.order_id,
+        action,
+        error: outcome.error,
+      });
+      return { ok: false, impossible: true, error: outcome.error };
+    }
+    if (!lease.acquired) {
+      const resume = idempotency.resumeDecision(lease);
+      if (resume.disposition === 'completed') {
+        const outcome = {
+          status: STATUS.SUCCESS,
+          action,
+          deciplus_member_id: resume.member_id,
+          deciplus_sale_id: resume.sale_id,
+          duplicate: true,
+        };
+        markProcessed(jobId, outcome);
+        removeJob(filePath);
+        await pushBotSaleStatus(job, outcome);
+        return { ok: true, skipped: true, result: outcome };
+      }
+      const nextAttemptAt = resume.retry_at || new Date(Date.now() + 30000).toISOString();
+      updateJob(filePath, {
+        status: STATUS.ERROR,
+        last_error: `Action ${action} déjà louée par un autre worker`,
+        next_attempt_at: nextAttemptAt,
+      });
+      return { ok: false, skipped: true, reason: 'distributed_lease_active' };
+    }
+    if (lease.member_id || lease.sale_id) {
+      job.checkpoint = {
+        ...(job.checkpoint || {}),
+        deciplus_member_id: lease.member_id || job.checkpoint?.deciplus_member_id,
+        deciplus_sale_id: lease.sale_id || job.checkpoint?.deciplus_sale_id,
+        sale_done: Boolean(lease.sale_id),
+      };
+      job.deciplus_member_id = lease.member_id || job.deciplus_member_id;
+      job.deciplus_sale_id = lease.sale_id || job.deciplus_sale_id;
+      order.deciplus_member_id = lease.member_id || order.deciplus_member_id;
+      order.deciplus_sale_id = lease.sale_id || order.deciplus_sale_id;
+    }
+  }
+
+  updateJob(filePath, { status: STATUS.PROCESSING, started_at: new Date().toISOString() });
+  logJobEvent('started', {
+    order_id: order.order_id,
+    action,
+    phase: 'processing',
+    attempt: priorAttempts + 1,
+  });
+
   if (action === 'inscription_nudge') {
     try {
       const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
@@ -1394,9 +1603,19 @@ async function processOneJob(job) {
 
     const outcome = await runWithSession('job', async (page) => {
       await login(page, { siteLabel });
-      return processJob(page, job);
+      return processJob(page, { ...job, attempts: priorAttempts, checkpoint: job.checkpoint || {} });
     });
 
+    if (requiresDistributedLease) {
+      await idempotency.checkpoint(order.order_id, action, {
+        status: outcome.status === STATUS.SUCCESS ? 'completed' : 'manual_review',
+        lifecycle_state: outcome.deciplus_sale_id ? STATES.VERIFIED : STATES.MANUAL_REVIEW,
+        attempt: Number(lease?.attempt || priorAttempts + 1),
+        member_id: outcome.deciplus_member_id || null,
+        sale_id: outcome.deciplus_sale_id || null,
+        error_message: outcome.error || null,
+      });
+    }
     markProcessed(jobId, outcome);
     removeJob(filePath);
     await pushBotSaleStatus(job, outcome);
@@ -1409,6 +1628,15 @@ async function processOneJob(job) {
     });
 
     touchKeepAliveClock();
+    logJobEvent('completed', {
+      order_id: order.order_id,
+      action,
+      phase: 'verified',
+      attempt: priorAttempts + 1,
+      duration_ms: Date.now() - processStartedAt,
+      member_id: outcome.deciplus_member_id,
+      sale_id: outcome.deciplus_sale_id,
+    });
     return { ok: true, result: outcome };
   } catch (err) {
     if (err.message.startsWith('Validation:')) {
@@ -1416,7 +1644,8 @@ async function processOneJob(job) {
       return { ok: false, rejected: true, error: err.message };
     }
 
-    // Toute tentative compte (y compris session) — max 3 puis stop
+    const policy = classifyError(err);
+    // Les erreurs de données/conflit sont immédiatement placées en revue manuelle.
     const attempts = priorAttempts + 1;
     const sessionErr = isSessionRecoverableError(err.message);
     const browserGone = /browser has been closed|Target page, context or browser/i.test(err.message);
@@ -1438,7 +1667,7 @@ async function processOneJob(job) {
     }
 
     // MFA/IMAP : plus de noRetry immédiat — le cooldown évite le spam OTP ; on retente jusqu’à MAX
-    const exhausted = attempts >= MAX_RETRIES;
+    const exhausted = !policy.retryable || attempts >= MAX_RETRIES;
     const status = exhausted ? STATUS.MANUAL_REVIEW : STATUS.ERROR;
     const lastError = exhausted
       ? `Job impossible à traiter après ${attempts} tentatives — ${err.message}`
@@ -1448,8 +1677,45 @@ async function processOneJob(job) {
       status,
       last_error: lastError,
       attempts,
+      error_classification: policy.classification,
+      human_action: policy.action,
+      next_attempt_at: exhausted
+        ? null
+        : new Date(Date.now() + backoffMs(attempts)).toISOString(),
       ...(sessionRecovered ? { session_refreshed_at: new Date().toISOString() } : {}),
     });
+
+    if (requiresDistributedLease) {
+      await idempotency.checkpoint(order.order_id, action, {
+        status: exhausted ? 'manual_review' : 'failed',
+        lifecycle_state: exhausted ? STATES.MANUAL_REVIEW : STATES.FAILED,
+        attempt: Number(lease?.attempt || attempts),
+        member_id: job.checkpoint?.deciplus_member_id || null,
+        sale_id: job.checkpoint?.deciplus_sale_id || null,
+        error_classification: policy.classification,
+        error_message: lastError,
+        human_action: policy.action,
+      }).catch((checkpointErr) => {
+        logError('Échec checkpoint erreur', { order_id: order.order_id, error: checkpointErr.message });
+      });
+    }
+
+    if (exhausted) {
+      try {
+        const handedOff = await failoverExhaustedJob(job, filePath, {
+          policy,
+          error: lastError,
+          attempts,
+        });
+        if (handedOff) return handedOff;
+      } catch (failoverErr) {
+        logError('Relais vers le second bot échoué', {
+          job_id: jobId,
+          order_id: order.order_id,
+          error: failoverErr.message,
+        });
+      }
+    }
 
     if (status === STATUS.MANUAL_REVIEW) {
       await sendAlert(`Job impossible à traiter après ${attempts} tentatives — ${jobId}`, {
@@ -1476,6 +1742,16 @@ async function processOneJob(job) {
     }
 
     logError('Erreur traitement job', { job_id: jobId, order_id: job.order_id, error: lastError });
+    logJobEvent('failed', {
+      order_id: order.order_id,
+      action,
+      phase: exhausted ? 'manual_review' : 'retry_scheduled',
+      attempt: attempts,
+      classification: policy.classification,
+      duration_ms: Date.now() - processStartedAt,
+      member_id: job.checkpoint?.deciplus_member_id,
+      sale_id: job.checkpoint?.deciplus_sale_id,
+    });
 
     return { ok: false, error: lastError, impossible: exhausted, session_recovered: sessionRecovered };
   }

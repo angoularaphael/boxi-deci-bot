@@ -35,16 +35,44 @@ function parseFrDatesFromLabel(label) {
   });
 }
 
+/** Date de début réelle : après « vendu le JJ/MM/AAAA », le 2e date est le début. */
+function contractStartDate(label) {
+  const dates = parseFrDatesFromLabel(label);
+  if (!dates.length) return null;
+  if (/vendu le/i.test(String(label || '')) && dates.length >= 2) return dates[1];
+  return dates[0];
+}
+
+function startOfDay(date) {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
 /** Contrats « en attente » / qui commencent après aujourd’hui — pas l’abo en cours. */
 function isPendingOrFutureContract(label) {
   const t = String(label || '');
   if (/en attente/i.test(t)) return true;
-  const dates = parseFrDatesFromLabel(t);
-  if (!dates.length) return false;
-  const start = dates[0];
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  return start > today;
+  const start = contractStartDate(t);
+  if (!start) return false;
+  return startOfDay(start).getTime() > startOfDay(new Date()).getTime();
+}
+
+/** Vendu / début aujourd’hui : Deciplus bloque souvent Résilier — il faut Annuler la vente. */
+function isSameDayStartContract(label, now = new Date()) {
+  const start = contractStartDate(label);
+  if (!start) return false;
+  return startOfDay(start).getTime() === startOfDay(now).getTime();
+}
+
+function isAppliquerQuitterLabel(text) {
+  const t = String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!t || t.length > 48) return false;
+  if (/^appliquer et (quitter|fermer)$/i.test(t)) return true;
+  if (/^appliquer$/i.test(t)) return true;
+  return /appliquer/i.test(t) && /quitter|fermer/i.test(t);
 }
 
 function parseCancelDate(raw) {
@@ -73,20 +101,59 @@ function getScopes(page) {
 /**
  * Liste les contrats actifs via #prestation_XXXX (structure Deciplus réelle).
  */
+async function revealHiddenContracts(page) {
+  for (const ctx of getScopes(page)) {
+    try {
+      const toggled = await ctx
+        .evaluate(() => {
+          const labels = [...document.querySelectorAll('label, span, div')];
+          const hit = labels.find((el) =>
+            /masquer les contrats inactifs/i.test(String(el.textContent || ''))
+          );
+          if (!hit) return false;
+          const row = hit.closest('label, div, tr, p') || hit.parentElement;
+          const input =
+            row?.querySelector('input[type="checkbox"]') ||
+            hit.previousElementSibling?.querySelector?.('input[type="checkbox"]') ||
+            hit.parentElement?.querySelector('input[type="checkbox"]');
+          if (!input || input.type !== 'checkbox') return false;
+          if (input.checked) {
+            input.click();
+            return true;
+          }
+          return false;
+        })
+        .catch(() => false);
+      if (toggled) await page.waitForTimeout(500);
+    } catch {
+      /* frame */
+    }
+  }
+}
+
 async function expandContractSections(page) {
+  await revealHiddenContracts(page);
   for (const ctx of getScopes(page)) {
     try {
       await ctx
-        .locator('div, span, a, button')
-        .filter({ hasText: /^en attente$/i })
-        .first()
-        .click({ force: true, timeout: 1500 })
+        .evaluate(() => {
+          const nodes = [...document.querySelectorAll('div, span, a, button, h2, h3, p, label, strong')];
+          for (const el of nodes) {
+            const t = String(el.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (!t || t.length > 40) continue;
+            if (/\d+\s*en attente/i.test(t) || /^en attente$/i.test(t)) {
+              el.click();
+            }
+          }
+        })
         .catch(() => {});
     } catch {
       /* frame */
     }
   }
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(800);
 }
 
 async function findActiveContracts(page, options = {}) {
@@ -144,21 +211,27 @@ async function findActiveContracts(page, options = {}) {
         const wrapperLabel = ((await wrapper.innerText().catch(() => '')) || '')
           .replace(/\s+/g, ' ')
           .trim();
-        const label = wrapperLabel.length > itemLabel.length ? wrapperLabel : itemLabel;
-        if (!label) continue;
-        // Déjà résiliés / terminés : pas d’action « Résilier » → évite action_panel_missing.
-        // Exception : séance d’essai / coaching « Expiré » le jour même (1 crédit) — c’est la vente.
+        // Ne pas juger « annulé » sur le bandeau « 1 ANNULÉ, 1 ACTIF, 2 EN ATTENTE »
+        // sinon on ignore les vrais contrats en attente.
+        const statusLabel = itemLabel || wrapperLabel;
+        const summaryOnly = /\d+\s+annul/i.test(statusLabel) && !/contrat n/i.test(statusLabel);
         const expiredPrestation =
           options.includeExpiredPrestation &&
-          /essai|coaching/i.test(label) &&
-          /expir[ée]/i.test(label) &&
-          !/r[ée]sili[ée]|annul[ée]/i.test(label);
+          /essai|coaching/i.test(statusLabel) &&
+          /expir[ée]/i.test(statusLabel) &&
+          !/r[ée]sili[ée]|annul[ée]/i.test(statusLabel);
         if (
           !expiredPrestation &&
-          /r[ée]sili[ée]|annul[ée]e?|termin[ée]|expir[ée]|inactif|cl[ôo]tur|archiv/i.test(label)
+          !summaryOnly &&
+          /r[ée]sili[ée]|annul[ée]e?|termin[ée]|expir[ée]|inactif|cl[ôo]tur|archiv/i.test(itemLabel)
         ) {
           continue;
         }
+        const pendingHint = isPendingOrFutureContract(itemLabel);
+        const label = `${itemLabel || wrapperLabel.slice(0, 120)}${
+          pendingHint && !/en attente/i.test(itemLabel) ? ' EN ATTENTE' : ''
+        }`;
+        if (!label.trim()) continue;
 
         let consulter = item
           .locator('xpath=ancestor::div[contains(@class,"og-product-wrapper")][1]')
@@ -189,6 +262,95 @@ async function findActiveContracts(page, options = {}) {
       }
     } catch {
       /* frame détachée */
+    }
+  }
+
+  if (!found.length) {
+    for (const ctx of getScopes(page)) {
+      try {
+        const rows = await ctx
+          .evaluate(() =>
+            [...document.querySelectorAll('[id^="prestation_"]')].map((el) => ({
+              idc: (String(el.id || '').match(/prestation_(\d+)/i) || [])[1] || '',
+              label: String(el.textContent || '')
+                .replace(/\s+/g, ' ')
+                .trim(),
+            }))
+          )
+          .catch(() => []);
+        for (const row of rows) {
+          const idc = String(row.idc || '').trim();
+          const label = String(row.label || '').trim();
+          if (!idc || seen.has(idc) || !label) continue;
+          if (/r[ée]sili[ée]|annul[ée]e?|termin[ée]|expir[ée]|inactif|cl[ôo]tur|archiv/i.test(label)) {
+            continue;
+          }
+          seen.add(idc);
+          found.push({
+            ctx,
+            item: null,
+            consulter: null,
+            idc,
+            label: label.slice(0, 160),
+            isBadge:
+              (/\bbadge\b/i.test(label) && !/essai|coaching/i.test(label)) ||
+              (/pr[ée]-?d[ée]compt/i.test(label) &&
+                /0 cr[ée]dit restant/i.test(label) &&
+                !/essai|coaching|offre duo|abonnement|12\s*mois|259/i.test(label)),
+          });
+        }
+      } catch {
+        /* frame */
+      }
+    }
+  }
+
+  found.sort((a, b) => Number(a.isBadge) - Number(b.isBadge));
+
+  // 2e passe : section « N EN ATTENTE » parfois rendue après le clic.
+  await page.waitForTimeout(400);
+  for (const ctx of getScopes(page)) {
+    try {
+      const rows = await ctx
+        .evaluate(() =>
+          [...document.querySelectorAll('[id^="prestation_"], a[href*="idc="]')].map((el) => {
+            const idc =
+              (String(el.id || '').match(/prestation_(\d+)/i) || [])[1] ||
+              (String(el.getAttribute('href') || '').match(/[?&]idc=(\d+)/i) || [])[1] ||
+              '';
+            const wrap = el.closest('.og-product-wrapper, .og-product-item, li, tr, article') || el;
+            return {
+              idc,
+              label: String(wrap.textContent || '')
+                .replace(/\s+/g, ' ')
+                .trim(),
+            };
+          })
+        )
+        .catch(() => []);
+      for (const row of rows) {
+        const idc = String(row.idc || '').trim();
+        const label = String(row.label || '').trim();
+        if (!idc || seen.has(idc) || !label) continue;
+        if (/r[ée]sili[ée]|annul[ée]e?|termin[ée]|inactif|cl[ôo]tur|archiv/i.test(label) && !/en attente/i.test(label)) {
+          continue;
+        }
+        seen.add(idc);
+        found.push({
+          ctx,
+          item: null,
+          consulter: null,
+          idc,
+          label: label.slice(0, 160),
+          isBadge:
+            (/\bbadge\b/i.test(label) && !/essai|coaching/i.test(label)) ||
+            (/pr[ée]-?d[ée]compt/i.test(label) &&
+              /0 cr[ée]dit restant/i.test(label) &&
+              !/essai|coaching|offre duo|abonnement|12\s*mois|259/i.test(label)),
+        });
+      }
+    } catch {
+      /* frame */
     }
   }
 
@@ -576,7 +738,11 @@ async function clickAppliquerEtQuitter(page) {
   while (Date.now() - start < 20000) {
     for (const ctx of getScopes(page)) {
       try {
-        const btn = ctx.locator('button').filter({ hasText: /^Appliquer et Quitter$/i }).first();
+        const btn = ctx
+          .locator('button, a, [role="button"], .ari-button, input[type="button"], input[type="submit"]')
+          .filter({ hasText: /appliquer/i })
+          .filter({ hasText: /quitter|fermer|^appliquer$/i })
+          .first();
         if ((await btn.count()) === 0 || !(await btn.isVisible().catch(() => false))) continue;
         const disabled = await btn.isDisabled().catch(() => false);
         const ariaDisabled = (await btn.getAttribute('aria-disabled').catch(() => '')) === 'true';
@@ -594,9 +760,21 @@ async function clickAppliquerEtQuitter(page) {
   }
 
   const forced = await page.evaluate(() => {
-    const hit = [...document.querySelectorAll('button')].find((b) => {
-      const t = String(b.textContent || '').replace(/\s+/g, ' ').trim();
-      if (!/^Appliquer et Quitter$/i.test(t)) return false;
+    const nodes = [
+      ...document.querySelectorAll(
+        'button, a, [role="button"], .ari-button, input[type="submit"], input[type="button"]'
+      ),
+    ];
+    const hit = nodes.find((b) => {
+      const t = String(b.innerText || b.value || b.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (!t || t.length > 48) return false;
+      const ok =
+        /^appliquer et (quitter|fermer)$/i.test(t) ||
+        /^appliquer$/i.test(t) ||
+        (/appliquer/i.test(t) && /quitter|fermer/i.test(t));
+      if (!ok) return false;
       return (
         !b.disabled &&
         b.getAttribute('aria-disabled') !== 'true' &&
@@ -604,6 +782,7 @@ async function clickAppliquerEtQuitter(page) {
       );
     });
     if (!hit) return false;
+    hit.scrollIntoView({ block: 'center' });
     hit.click();
     return true;
   });
@@ -895,15 +1074,27 @@ async function waitAppliquerEnabled(page, timeoutMs = 12000) {
     for (const ctx of getScopes(page)) {
       try {
         const enabled = await ctx.evaluate(() => {
-          const btns = [...document.querySelectorAll('button')].filter((b) =>
-            /^Appliquer et Quitter$/i.test(String(b.innerText || '').replace(/\s+/g, ' ').trim())
-          );
-          return btns.some(
-            (b) =>
+          const nodes = [
+            ...document.querySelectorAll(
+              'button, a, [role="button"], .ari-button, input[type="submit"], input[type="button"]'
+            ),
+          ];
+          return nodes.some((b) => {
+            const t = String(b.innerText || b.value || b.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (!t || t.length > 48) return false;
+            const ok =
+              /^appliquer et (quitter|fermer)$/i.test(t) ||
+              /^appliquer$/i.test(t) ||
+              (/appliquer/i.test(t) && /quitter|fermer/i.test(t));
+            if (!ok) return false;
+            return (
               !b.disabled &&
               b.getAttribute('aria-disabled') !== 'true' &&
               !/is-disabled|disabled/i.test(String(b.className || ''))
-          );
+            );
+          });
         });
         if (enabled) return true;
       } catch {
@@ -915,8 +1106,14 @@ async function waitAppliquerEnabled(page, timeoutMs = 12000) {
   return false;
 }
 
+function shouldVoidSale(contract, { allowStarted = false } = {}) {
+  if (allowStarted) return true;
+  if (isPendingOrFutureContract(contract?.label)) return true;
+  return isSameDayStartContract(contract?.label);
+}
+
 async function voidPendingSaleIfPossible(page, contract, { allowStarted = false } = {}) {
-  if (!allowStarted && !isPendingOrFutureContract(contract?.label)) return false;
+  if (!shouldVoidSale(contract, { allowStarted })) return false;
   const mode = await clickActionTile(page, [/^Annuler la vente$/i]);
   if (!mode) {
     logWarn('Tuile Annuler la vente introuvable', { idc: contract?.idc || null });
@@ -965,7 +1162,7 @@ async function voidPendingSaleIfPossible(page, contract, { allowStarted = false 
   return false;
 }
 
-async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
+async function cancelOneContract(page, contract, { cancelDate = null, forceVoid = false } = {}) {
   const dateStr = formatFrDate(parseCancelDate(cancelDate));
   const opened = await openContractPage(page, contract);
   if (!opened) {
@@ -978,9 +1175,10 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
     return { cancelled: false, reason: 'action_panel_missing', idc: contract.idc };
   }
 
-  if (contract.isBadge || isPendingOrFutureContract(contract.label)) {
+  const sameDayStart = isSameDayStartContract(contract.label);
+  if (forceVoid || contract.isBadge || isPendingOrFutureContract(contract.label) || sameDayStart) {
     const voided = await voidPendingSaleIfPossible(page, contract, {
-      allowStarted: Boolean(contract.isBadge),
+      allowStarted: forceVoid || Boolean(contract.isBadge) || sameDayStart,
     });
     if (voided) {
       return {
@@ -1035,8 +1233,21 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
     await randomDelay(400, 700);
   }
 
+  // Le select motif laisse souvent « Appliquer et Quitter » disabled tant qu’on n’a pas blur.
+  await page.keyboard.press('Tab').catch(() => {});
+  await page.locator('body').click({ position: { x: 8, y: 8 } }).catch(() => {});
+  await randomDelay(400, 700);
+  const applyReady = await waitAppliquerEnabled(page, 15000);
+  if (!applyReady) {
+    logWarn('Appliquer et Quitter encore désactivé après motif', { idc: contract.idc });
+  }
+
   const applied = await clickAppliquerEtQuitter(page);
   if (!applied) {
+    await openContractPage(page, contract).catch(() => {});
+    await waitActionPanel(page);
+    const voided = await voidPendingSaleIfPossible(page, contract, { allowStarted: true });
+    if (voided) return { cancelled: true, reason: 'pending_voided', idc: contract.idc };
     return { cancelled: false, reason: 'appliquer_quitter_missing', idc: contract.idc };
   }
   await randomDelay(1200, 2000);
@@ -1118,10 +1329,11 @@ async function reopenMemberAfterCancel(page, memberId) {
   await randomDelay(600, 1000);
 }
 
-async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate = null, filter = null } = {}) {
+async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate = null, filter = null, forceVoid = false } = {}) {
   let total = 0;
   const details = [];
   const doneIds = new Set();
+  const failCount = new Map();
 
   for (let i = 0; i < maxSales; i += 1) {
     try {
@@ -1140,7 +1352,7 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
     }
 
     let contracts = await findActiveContracts(page);
-    contracts = contracts.filter((c) => !doneIds.has(c.idc));
+    contracts = contracts.filter((c) => !doneIds.has(String(c.idc)));
     if (typeof filter === 'function') {
       contracts = contracts.filter((c) => {
         try {
@@ -1163,32 +1375,42 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
       break;
     }
 
-    const result = await cancelOneContract(page, contracts[0], { cancelDate });
+    const target = contracts[0];
+    const idcKey = String(target.idc);
+    const result = await cancelOneContract(page, target, { cancelDate, forceVoid });
     details.push(result);
-    doneIds.add(contracts[0].idc);
 
     if (result.cancelled) {
+      doneIds.add(idcKey);
       total += 1;
       continue;
     }
 
-    if (
-      result.reason === 'action_panel_missing' ||
-      result.reason === 'resilier_missing' ||
-      result.reason === 'contract_nav_failed' ||
-      result.reason === 'resiliation_date_missing' ||
-      result.reason === 'resilier_form_missing' ||
-      result.reason === 'appliquer_quitter_missing' ||
-      result.reason === 'confirm_missing' ||
-      result.reason === 'resiliation_motif_missing'
-    ) {
+    const skippable = [
+      'action_panel_missing',
+      'resilier_missing',
+      'contract_nav_failed',
+      'resiliation_date_missing',
+      'resilier_form_missing',
+      'appliquer_quitter_missing',
+      'confirm_missing',
+      'resiliation_motif_missing',
+    ].includes(result.reason);
+
+    if (skippable) {
+      const tries = (failCount.get(idcKey) || 0) + 1;
+      failCount.set(idcKey, tries);
       logWarn('Contrat sauté — tentative suivante', {
-        idc: contracts[0].idc,
+        idc: target.idc,
         reason: result.reason,
+        attempt: tries,
       });
+      if (tries >= 3) doneIds.add(idcKey);
       await randomDelay(600, 1000);
       continue;
     }
+
+    doneIds.add(idcKey);
     break;
   }
 
@@ -1259,6 +1481,7 @@ async function cancelSale(page, memberId, options = {}) {
   const outcome = await cancelAllMemberSales(page, memberId, {
     maxSales: 15,
     cancelDate,
+    forceVoid: options.forceVoid === true,
     filter: extraFilter,
   });
   if (outcome.cancelled_count === 0) {
@@ -1276,8 +1499,9 @@ async function cancelSale(page, memberId, options = {}) {
         details: outcome.details,
       };
     }
-    // Changement d’abo : le but est la vente. Déjà résilié / panneau absent → on continue.
-    if (isChange) {
+    // Changement d’abo : déjà clos / panneau absent → on laisse recordSale décider.
+    // Si Appliquer et Quitter a échoué, le contrat est encore là : ne pas faire semblant.
+    if (isChange && reason !== 'appliquer_quitter_missing' && reason !== 'confirm_missing') {
       logInfo('Changement abo — résiliation non bloquante, on continue la vente', {
         member_id: memberId,
         reason,
@@ -1316,5 +1540,8 @@ module.exports = {
   cancelSale,
   formatFrDate,
   isPendingOrFutureContract,
+  isSameDayStartContract,
+  isAppliquerQuitterLabel,
   parseFrDatesFromLabel,
+  contractStartDate,
 };
