@@ -20,11 +20,26 @@ const {
 } = require('../lib/catalog-sale');
 const { saleContractMatches } = require('../lib/sale-contract-match');
 const { classifyMemberContracts } = require('../lib/replace-existing-abo');
+const { orderNeedsAutoBadge } = require('../lib/billing-plan');
 const { isPendingOrFutureContract } = require('./cancel-sale');
 
 /** Vrai uniquement pour le produit Badge Deciplus (~34,99 €), jamais essai/coaching. */
 function isBadgeSale(productConfig) {
   return isBadgeProductConfig(productConfig);
+}
+
+function isTrialPrestationConfig(productConfig = {}) {
+  return /s[eé]ance d['’]?\s*essai|\bessai\b/i.test(
+    [
+      productConfig.label,
+      productConfig.name,
+      productConfig.title,
+      productConfig.deciplus_product_name,
+      productConfig.deciplus_product_search,
+    ]
+      .filter(Boolean)
+      .join(' ')
+  );
 }
 
 function formatFrDate(date) {
@@ -2776,6 +2791,38 @@ function isActiveBadgeContract(contract = {}) {
   return true;
 }
 
+async function reconcileActiveBadges(page, memberId, gymConfig, { keepOne }) {
+  const { findActiveContracts } = require('./cancel-sale');
+  await closeGreyboxIfOpen(page).catch(() => {});
+  await openMemberCheck(page, memberId, gymConfig);
+  const before = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
+  const active = before
+    .filter(isActiveBadgeContract)
+    .sort((a, b) => Number(a.idc) - Number(b.idc));
+  const keeper = keepOne ? active[0] || null : null;
+  const toCancel = keepOne ? active.slice(1) : active;
+  if (!toCancel.length) return { keeper, cancelled: 0 };
+
+  const ids = new Set(toCancel.map((c) => String(c.idc)));
+  await cancelSale(page, memberId, {
+    cancelReason: 'change_badge_policy',
+    forceVoid: true,
+    filter: (c) => c?.isBadge && ids.has(String(c.idc)),
+  });
+
+  await closeGreyboxIfOpen(page).catch(() => {});
+  await openMemberCheck(page, memberId, gymConfig);
+  const after = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
+  const remaining = after.filter(isActiveBadgeContract);
+  const maximum = keepOne ? 1 : 0;
+  if (remaining.length > maximum) {
+    throw new Error(
+      `Politique Badge non respectée après correction (${remaining.length} actif(s), maximum ${maximum})`
+    );
+  }
+  return { keeper: remaining[0] || null, cancelled: toCancel.length };
+}
+
 async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
   if (memberId && isBadgeSale(productConfig)) {
     const { findActiveContracts } = require('./cancel-sale');
@@ -2973,7 +3020,15 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
   }
 
   let result;
-  let badgeProductConfig = options.badgeProductConfig || null;
+  const badgeAllowed = orderNeedsAutoBadge(order, productConfig);
+  let badgeProductConfig = badgeAllowed ? options.badgeProductConfig || null : null;
+  if (options.badgeProductConfig && !badgeAllowed) {
+    logWarn('Badge bloqué par la politique de paiement', {
+      order_id: order.order_id,
+      member_id: memberId,
+      paiement_comptant: Boolean(productConfig.paiement_comptant || order.paiement_comptant),
+    });
+  }
   if (isCartePrestationConfig(productConfig)) {
     if (badgeProductConfig) {
       logWarn('Prestation essai/coaching — Badge ignoré (pas de droit d’accès club)', {
@@ -2991,13 +3046,35 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
     }
 
     let badgesBefore = 0;
+    let existingTrial = null;
     if (isCartePrestationConfig(productConfig)) {
       const { findActiveContracts } = require('./cancel-sale');
-      const before = await findActiveContracts(page).catch(() => []);
+      const before = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
       badgesBefore = before.filter((item) => item.isBadge).length;
+      if (isTrialPrestationConfig(productConfig)) {
+        existingTrial =
+          before.find(
+            (item) =>
+              !item.isBadge &&
+              /s[eé]ance d['’]?\s*essai|\bessai\b/i.test(String(item.label || ''))
+          ) || null;
+      }
     }
 
-    result = await buyCarteBadge(page, productConfig, gymConfig, memberId);
+    result = existingTrial
+      ? {
+          sale_id: existingTrial.idc,
+          action: 'already_on_file',
+          member_id: memberId,
+        }
+      : await buyCarteBadge(page, productConfig, gymConfig, memberId);
+    if (existingTrial) {
+      logInfo('Séance d’essai déjà présente — nouvelle création bloquée', {
+        order_id: order.order_id,
+        member_id: memberId,
+        idc: existingTrial.idc,
+      });
+    }
     if (result.action === 'carte_badge_created' && isCartePrestationConfig(productConfig)) {
       throw new Error('La vente essai/coaching a pris le flux Badge — interdit');
     }
@@ -3018,14 +3095,16 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       }
     } else {
       // Essai / coaching : prestation carte, pas le contrat Badge
-      const carteContract = await verifyCreatedContract(page, memberId, {
-        badge: false,
-        label:
-          productConfig.label ||
-          productConfig.deciplus_product_name ||
-          productConfig.name ||
-          order.product_name,
-      });
+      const carteContract =
+        existingTrial ||
+        (await verifyCreatedContract(page, memberId, {
+          badge: false,
+          label:
+            productConfig.label ||
+            productConfig.deciplus_product_name ||
+            productConfig.name ||
+            order.product_name,
+        }));
       result.sale_id = carteContract.idc;
       if (isCartePrestationConfig(productConfig)) {
         const { findActiveContracts } = require('./cancel-sale');
@@ -3150,14 +3229,16 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       result.sale_id = subscriptionContract.idc;
     }
 
+    const badgePolicy = await reconcileActiveBadges(page, memberId, gymConfig, {
+      keepOne: Boolean(badgeProductConfig),
+    });
+
     if (badgeProductConfig) {
-      await closeGreyboxIfOpen(page);
-      await openMemberCheck(page, memberId, gymConfig);
-      const live = await findActiveContracts(page).catch(() => []);
-      if (live.some((c) => c.isBadge)) {
+      if (badgePolicy.keeper) {
         logInfo('Badge déjà actif — pas de nouveau prélèvement', {
           order_id: order.order_id,
           member_id: memberId,
+          badge_id: badgePolicy.keeper.idc,
         });
         result.badge_action = result.badge_action || 'already_on_file';
       } else {
@@ -3394,5 +3475,6 @@ module.exports = {
   buyCarteBadge,
   isBadgeSale,
   isActiveBadgeContract,
+  isTrialPrestationConfig,
   annotateMember,
 };

@@ -13,6 +13,7 @@ const {
 } = require('../lib/sales-bot');
 const { pickBotBase, isOpsOrder } = require('../lib/bot-forward');
 const {
+  failoverAfterAttempts,
   failoverTarget,
   shouldFailoverSale,
   handoffFailedSale,
@@ -29,6 +30,7 @@ const SAVED = {
   BOT_FAILOVER_URL: process.env.BOT_FAILOVER_URL,
   BOT_FAILOVER_TARGET: process.env.BOT_FAILOVER_TARGET,
   BOT_MAX_FAILOVERS: process.env.BOT_MAX_FAILOVERS,
+  BOT_FAILOVER_AFTER_ATTEMPTS: process.env.BOT_FAILOVER_AFTER_ATTEMPTS,
   SYNC_SECRET: process.env.SYNC_SECRET,
 };
 
@@ -161,6 +163,13 @@ describe('sales-bot split Raphaël / Eddy', () => {
       ),
       false
     );
+  });
+
+  it('le second bot prend le relais dès le premier échec technique', () => {
+    delete process.env.BOT_FAILOVER_AFTER_ATTEMPTS;
+    assert.equal(failoverAfterAttempts(), 1);
+    process.env.BOT_FAILOVER_AFTER_ATTEMPTS = '2';
+    assert.equal(failoverAfterAttempts(), 2);
   });
 
   it('conserve un job épuisé dans la file tant que son relais reste possible', () => {

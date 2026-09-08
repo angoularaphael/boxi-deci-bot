@@ -171,8 +171,11 @@ function shouldCreateChosenOfferSale(order = {}) {
 async function createChosenOfferSale(page, memberId, gymConfig, order) {
   const { recordSale } = require('./sale');
   const { fetchDeciplusCatalog, resolveProductConfig, resolveBadgeProductConfig } = require('./catalog');
-  const { applyBillingPlanToProductConfig } = require('../lib/billing-plan');
-  const { shouldGiftBadgeComptant } = require('../lib/balma');
+  const {
+    applyBillingPlanToProductConfig,
+    isPayplug4xPrelevementOrder,
+    orderNeedsAutoBadge,
+  } = require('../lib/billing-plan');
   const { assertNotBalmaSale } = require('../lib/gym-slugs');
   const minimesConfig = { ...(getGymConfig('minimes') || gymConfig), key: 'minimes' };
   assertNotBalmaSale(minimesConfig, { ...order, gym: 'minimes' });
@@ -191,36 +194,23 @@ async function createChosenOfferSale(page, memberId, gymConfig, order) {
   const is259 = /saison|259|offre-saison|dp-100/i.test(
     `${order.product_id || ''} ${order.offer || ''} ${order.product_name || ''}`
   );
+  const payplug4x = isPayplug4xPrelevementOrder(order);
   if (is259) {
-    productConfig.paiement_comptant = true;
-    productConfig.requires_iban = false;
+    productConfig.paiement_comptant = !payplug4x;
+    productConfig.requires_iban = payplug4x;
     productConfig.auto_badge = false;
   } else {
-    productConfig.auto_badge = true;
+    productConfig.auto_badge = orderNeedsAutoBadge(order, productConfig);
   }
   productConfig.skip_rib_prompt = true;
 
   let badgeProductConfig = null;
-  if (!is259 && productConfig.auto_badge) {
+  if (productConfig.auto_badge) {
     try {
-      const giftBadge = shouldGiftBadgeComptant(order, {
-        id: order.product_id,
-        name: order.product_name,
+      badgeProductConfig = resolveBadgeProductConfig(catalog || [], {
+        badge_timing: order.badge_timing || order.payment?.badge_timing || 'deferred',
+        badge_method: order.badge_method || order.payment?.badge_method || 'iban',
       });
-      badgeProductConfig = resolveBadgeProductConfig(
-        catalog || [],
-        giftBadge
-          ? {
-              badge_timing: 'immediate',
-              badge_method: 'comptant',
-              paiement_comptant: true,
-              prelevement_delay_days: 0,
-            }
-          : {
-              badge_timing: order.badge_timing || order.payment?.badge_timing || 'deferred',
-              badge_method: order.badge_method || order.payment?.badge_method || 'iban',
-            }
-      );
     } catch (err) {
       logWarn('Badge Aventure non ajouté', { error: err.message });
     }

@@ -49,7 +49,11 @@ const {
   getGymConfig,
 } = require('../lib/normalize');
 const { fetchDeciplusCatalog, resolveProductConfig, resolveBadgeProductConfig } = require('./catalog');
-const { applyBillingPlanToProductConfig, isPayplug4xPrelevementOrder } = require('../lib/billing-plan');
+const {
+  applyBillingPlanToProductConfig,
+  isPayplug4xPrelevementOrder,
+  orderNeedsAutoBadge,
+} = require('../lib/billing-plan');
 const { isCartePrestationConfig } = require('../lib/catalog-sale');
 const { logInfo, logError, logWarn, sendAlert, logJobEvent } = require('../lib/logger');
 const { getBotId, wrongSalesBotReject } = require('../lib/sales-bot');
@@ -58,6 +62,7 @@ const idempotency = require('../lib/persistent-idempotency');
 const { STATES } = require('../lib/job-lifecycle');
 const { classifyError, backoffMs } = require('../lib/retry-policy');
 const {
+  failoverAfterAttempts,
   shouldFailoverSale,
   handoffFailedSale,
 } = require('../lib/bot-failover');
@@ -310,6 +315,17 @@ async function alignMemberGymForSale(page, memberId, order, memberSite) {
   const { migrateMemberToGym } = require('./migrate-gym');
   let gymConfig = orderGymConfig;
 
+  if (memberSite && isBalmaSaleTarget(memberSite, {})) {
+    gymConfig = createGymConfig('minimes');
+    await migrateMemberToGym(page, memberId, gymConfig);
+    logInfo('Migration Balma → Minimes obligatoire avant vente', {
+      order_id: order.order_id,
+      member_id: memberId,
+      ordered_gym: order.gym || null,
+    });
+    return gymConfig;
+  }
+
   if (String(order.gym || '').toLowerCase() === 'etats-unis') {
     gymConfig = createGymConfig('etats-unis');
     if (memberSite && isEtatsUnisDeciplusSite(memberSite)) {
@@ -319,25 +335,8 @@ async function alignMemberGymForSale(page, memberId, order, memberSite) {
         member_id: memberId,
         from_zone: memberSite.deciplus_zone_id || null,
       });
-    } else if (memberSite && isBalmaSaleTarget(memberSite, order)) {
-      await migrateMemberToGym(page, memberId, gymConfig);
-      logInfo('Migration Balma → Minimes avant vente (États-Unis boutique)', {
-        order_id: order.order_id,
-        member_id: memberId,
-      });
     }
     return gymConfig;
-  }
-
-  if (memberSite && isBalmaSaleTarget(memberSite, order)) {
-    await migrateMemberToGym(page, memberId, orderGymConfig);
-    logInfo('Migration Balma → salle commandée avant vente', {
-      order_id: order.order_id,
-      member_id: memberId,
-      to: orderGymConfig.deciplus_label,
-      zone_id: orderGymConfig.deciplus_zone_id || null,
-    });
-    return orderGymConfig;
   }
 
   if (memberSite && !memberZonesMatch(memberSite, orderGymConfig)) {
@@ -422,7 +421,7 @@ async function processSaleJob(page, order, jobMeta = {}) {
     productConfig.paiement_comptant = false;
   }
 
-  const { isOffre29Product, isAnnualPromoProduct } = require('../lib/sale-contract-match');
+  const { isAnnualPromoProduct } = require('../lib/sale-contract-match');
   if (isAnnualPromoProduct(productConfig) || isAnnualPromoProduct(order)) {
     productConfig.auto_badge = false;
     if (!isPayplug4xPrelevementOrder(order)) {
@@ -432,38 +431,16 @@ async function processSaleJob(page, order, jobMeta = {}) {
     }
   }
 
-  if (isCartePrestationConfig(productConfig)) {
-    productConfig.auto_badge = false;
-  } else {
-    if (isOffre29Product(productConfig) || isOffre29Product(order)) {
-      const { shouldGiftBadgeComptant } = require('../lib/balma');
-      const giftBadge = shouldGiftBadgeComptant(order, {
-        id: order.product_id,
-        name: order.product_name,
-      });
-      productConfig.auto_badge = giftBadge || Boolean(order.payment?.iban);
-    }
-  }
+  productConfig.auto_badge =
+    !isCartePrestationConfig(productConfig) && orderNeedsAutoBadge(order, productConfig);
 
   let badgeProductConfig = null;
   if (productConfig.auto_badge && !isCartePrestationConfig(productConfig)) {
     try {
-      const { shouldGiftBadgeComptant } = require('../lib/balma');
-      const giftBadge = shouldGiftBadgeComptant(order, {
-        id: order.product_id,
-        name: order.product_name,
+      badgeProductConfig = resolveBadgeProductConfig(catalog, {
+        badge_timing: order.badge_timing || order.payment?.badge_timing || 'deferred',
+        badge_method: order.badge_method || order.payment?.badge_method || 'iban',
       });
-      badgeProductConfig = resolveBadgeProductConfig(catalog, giftBadge
-        ? {
-            badge_timing: 'immediate',
-            badge_method: 'comptant',
-            paiement_comptant: true,
-            prelevement_delay_days: 0,
-          }
-        : {
-            badge_timing: order.badge_timing || order.payment?.badge_timing || 'deferred',
-            badge_method: order.badge_method || order.payment?.badge_method || 'iban',
-          });
     } catch (err) {
       logWarn('Badge non ajouté automatiquement', { order_id: order.order_id, error: err.message });
     }
@@ -715,6 +692,9 @@ async function processSaleJob(page, order, jobMeta = {}) {
           member_id: memberId,
         });
       }
+    }
+    if (checkpoint.sale_done && checkpoint.deciplus_sale_id && !order.deciplus_sale_id) {
+      order.deciplus_sale_id = checkpoint.deciplus_sale_id;
     }
     saleResult = await recordSale(page, order, productConfig, memberId, gymConfig, {
       badgeProductConfig,
@@ -1650,10 +1630,16 @@ async function processOneJob(job) {
     const sessionErr = isSessionRecoverableError(err.message);
     const browserGone = /browser has been closed|Target page, context or browser/i.test(err.message);
     const mfaErr = isMfaAuthError(err.message);
+    const fastFailover =
+      attempts >= failoverAfterAttempts() &&
+      shouldFailoverSale(order, policy, {
+        action,
+        deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
+      });
 
     // Erreur liée session → refresh immédiat (sans attendre le ping 1h30) puis retry job
     let sessionRecovered = false;
-    if (sessionErr || browserGone) {
+    if ((sessionErr || browserGone) && !fastFailover) {
       logWarn('Erreur liée session — refresh immédiat puis reprise du job', {
         job_id: jobId,
         error: err.message,
@@ -1700,7 +1686,7 @@ async function processOneJob(job) {
       });
     }
 
-    if (exhausted) {
+    if (exhausted || fastFailover) {
       try {
         const handedOff = await failoverExhaustedJob(job, filePath, {
           policy,
