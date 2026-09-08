@@ -434,12 +434,12 @@ async function switchDeciplusSite(page, siteLabel, options = {}) {
 
 async function assertMemberNotOnBalmaSite(page, memberId, gymConfig = {}, context = 'operation') {
   const { assertNeverBalmaDestination } = require('../lib/gym-slugs');
-  const { detectMemberGymConfig } = require('./member');
+  const { resolveMemberSiteConfig } = require('./member');
   const { openMemberCheck } = require('./wallet');
   if (memberId) {
     await openMemberCheck(page, memberId, gymConfig).catch(() => {});
   }
-  const live = await detectMemberGymConfig(page, gymConfig).catch(() => null);
+  const live = await resolveMemberSiteConfig(page, memberId, gymConfig).catch(() => null);
   assertNeverBalmaDestination(live || gymConfig, {}, context);
   return live;
 }

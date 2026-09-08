@@ -536,11 +536,12 @@ async function processSaleJob(page, order, jobMeta = {}) {
   }
 
   const orderGymConfig = getGymConfig(order.gym);
+  const { resolveMemberSiteConfig } = require('./member');
   await openMemberCheck(page, memberId, orderGymConfig).catch(() => {});
-  let memberSite = await detectMemberGymConfig(page, orderGymConfig);
+  let memberSite = await resolveMemberSiteConfig(page, memberId, orderGymConfig);
   gymConfig = await alignMemberGymForSale(page, memberId, order, memberSite);
   await openMemberCheck(page, memberId, gymConfig).catch(() => {});
-  memberSite = await detectMemberGymConfig(page, gymConfig);
+  memberSite = await resolveMemberSiteConfig(page, memberId, gymConfig);
 
   if (isBalmaSaleTarget(memberSite, order)) {
     return {

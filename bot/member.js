@@ -1593,6 +1593,48 @@ async function detectMemberGymConfig(page, fallback) {
   return fallback;
 }
 
+/** Zone réelle Deciplus (API) — le select #idz peut afficher le site courant, pas la fiche. */
+async function fetchMemberZoneId(page, memberId) {
+  const { getAccessToken } = require('./auth');
+  const token = await getAccessToken(page);
+  if (!token || !memberId) return null;
+  try {
+    const res = await page.context().request.fetch(
+      `https://api.deciplus.pro/staff/v1/member/${memberId}`,
+      {
+        method: 'GET',
+        headers: {
+          'x-access-token': token,
+          'Deciplus-Client-Type': 'manager',
+          Accept: 'application/json',
+        },
+      }
+    );
+    if (!res.ok()) return null;
+    const body = await res.json().catch(() => ({}));
+    const zone =
+      body.zoneId ??
+      body.zone_id ??
+      body.response?.zoneId ??
+      body.member?.zoneId ??
+      body.data?.zoneId ??
+      body.zone?.id;
+    return zone != null && String(zone).trim() ? String(zone).trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveMemberSiteConfig(page, memberId, fallback = {}) {
+  const { gymConfigFromZoneId } = require('../lib/deciplus-sites');
+  const apiZone = await fetchMemberZoneId(page, memberId).catch(() => null);
+  if (apiZone) {
+    const cfg = gymConfigFromZoneId(apiZone);
+    if (cfg) return cfg;
+  }
+  return detectMemberGymConfig(page, fallback);
+}
+
 async function findOrCreateMember(page, order, gymConfig) {
   const { customer } = order;
   const { uniqueDeciplusSearchConfigs } = require('../lib/deciplus-sites');
@@ -2143,6 +2185,8 @@ module.exports = {
   findOrCreateMember,
   findExistingMemberOnCurrentSite,
   detectMemberGymConfig,
+  fetchMemberZoneId,
+  resolveMemberSiteConfig,
   extractMemberId,
   resolveCreatedMemberId,
   extractMemberIdFromUrl,
