@@ -6,6 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const { orderNeedsAutoBadge } = require('../lib/billing-plan');
 const { isTrialPrestationConfig } = require('../bot/sale');
+const { safeMemberCreationGymConfig } = require('../bot/member');
+const { getGymConfig } = require('../lib/normalize');
 const { uniqueDeciplusSearchConfigs } = require('../lib/deciplus-sites');
 
 const recurring = {
@@ -56,6 +58,14 @@ test('une séance d’essai existante est reconnue avant toute nouvelle créatio
 test('la recherche membre vérifie Balma avant de créer une nouvelle fiche', () => {
   const sites = uniqueDeciplusSearchConfigs('st-cyprien');
   assert.ok(sites.some((site) => /balma/i.test(String(site.deciplus_label || site.label || site.key))));
+});
+
+test('une demande de création Balma est forcée vers Minimes', () => {
+  const safe = safeMemberCreationGymConfig(getGymConfig('balma'));
+  assert.equal(safe.key, 'minimes');
+  assert.equal(String(safe.deciplus_zone_id), '2');
+  const source = fs.readFileSync(path.join(__dirname, '../bot/member.js'), 'utf8');
+  assert.match(source, /aucune nouvelle fiche ne peut être créée sur Balma/);
 });
 
 test('une reprise après vente conserve le sale_id du checkpoint', () => {

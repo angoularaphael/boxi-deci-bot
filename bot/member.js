@@ -24,6 +24,17 @@ function navTimeout() {
   return Number(process.env.DECIPLUS_NAV_TIMEOUT || 90000);
 }
 
+function safeMemberCreationGymConfig(gymConfig = {}) {
+  const { isBalmaSaleTarget } = require('../lib/gym-slugs');
+  if (!isBalmaSaleTarget(gymConfig, {})) return gymConfig;
+  const { getGymConfig } = require('../lib/normalize');
+  const minimes = getGymConfig('minimes');
+  logWarn('Création de fiche Balma interdite — redirection vers Minimes', {
+    requested: gymConfig.deciplus_label || gymConfig.key || 'Balma',
+  });
+  return minimes;
+}
+
 /** Deciplus stocke les portraits en 200×200 (~6–8 Ko). En dessous = blanc / vide. */
 const MIN_STORED_PHOTO_BYTES = 3000;
 
@@ -1018,6 +1029,7 @@ async function startNewMemberFromSelect(page, customer) {
 
 async function fillMemberForm(page, customer, gymConfig, order) {
   const { applySeanceOfferteCustomerDefaults } = require('../lib/info-compta-note');
+  gymConfig = safeMemberCreationGymConfig(gymConfig);
   customer = applySeanceOfferteCustomerDefaults(customer, order || {});
   const sel = getSelectors().member_form_selectors || {};
   const ctx = await getMemberFormContext(page);
@@ -1376,6 +1388,18 @@ async function submitMemberForm(page, options = {}) {
   const cfg = getSelectors();
   const ctx = await getMemberFormContext(page);
   const isNew = await isNewMemberForm(page, ctx);
+  if (isNew) {
+    const { getGymConfig } = require('../lib/normalize');
+    const balmaZone = String(getGymConfig('balma')?.deciplus_zone_id || '1');
+    const selectedZone = await ctx
+      .locator('form[name="db1_form"] select[name="idz"], select[name="idz"]')
+      .first()
+      .inputValue()
+      .catch(() => '');
+    if (String(selectedZone) === balmaZone) {
+      throw new Error('Création membre refusée — aucune nouvelle fiche ne peut être créée sur Balma');
+    }
+  }
   logInfo('Soumission formulaire membre Deciplus', {
     is_new: isNew,
     url: page.url(),
@@ -1573,6 +1597,7 @@ async function findOrCreateMember(page, order, gymConfig) {
   const { customer } = order;
   const { uniqueDeciplusSearchConfigs } = require('../lib/deciplus-sites');
   const { switchDeciplusSite } = require('./deciplus-zone');
+  gymConfig = safeMemberCreationGymConfig(gymConfig);
 
   if (!order.force_new_member) {
   const sites = uniqueDeciplusSearchConfigs(order.gym || gymConfig.key);
@@ -2105,6 +2130,7 @@ module.exports = {
   DEFAULT_MATCH_FIELDS,
   CHANGE_MATCH_FIELDS,
   AVENTURE_MATCH_FIELDS,
+  safeMemberCreationGymConfig,
   getMemberFormContext,
   setMemberGymZone,
   openMemberEditForm,
