@@ -240,6 +240,8 @@ async function selectMigrateZoneInContext(ctx, { zoneId, label, needle }) {
 }
 
 async function pickMinimesInMigratePicker(page, gymConfig = {}) {
+  const { resolveSaleGymConfig } = require('../lib/gym-slugs');
+  gymConfig = resolveSaleGymConfig(gymConfig);
   const label = gymConfig.deciplus_label || 'Minimes';
   const zoneId = String(gymConfig.deciplus_zone_id || '2');
   const needle = new RegExp(String(label).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
@@ -300,6 +302,15 @@ async function confirmMigrate(page) {
 }
 
 async function migrateMemberToGym(page, memberId, gymConfig) {
+  const { resolveSaleGymConfig, isBalmaSaleTarget } = require('../lib/gym-slugs');
+  const requested = gymConfig;
+  gymConfig = resolveSaleGymConfig(gymConfig);
+  if (isBalmaSaleTarget(requested, {})) {
+    logWarn('Migration vers Balma interdite — destination forcée Minimes', {
+      member_id: memberId,
+      requested: requested?.deciplus_label || requested?.key || 'Balma',
+    });
+  }
   await openMemberCheck(page, memberId, gymConfig).catch(() => {});
   await randomDelay(400, 700);
   let onMovePage = false;
@@ -353,6 +364,8 @@ async function migrateMemberViaApi(page, memberId, gymConfig) {
   const { getAccessToken } = require('./auth');
   const token = await getAccessToken(page);
   if (!token) return { ok: false, reason: 'no_token' };
+  const { resolveSaleGymConfig } = require('../lib/gym-slugs');
+  gymConfig = resolveSaleGymConfig(gymConfig);
   const zoneId = Number(gymConfig.deciplus_zone_id || 2);
   const headers = {
     'x-access-token': token,

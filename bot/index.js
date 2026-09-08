@@ -310,9 +310,9 @@ function memberZonesMatch(memberSite, gymConfig) {
 }
 
 async function alignMemberGymForSale(page, memberId, order, memberSite) {
-  const orderGymConfig = getGymConfig(order.gym);
-  const { isBalmaSaleTarget } = require('../lib/gym-slugs');
+  const { isBalmaSaleTarget, resolveSaleGymConfig } = require('../lib/gym-slugs');
   const { migrateMemberToGym } = require('./migrate-gym');
+  const orderGymConfig = resolveSaleGymConfig(getGymConfig(order.gym), order);
   let gymConfig = orderGymConfig;
 
   if (memberSite && isBalmaSaleTarget(memberSite, {})) {
@@ -408,13 +408,15 @@ async function processSaleJob(page, order, jobMeta = {}) {
     };
   }
   let gymConfig = getGymConfig(order.gym);
-  const { isBalmaSaleTarget, BALMA_SALE_ERROR } = require('../lib/gym-slugs');
+  const { isBalmaSaleTarget, resolveSaleGymConfig } = require('../lib/gym-slugs');
   if (isBalmaSaleTarget(gymConfig, order)) {
-    return {
-      status: STATUS.MANUAL_REVIEW,
-      error: BALMA_SALE_ERROR,
-    };
+    logWarn('Commande Balma — vente forcée Minimes (Balma n’est plus une salle Boxing Center)', {
+      order_id: order.order_id,
+      requested_gym: order.gym || null,
+    });
+    order.gym = 'minimes';
   }
+  gymConfig = resolveSaleGymConfig(gymConfig, order);
 
   if (isPayplug4xPrelevementOrder(order)) {
     productConfig.auto_badge = false;
