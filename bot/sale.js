@@ -2769,7 +2769,37 @@ async function buyAbonnement(page, productConfig, gymConfig) {
   return { action: 'abonnement_created', sale_type: 'abonnement' };
 }
 
+function isActiveBadgeContract(contract = {}) {
+  if (!contract.isBadge || /expir[eé]/i.test(String(contract.label || ''))) return false;
+  const label = String(contract.label || '');
+  if (/0 cr[eé]dit restant/i.test(label) && !/pr[ée]-?d[ée]compt/i.test(label)) return false;
+  return true;
+}
+
 async function buyCarteBadge(page, productConfig, gymConfig, memberId = null) {
+  if (memberId && isBadgeSale(productConfig)) {
+    const { findActiveContracts } = require('./cancel-sale');
+    await closeGreyboxIfOpen(page).catch(() => {});
+    await openMemberCheck(page, memberId, gymConfig).catch(() => {});
+    const existing = await findActiveContracts(page, {
+      includeExpiredPrestation: true,
+    }).catch(() => []);
+    const activeBadge = existing.find(isActiveBadgeContract);
+    if (activeBadge) {
+      logInfo('Badge déjà actif — achat ignoré (anti-doublon)', {
+        member_id: memberId,
+        badge_sale_id: activeBadge.idc,
+      });
+      return {
+        action: 'badge_already_active',
+        sale_type: 'carte',
+        sale_id: activeBadge.idc,
+        skipped_duplicate: true,
+        badge_echeance_ok: true,
+      };
+    }
+  }
+
   await openSaleFlow(page, productConfig, gymConfig, 'carte');
   await applyConfigModal(page, productConfig, memberId);
   await finalizePayment(page, productConfig, gymConfig);
@@ -3363,5 +3393,6 @@ module.exports = {
   buyAbonnement,
   buyCarteBadge,
   isBadgeSale,
+  isActiveBadgeContract,
   annotateMember,
 };
