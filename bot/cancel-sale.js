@@ -214,16 +214,17 @@ async function findActiveContracts(page, options = {}) {
         // Ne pas juger « annulé » sur le bandeau « 1 ANNULÉ, 1 ACTIF, 2 EN ATTENTE »
         // sinon on ignore les vrais contrats en attente.
         const statusLabel = itemLabel || wrapperLabel;
+        const { isStaleOrInactiveAbo } = require('../lib/replace-existing-abo');
         const summaryOnly = /\d+\s+annul/i.test(statusLabel) && !/contrat n/i.test(statusLabel);
         const expiredPrestation =
           options.includeExpiredPrestation &&
-          /essai|coaching/i.test(statusLabel) &&
-          /expir[ée]/i.test(statusLabel) &&
-          !/r[ée]sili[ée]|annul[ée]/i.test(statusLabel);
+          /essai|coaching/i.test(`${itemLabel} ${wrapperLabel}`) &&
+          /expir/i.test(`${itemLabel} ${wrapperLabel}`) &&
+          !/r[eéÉ]sili|annul/i.test(`${itemLabel} ${wrapperLabel}`);
         if (
           !expiredPrestation &&
           !summaryOnly &&
-          /r[ée]sili[ée]|annul[ée]e?|termin[ée]|expir[ée]|inactif|cl[ôo]tur|archiv/i.test(itemLabel)
+          isStaleOrInactiveAbo(`${itemLabel} ${wrapperLabel}`)
         ) {
           continue;
         }
@@ -282,7 +283,8 @@ async function findActiveContracts(page, options = {}) {
           const idc = String(row.idc || '').trim();
           const label = String(row.label || '').trim();
           if (!idc || seen.has(idc) || !label) continue;
-          if (/r[ée]sili[ée]|annul[ée]e?|termin[ée]|expir[ée]|inactif|cl[ôo]tur|archiv/i.test(label)) {
+          const { isStaleOrInactiveAbo } = require('../lib/replace-existing-abo');
+          if (isStaleOrInactiveAbo(label)) {
             continue;
           }
           seen.add(idc);

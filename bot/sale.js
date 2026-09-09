@@ -19,7 +19,7 @@ const {
   scoreCatalogTile,
 } = require('../lib/catalog-sale');
 const { saleContractMatches } = require('../lib/sale-contract-match');
-const { classifyMemberContracts } = require('../lib/replace-existing-abo');
+const { classifyMemberContracts, leftoverBlocksNewSale } = require('../lib/replace-existing-abo');
 const { orderNeedsAutoBadge } = require('../lib/billing-plan');
 const { isPendingOrFutureContract } = require('./cancel-sale');
 
@@ -3157,6 +3157,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       replaceExisting: true,
       keepSaleId: order.deciplus_sale_id || null,
     });
+    classified.toCancel = classified.toCancel.filter((c) => leftoverBlocksNewSale(c));
 
     let leftover = [];
     if (classified.toCancel.length) {
@@ -3186,7 +3187,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
         skipCancel: false,
         replaceExisting: true,
         keepSaleId: order.deciplus_sale_id || null,
-      }).toCancel.filter((c) => cancelIds.has(String(c.idc)));
+      }).toCancel.filter((c) => cancelIds.has(String(c.idc)) && leftoverBlocksNewSale(c));
       if (leftover.length) {
         logWarn('Ancien abo encore listé — second essai de résiliation', {
           order_id: order.order_id,
@@ -3210,7 +3211,13 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
           skipCancel: false,
           replaceExisting: true,
           keepSaleId: order.deciplus_sale_id || null,
-        }).toCancel.filter((c) => leftoverIds.has(String(c.idc)));
+        }).toCancel.filter((c) => leftoverIds.has(String(c.idc)) && leftoverBlocksNewSale(c));
+      }
+      if (leftover.length === 0 && classified.toCancel.length) {
+        logInfo('Ancien abo clos / expiré — vente autorisée', {
+          order_id: order.order_id,
+          member_id: memberId,
+        });
       }
       if (leftover.length) {
         throw new Error(
