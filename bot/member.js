@@ -1635,20 +1635,15 @@ async function resolveMemberSiteConfig(page, memberId, fallback = {}) {
   return detectMemberGymConfig(page, fallback);
 }
 
-async function findOrCreateMember(page, order, gymConfig) {
-  const { customer } = order;
-  const { uniqueDeciplusSearchConfigs } = require('../lib/deciplus-sites');
+async function searchExistingMemberAcrossSites(page, customer, sites, logCtx = {}) {
   const { switchDeciplusSite } = require('./deciplus-zone');
-  gymConfig = safeMemberCreationGymConfig(gymConfig);
-
-  if (!order.force_new_member) {
-  const sites = uniqueDeciplusSearchConfigs(order.gym || gymConfig.key);
   for (const site of sites) {
     const label = site.deciplus_label || site.label;
     const switched = await switchDeciplusSite(page, label).catch((err) => {
       logWarn('Site Deciplus non ouvert pour recherche membre', {
         site: label,
         error: err.message,
+        ...logCtx,
       });
       return false;
     });
@@ -1656,14 +1651,28 @@ async function findOrCreateMember(page, order, gymConfig) {
     const found = await findExistingMemberOnCurrentSite(page, customer);
     if (found) {
       logInfo('Fiche Deciplus existante réutilisée', {
-        order_id: order.order_id,
         member_id: found.member_id,
         site: label,
         action: found.action,
+        ...logCtx,
       });
       return { ...found, gymConfig: site };
     }
   }
+  return null;
+}
+
+async function findOrCreateMember(page, order, gymConfig) {
+  const { customer } = order;
+  const { saleMemberSearchConfigs, uniqueDeciplusSearchConfigs } = require('../lib/deciplus-sites');
+  const { switchDeciplusSite } = require('./deciplus-zone');
+  gymConfig = safeMemberCreationGymConfig(gymConfig);
+  const logCtx = { order_id: order.order_id };
+
+  if (!order.force_new_member) {
+    const sites = saleMemberSearchConfigs(order.gym || gymConfig.key);
+    const found = await searchExistingMemberAcrossSites(page, customer, sites, logCtx);
+    if (found) return found;
   } else {
     logInfo('Création membre Deciplus forcée (nouvelle fiche)', {
       order_id: order.order_id,
@@ -1686,9 +1695,13 @@ async function findOrCreateMember(page, order, gymConfig) {
 
   const duplicateMsg = await detectDuplicateError(page);
   if (duplicateMsg) {
-    logWarn('Doublon à la création — recherche membre existant', { order_id: order.order_id });
-    const accepted = await findExistingMemberOnCurrentSite(page, customer);
-    if (accepted) return { ...accepted, gymConfig };
+    logWarn('Doublon à la création — recherche multi-salles (repli sécurité)', logCtx);
+    const allSites = uniqueDeciplusSearchConfigs(order.gym || gymConfig.key);
+    const accepted = await searchExistingMemberAcrossSites(page, customer, allSites, {
+      ...logCtx,
+      fallback: 'duplicate_all_gyms',
+    });
+    if (accepted) return accepted;
     return { duplicate: true, message: duplicateMsg };
   }
 
