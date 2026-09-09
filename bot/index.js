@@ -1814,7 +1814,9 @@ async function runLoop(once = false) {
     }
     if (Date.now() - lastSaleReconcilePollAt >= SALE_RECONCILE_POLL_MS) {
       lastSaleReconcilePollAt = Date.now();
-      await maybeTriggerDeciplusSaleReconcile();
+      void maybeTriggerDeciplusSaleReconcile().catch((err) => {
+        logWarn('Poll ventes Deciplus (async)', { error: err.message });
+      });
     }
     if (pending.length === 0) {
       if (once) break;
@@ -1866,6 +1868,8 @@ function installCrashGuards() {
 async function main() {
   const once = process.argv.includes('--once');
   installCrashGuards();
+  const { bootstrapAuthTokenFromStorage } = require('./auth');
+  bootstrapAuthTokenFromStorage();
   console.log('[BOXPLUS] Lancement boucle bot Deciplus');
   for (;;) {
     try {

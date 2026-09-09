@@ -3,7 +3,7 @@
  * Sans module Caisse → via check.php + nextgen/vente
  */
 const path = require('path');
-const { randomDelay, ensureDir, timestamp } = require('../lib/utils');
+const { randomDelay, randomDelayStable, ensureDir, timestamp } = require('../lib/utils');
 const { logInfo, logWarn } = require('../lib/logger');
 const { openMemberCheck, clickFirst, fillFirst, sel, closeGreyboxIfOpen, ribAddressFields } = require('./wallet');
 const { cancelSale } = require('./cancel-sale');
@@ -19,7 +19,7 @@ const {
   scoreCatalogTile,
 } = require('../lib/catalog-sale');
 const { saleContractMatches } = require('../lib/sale-contract-match');
-const { classifyMemberContracts, leftoverBlocksNewSale } = require('../lib/replace-existing-abo');
+const { classifyMemberContracts, leftoverBlocksNewSale, pickKeepSaleId } = require('../lib/replace-existing-abo');
 const { orderNeedsAutoBadge } = require('../lib/billing-plan');
 const { isPendingOrFutureContract } = require('./cancel-sale');
 
@@ -334,7 +334,7 @@ async function selectProductInCatalog(page, productConfig) {
   await searchInput.waitFor({ state: 'visible', timeout: 20000 });
 
   await openProductCategory(ctx, productConfig);
-  await randomDelay(600, 1000);
+  await randomDelayStable(600, 1000);
 
   // Grille « Cartes prépayées » : essai / coaching / badge déjà visibles sans recherche.
   if (await clickProductResult(ctx, productConfig)) {
@@ -344,7 +344,7 @@ async function selectProductInCatalog(page, productConfig) {
 
   for (const search of searchCandidates) {
     await searchInput.fill('');
-    await randomDelay(250, 450);
+    await randomDelayStable(250, 450);
     await searchInput.fill(search);
     await searchInput.press('Enter').catch(() => {});
     await randomDelay(1500, 2500);
@@ -678,7 +678,7 @@ async function ensurePaiementComptantOn(page, { strict = false } = {}) {
   const ctx = await resolveDeciplusWorkPage(page);
   for (let pass = 0; pass < 5; pass += 1) {
     await clickPaiementComptantToggleOn(ctx);
-    await randomDelay(400, 700);
+    await randomDelayStable(400, 700);
     if (await isElSwitchComptantOn(page)) {
       logInfo('Paiement Comptant — activé (el-switch)');
       return true;
@@ -712,7 +712,7 @@ async function ensurePaiementComptantOff(page, { strict = false } = {}) {
       if (checked === true) {
         await uncheckPaiementComptantInput(cb).catch(() => {});
         await cb.uncheck({ force: true, timeout: 5000 }).catch(() => {});
-        await randomDelay(400, 700);
+        await randomDelayStable(400, 700);
       }
     }
   }
@@ -931,7 +931,7 @@ async function waitForBadgeConfigModal(page, timeoutMs = 15000, { tryReopen = tr
 
   if (tryReopen) {
     await clickBadgeConfigEntry(page);
-    await randomDelay(800, 1200);
+    await randomDelayStable(800, 1200);
     return waitForBadgeConfigModal(page, 8000, { tryReopen: false });
   }
   return isBadgeConfigModalOpen(page);
@@ -954,7 +954,7 @@ async function clickBadgeConfigEntry(page) {
 
 async function reopenBadgeConfigModal(page) {
   await clickBadgeConfigEntry(page);
-  await randomDelay(400, 700);
+  await randomDelayStable(400, 700);
   return waitForBadgeConfigModal(page, 8000, { tryReopen: false });
 }
 
@@ -963,13 +963,13 @@ async function ensureBadgeConfigModalForSale(page) {
   if (await waitForBadgeConfigModal(page, 6000, { tryReopen: false })) return true;
 
   await clickBadgeConfigEntry(page);
-  await randomDelay(400, 700);
+  await randomDelayStable(400, 700);
   if (await waitForBadgeConfigModal(page, 6000, { tryReopen: false })) return true;
 
   const tile = ctx.locator('.product-wrapper-title, [class*="product-wrapper"]').filter({ hasText: /^Badge$/i }).first();
   if ((await tile.count()) > 0 && (await tile.isVisible().catch(() => false))) {
     await tile.click({ force: true }).catch(() => {});
-    await randomDelay(500, 800);
+    await randomDelayStable(500, 800);
   }
 
   await waitForBadgeConfigModal(page, 8000, { tryReopen: false });
@@ -1016,7 +1016,7 @@ async function readBadgeAuValueFromModal(page) {
 async function clickBadgeModalAppliquer(page) {
   const ctx = await resolveDeciplusWorkPage(page);
   const clicked = await badgeDomEvaluate(ctx, 'clickAppliquer');
-  if (clicked) await randomDelay(600, 1000);
+  if (clicked) await randomDelayStable(600, 1000);
   return clicked;
 }
 
@@ -1155,7 +1155,7 @@ async function venteUiSnapshot(page) {
 }
 
 async function clickTerminerVente(page) {
-  await randomDelay(800, 1200);
+  await randomDelayStable(800, 1200);
 
   const work = await resolveDeciplusWorkPage(page);
   const scopes = [work, page, ...(page.frames?.() || [])];
@@ -1269,10 +1269,10 @@ async function handleBadgeModifierDateFinDialog(page, { timeoutMs = 15000 } = {}
       try {
         if (await badgeDomEvaluate(ctx, 'clickModifierDateFin')) {
           logInfo('Badge — « Modifier la date de fin » (popup échéance)');
-          await randomDelay(800, 1200);
+          await randomDelayStable(800, 1200);
           if (await isBadgeConfigModalOpen(page)) {
             await clickBadgeModalAppliquer(page);
-            await randomDelay(600, 1000);
+            await randomDelayStable(600, 1000);
           }
           return true;
         }
@@ -1291,7 +1291,7 @@ async function handleBadgeModifierDateFinDialog(page, { timeoutMs = 15000 } = {}
     const clicked = await clickFirst(page, sel('payment_finalize.modifier_date_fin_popup'));
     if (clicked) {
       logInfo('Badge — « Modifier la date de fin » (fallback sélecteur)');
-      await randomDelay(800, 1200);
+      await randomDelayStable(800, 1200);
       return true;
     }
     throw new Error('Badge — popup « Modifier la date de fin » visible mais bouton introuvable');
@@ -1497,7 +1497,7 @@ async function ensureContractModifyAction(scope) {
     const modIndex = options.findIndex((o) => /modifier/i.test(o));
     if (modIndex >= 0) {
       await select.selectOption({ index: modIndex }).catch(() => {});
-      await randomDelay(400, 700);
+      await randomDelayStable(400, 700);
       return true;
     }
   }
@@ -1505,7 +1505,7 @@ async function ensureContractModifyAction(scope) {
   const modBtn = scope.getByRole('button', { name: /^Modifier$/i }).first();
   if ((await modBtn.count()) > 0 && (await modBtn.isVisible().catch(() => false))) {
     await modBtn.click();
-    await randomDelay(400, 700);
+    await randomDelayStable(400, 700);
     return true;
   }
   return false;
@@ -1522,7 +1522,7 @@ async function focusBadgeContractInSale(page) {
     const el = page.locator(selector).first();
     if ((await el.count()) > 0 && (await el.isVisible().catch(() => false))) {
       await el.click();
-      await randomDelay(500, 800);
+      await randomDelayStable(500, 800);
       return true;
     }
   }
@@ -1530,7 +1530,7 @@ async function focusBadgeContractInSale(page) {
   const badgeTile = page.getByText(/^Badge$/i).last();
   if ((await badgeTile.count()) > 0 && (await badgeTile.isVisible().catch(() => false))) {
     await badgeTile.click();
-    await randomDelay(500, 800);
+    await randomDelayStable(500, 800);
     return true;
   }
   return false;
@@ -1543,7 +1543,7 @@ async function ensureMemberCheckForBadgeEdit(page, memberId) {
     await openMemberCheck(page, memberId, gymConfig);
     await randomDelay(1500, 2200);
   } else {
-    await randomDelay(800, 1200);
+    await randomDelayStable(800, 1200);
   }
   await focusBadgeContractInSale(page);
   return page.url().includes('check.php');
@@ -1559,7 +1559,7 @@ async function applyContractDateChange(scope) {
       'button:has-text("Appliquer")',
     ].join(', ')
   );
-  if (applied) await randomDelay(600, 1000);
+  if (applied) await randomDelayStable(600, 1000);
   return applied;
 }
 
@@ -1665,7 +1665,7 @@ async function adjustBadgeEndDate(page, scheduleOrDays) {
   const control = await findModifierDateFinControl(page);
   if (!control) return false;
   await control.click({ force: true }).catch(() => {});
-  await randomDelay(600, 1000);
+  await randomDelayStable(600, 1000);
   if (await fillBadgeEndDateFields(page, schedule) && (await confirmBadgeDateModal(page))) {
     return true;
   }
@@ -1889,7 +1889,7 @@ async function nudgeBadgeModalRecap(page) {
   const modal = await getBadgeConfigModal(page);
   if (!modal) return;
   await modal.getByText(/Configuration de Badge|Récap|Valide du/i).first().click({ force: true }).catch(() => {});
-  await randomDelay(400, 700);
+  await randomDelayStable(400, 700);
 }
 
 async function waitForBadgeWarningGone(page, timeoutMs = 8000) {
@@ -1923,10 +1923,10 @@ async function fillBadgeDatesInConfigModal(page, delayDays = 3, productConfig = 
   await badgeDomEvaluate(ctx, 'fillDu', startStr);
   let filledAu = await badgeDomEvaluate(ctx, 'fillAu', endStr);
   await fillBadgePaymentDate(page, payStr);
-  await randomDelay(500, 800);
+  await randomDelayStable(500, 800);
   await page.keyboard.press('Escape').catch(() => {});
   await badgeDomEvaluate(ctx, 'closePicker');
-  await randomDelay(800, 1200);
+  await randomDelayStable(800, 1200);
 
   if (!filledAu) {
     filledAu = await fillBadgeAuDateViaDom(ctx, endStr);
@@ -1977,7 +1977,7 @@ async function dismissPostApplyDialogs(page, { allowRib = false } = {}) {
   if (allowRib) {
     await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
   }
-  await randomDelay(400, 700);
+  await randomDelayStable(400, 700);
 }
 
 async function finalizeImmediateBadgeCheckout(page, gymConfig = {}) {
@@ -1994,7 +1994,7 @@ async function finalizeImmediateBadgeCheckout(page, gymConfig = {}) {
   }
   if (cardRecorded) {
     logInfo('Badge — règlement CB enregistré');
-    await randomDelay(800, 1200);
+    await randomDelayStable(800, 1200);
   }
 
   await fillNf525InvoiceAddressIfNeeded(page, gymConfig).catch((err) => {
@@ -2018,7 +2018,7 @@ async function finalizeImmediateBadgeCheckout(page, gymConfig = {}) {
   let done = false;
   if (clotured) {
     logInfo('Badge — note clôturée');
-    await randomDelay(500, 800);
+    await randomDelayStable(500, 800);
   }
   done = await clickTerminerVente(page);
   if (!done) {
@@ -2039,7 +2039,7 @@ async function finalizeImmediateBadgeCheckout(page, gymConfig = {}) {
 
 async function finalizeBadgePayment(page, productConfig = {}, gymConfig = {}) {
   await dismissPostApplyDialogs(page, { allowRib: false });
-  await randomDelay(250, 450);
+  await randomDelayStable(250, 450);
 
   const immediate =
     productConfig.paiement_comptant === true ||
@@ -2052,7 +2052,7 @@ async function finalizeBadgePayment(page, productConfig = {}, gymConfig = {}) {
 
   // Après Appliquer différé, Deciplus peut exiger un mode de paiement avant Clôturer
   await clickFirst(page, sel('payment_finalize.virement')).catch(() => {});
-  await randomDelay(200, 350);
+  await randomDelayStable(200, 350);
 
   let clotured = await clickVenteFooterAction(page, /Cl[ôo]turer(\s+la\s+note)?/i);
   if (!clotured) {
@@ -2117,14 +2117,14 @@ async function configureBadgeDeferredDates(page, scheduleOrDays) {
   try {
     if (!(await isBadgeConfigModalOpen(page))) {
       await reopenBadgeConfigModal(page);
-      await randomDelay(400, 700);
+      await randomDelayStable(400, 700);
     }
     if (await isBadgeConfigModalOpen(page)) {
       const ctx = await resolveDeciplusWorkPage(page);
       await badgeDomEvaluate(ctx, 'fillDu', schedule.startStr).catch(() => false);
       await badgeDomEvaluate(ctx, 'fillAu', schedule.endStr).catch(() => false);
       await fillBadgePaymentDate(page, schedule.payStr);
-      await randomDelay(400, 700);
+      await randomDelayStable(400, 700);
       await waitForBadgeWarningGone(page, 6000).catch(() => {});
       if (await clickBadgeModalAppliquer(page)) {
         await waitForBadgeModalClosed(page, 8000);
@@ -2185,7 +2185,7 @@ async function typeBadgePaymentDate(page, dateStr) {
     await input.fill('').catch(() => {});
     await input.type(dateStr, { delay: 40 });
     await input.press('Enter');
-    await randomDelay(300, 600);
+    await randomDelayStable(300, 600);
     const value = ((await input.inputValue().catch(() => '')) || '').trim();
     const okTyped = value === dateStr;
     if (okTyped) {
@@ -2209,7 +2209,7 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
       'Séance d’essai / pack coaching — modale Configuration de Badge interdite (pas de droit Badge)'
     );
   }
-  await randomDelay(400, 700);
+  await randomDelayStable(400, 700);
   await ensureBadgeConfigModalForSale(page);
 
   if (!(await isBadgeConfigModalOpen(page))) {
@@ -2241,7 +2241,7 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
     await badgeDomEvaluate(ctx, 'fillDu', startStr).catch(() => false);
     await badgeDomEvaluate(ctx, 'fillAu', endStr).catch(() => false);
     await fillBadgePaymentDate(page, payStr);
-    await randomDelay(400, 700);
+    await randomDelayStable(400, 700);
     await waitForBadgeWarningGone(page, 6000).catch(() => {});
     const auReadback = await readBadgeAuValueFromModal(page).catch(() => null);
     if (!isFrDateAtLeast(auReadback, endStr)) {
@@ -2267,7 +2267,7 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
     }
   }
 
-  await randomDelay(500, 800);
+  await randomDelayStable(500, 800);
 
   let dateFinOk = false;
   let payDateOk = false;
@@ -2299,7 +2299,7 @@ async function applyBadgeConfigModal(page, productConfig, _memberId = null) {
         await badgeDomEvaluate(ctx2, 'fillAu', endStr).catch(() => false);
         await fillBadgePaymentDate(page, payStr);
         await clickBadgeModalAppliquer(page).catch(() => false);
-        await randomDelay(400, 700);
+        await randomDelayStable(400, 700);
       }
     }
   } else {
@@ -2429,7 +2429,7 @@ async function applyConfigModal(page, productConfig, memberId = null) {
     }
     if (applied) {
       logInfo('Vente Deciplus — configuration appliquée');
-      await randomDelay(600, 1000);
+      await randomDelayStable(600, 1000);
     } else {
       logInfo('Vente Deciplus — pas de modale Appliquer, produit ajouté au panier vente');
     }
@@ -2483,7 +2483,7 @@ async function applyConfigModal(page, productConfig, memberId = null) {
     throw new Error('Vente Deciplus — bouton « Appliquer » introuvable');
   }
   logInfo('Vente Deciplus — configuration appliquée');
-  await randomDelay(600, 1000);
+  await randomDelayStable(600, 1000);
   let ignored = await clickFirst(work, sel('sale_config_modal.ignorer_continuer'), {
     force: true,
   }).catch(() => false);
@@ -2494,7 +2494,7 @@ async function applyConfigModal(page, productConfig, memberId = null) {
   }
   if (ignored) {
     logInfo('Vente Deciplus — étape RIB ignorée');
-    await randomDelay(600, 1000);
+    await randomDelayStable(600, 1000);
   }
 }
 
@@ -2587,7 +2587,7 @@ async function fillNf525InvoiceAddressIfNeeded(page, gymConfig = {}) {
 
   logInfo('Vente Deciplus — NF525 rempli', filled);
   if (filled?.ok) {
-    await randomDelay(400, 700);
+    await randomDelayStable(400, 700);
     const suggestion = scope.locator('.el-autocomplete-suggestion li, .el-select-dropdown li').first();
     if ((await suggestion.count()) > 0 && (await suggestion.isVisible().catch(() => false))) {
       await suggestion.click({ force: true }).catch(() => {});
@@ -2611,7 +2611,7 @@ async function fillNf525InvoiceAddressIfNeeded(page, gymConfig = {}) {
     if ((await okBtn.count()) > 0 && (await okBtn.isVisible().catch(() => false))) {
       await okBtn.click({ force: true }).catch(() => {});
     }
-    await randomDelay(800, 1200);
+    await randomDelayStable(800, 1200);
   }
   return Boolean(filled?.ok);
 }
@@ -2652,7 +2652,7 @@ async function finalizePayment(page, productConfig, gymConfig = {}) {
       throw new Error('Vente comptant — mode de paiement « Carte Bancaire » introuvable');
     }
     logInfo('Vente comptant — règlement CB enregistré');
-    await randomDelay(800, 1200);
+    await randomDelayStable(800, 1200);
     await page.waitForTimeout(600).catch(() => {});
     const nf525AfterCb = await fillNf525InvoiceAddressIfNeeded(page, gymConfig).catch((err) => {
       logWarn('Adresse NF525 ignorée après CB', { error: err.message });
@@ -2663,7 +2663,7 @@ async function finalizePayment(page, productConfig, gymConfig = {}) {
     if (nf525AfterCb || (await venteStillNeedsCapture(page))) {
       logInfo('Vente comptant — nouvel encaissement CB après NF525');
       await clickCarteBancaire(page, work);
-      await randomDelay(800, 1200);
+      await randomDelayStable(800, 1200);
     }
 
     let clotured = await clickVenteFooterAction(page, /Cl[ôo]turer(\s+la\s+note)?/i);
@@ -2674,7 +2674,7 @@ async function finalizePayment(page, productConfig, gymConfig = {}) {
     }
     let done = false;
     if (clotured) {
-      await randomDelay(800, 1200);
+      await randomDelayStable(800, 1200);
       done = await clickTerminerVente(page);
       if (!done) {
         done = await clickVenteFooterAction(page, /\bTerminer\b/i, {
@@ -2702,7 +2702,7 @@ async function finalizePayment(page, productConfig, gymConfig = {}) {
       const nf525 = await fillNf525InvoiceAddressIfNeeded(page, gymConfig).catch(() => false);
       if (nf525 || (await venteStillNeedsCapture(page))) {
         await clickCarteBancaire(page, work);
-        await randomDelay(600, 1000);
+        await randomDelayStable(600, 1000);
         clotured = await clickVenteFooterAction(page, /Cl[ôo]turer(\s+la\s+note)?/i);
         if (clotured) {
           done = await clickTerminerVente(page);
@@ -2761,8 +2761,9 @@ async function finalizePayment(page, productConfig, gymConfig = {}) {
     }
     if (!done) {
       const screenshot = await captureSaleDebugScreenshot(page, 'virement-finalize-missing');
-      logWarn('Vente virement — footer Terminer introuvable', { screenshot });
-      throw new Error('Vente Deciplus — bouton Terminer introuvable après virement');
+      logWarn('Vente virement — footer Terminer introuvable, vérification du contrat requise', {
+        screenshot,
+      });
     }
   } else if (mode === 'card' || mode === 'cb') {
     await clickFirst(page, sel('payment_finalize.carte_bancaire'), { force: true });
@@ -3046,7 +3047,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
     });
     await closeGreyboxIfOpen(page);
     await openMemberCheck(page, memberId, gymConfig);
-    await randomDelay(600, 1000);
+    await randomDelayStable(600, 1000);
   }
 
   let result;
@@ -3151,11 +3152,17 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
   } else if (productConfig.sale_type === 'abonnement') {
     const { findActiveContracts } = require('./cancel-sale');
     const before = await findActiveContracts(page).catch(() => []);
+    const preview = classifyMemberContracts(before, productConfig, {
+      isPendingOrFuture: isPendingOrFutureContract,
+      skipCancel: true,
+      replaceExisting: false,
+    });
+    const keepSaleId = pickKeepSaleId(preview, order.deciplus_sale_id);
     const classified = classifyMemberContracts(before, productConfig, {
       isPendingOrFuture: isPendingOrFutureContract,
       skipCancel: false,
       replaceExisting: true,
-      keepSaleId: order.deciplus_sale_id || null,
+      keepSaleId,
     });
     classified.toCancel = classified.toCancel.filter((c) => leftoverBlocksNewSale(c));
 
@@ -3171,6 +3178,11 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
         cancelReason: 'change_replace_existing',
         filter: (c) => c && !c.isBadge && cancelIds.has(String(c.idc)),
       });
+      const ghostIds = new Set(
+        (cancelOutcome?.details || [])
+          .filter((d) => /action_panel_missing|already_closed|already_cancelled/i.test(String(d.reason || '')))
+          .map((d) => String(d.idc))
+      );
       logInfo('Ancien abo résilié', {
         order_id: order.order_id,
         member_id: memberId,
@@ -3186,8 +3198,13 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
         isPendingOrFuture: isPendingOrFutureContract,
         skipCancel: false,
         replaceExisting: true,
-        keepSaleId: order.deciplus_sale_id || null,
-      }).toCancel.filter((c) => cancelIds.has(String(c.idc)) && leftoverBlocksNewSale(c));
+        keepSaleId,
+      }).toCancel.filter(
+        (c) =>
+          cancelIds.has(String(c.idc)) &&
+          leftoverBlocksNewSale(c) &&
+          !ghostIds.has(String(c.idc))
+      );
       if (leftover.length) {
         logWarn('Ancien abo encore listé — second essai de résiliation', {
           order_id: order.order_id,
@@ -3210,8 +3227,10 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
           isPendingOrFuture: isPendingOrFutureContract,
           skipCancel: false,
           replaceExisting: true,
-          keepSaleId: order.deciplus_sale_id || null,
-        }).toCancel.filter((c) => leftoverIds.has(String(c.idc)) && leftoverBlocksNewSale(c));
+          keepSaleId,
+        }).toCancel.filter(
+          (c) => leftoverIds.has(String(c.idc)) && leftoverBlocksNewSale(c) && !ghostIds.has(String(c.idc))
+        );
       }
       if (leftover.length === 0 && classified.toCancel.length) {
         logInfo('Ancien abo clos / expiré — vente autorisée', {
@@ -3233,13 +3252,16 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       isPendingOrFuture: isPendingOrFutureContract,
       skipCancel: true,
       replaceExisting: true,
-      keepSaleId: order.deciplus_sale_id || null,
+      keepSaleId,
     });
     const existingMatch =
-      !options.forceNewSale && leftover.length === 0 && !afterClassified.needsNewSale
+      leftover.length === 0 && !afterClassified.needsNewSale
         ? afterClassified.matchingStarted.find(
-            (c) => String(c.idc) === String(order.deciplus_sale_id || '')
-          ) || afterClassified.matchingStarted[0] || null
+            (c) => String(c.idc) === String(keepSaleId || '')
+          ) ||
+          afterClassified.matchingStarted[0] ||
+          afterClassified.matchingPending[0] ||
+          null
         : null;
 
     if (existingMatch) {
@@ -3281,7 +3303,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
         result.badge_action = result.badge_action || 'already_on_file';
       } else {
         logInfo('Création badge après abonnement', { member_id: memberId, order_id: order.order_id });
-        await randomDelay(400, 700);
+        await randomDelayStable(400, 700);
         try {
           const badgeResult = await buyCarteBadge(page, badgeProductConfig, gymConfig, memberId);
           result.badge_action = badgeResult.action;
@@ -3344,7 +3366,7 @@ async function enforceBadgeEcheance(page, memberId, badgeConfig = {}, gymConfig 
   const { findActiveContracts, contractUrl } = require('./cancel-sale');
   await closeGreyboxIfOpen(page);
   await openMemberCheck(page, memberId, gymConfig);
-  await randomDelay(500, 800);
+  await randomDelayStable(500, 800);
 
   const contracts = await findActiveContracts(page).catch(() => []);
   const badge = contracts.find((c) => c.isBadge);
@@ -3364,7 +3386,7 @@ async function enforceBadgeEcheance(page, memberId, badgeConfig = {}, gymConfig 
     .goto(contractUrl(badge.idc), { waitUntil: 'domcontentloaded', timeout: 30000 })
     .catch(() => {});
   await page.getByText(/Échéances/i).first().waitFor({ state: 'visible', timeout: 12000 }).catch(() => {});
-  await randomDelay(800, 1200);
+  await randomDelayStable(800, 1200);
 
   const contractText = ((await page.locator('body').innerText().catch(() => '')) || '')
     .replace(/\s+/g, ' ')

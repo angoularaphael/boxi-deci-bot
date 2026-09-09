@@ -378,6 +378,43 @@ function readDiskStorageHash() {
   }
 }
 
+function extractAuthTokenFromState(state) {
+  try {
+    for (const o of state?.origins || []) {
+      const auth = (o.localStorage || []).find((x) => x.name === 'auth');
+      if (!auth?.value) continue;
+      const parsed = JSON.parse(auth.value);
+      if (parsed?.token) return String(parsed.token);
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
+}
+
+function hasAuthToken(state) {
+  return Boolean(extractAuthTokenFromState(state));
+}
+
+function readStoredAuthToken() {
+  try {
+    if (!fs.existsSync(STORAGE_FILE)) return null;
+    return extractAuthTokenFromState(JSON.parse(fs.readFileSync(STORAGE_FILE, 'utf8')));
+  } catch {
+    return null;
+  }
+}
+
+/** Charge DECIPLUS_AUTH_TOKEN depuis storage-state.json si absent du .env */
+function bootstrapAuthTokenFromStorage() {
+  if (String(process.env.DECIPLUS_AUTH_TOKEN || '').trim()) return null;
+  const token = readStoredAuthToken();
+  if (!token) return null;
+  process.env.DECIPLUS_AUTH_TOKEN = token;
+  logInfo('DECIPLUS_AUTH_TOKEN chargé depuis storage-state.json');
+  return token;
+}
+
 /**
  * Ne pas écraser un storage-state.json fraîchement uploadé (changement de session).
  * Ne réécrit pas si le contenu auth est inchangé (évite boucle mtime / reload).
@@ -395,20 +432,6 @@ async function saveSession(context, opts = {}) {
   const nextState = await context.storageState();
   const nextHash = hashStorageState(nextState);
   const diskHash = readDiskStorageHash();
-
-  const hasAuthToken = (state) => {
-    try {
-      for (const o of state.origins || []) {
-        const auth = (o.localStorage || []).find((x) => x.name === 'auth');
-        if (!auth?.value) continue;
-        const parsed = JSON.parse(auth.value);
-        if (parsed?.token) return true;
-      }
-    } catch {
-      /* ignore */
-    }
-    return false;
-  };
 
   let diskHasToken = false;
   try {
@@ -428,6 +451,8 @@ async function saveSession(context, opts = {}) {
   }
 
   fs.writeFileSync(STORAGE_FILE, JSON.stringify(nextState, null, 2), 'utf8');
+  const savedToken = extractAuthTokenFromState(nextState);
+  if (savedToken) process.env.DECIPLUS_AUTH_TOKEN = savedToken;
   logInfo('Session Deciplus sauvegardée');
   return { skipped: false, mtimeMs: getStorageMtimeMs(), hash: nextHash };
 }
@@ -725,4 +750,6 @@ module.exports = {
   isMfaAuthError,
   isSessionRecoverableError,
   getStorageMtimeMs,
+  readStoredAuthToken,
+  bootstrapAuthTokenFromStorage,
 };
