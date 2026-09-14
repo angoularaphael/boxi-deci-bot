@@ -141,6 +141,20 @@ async function fillFirst(ctx, selectors, value) {
   return false;
 }
 
+/** Vide telsms : Deciplus envoie sinon un SMS de confirmation d’inscription. */
+async function clearFirst(ctx, selectors) {
+  if (!selectors) return false;
+  const list = String(selectors).split(',').map((s) => s.trim());
+  for (const sel of list) {
+    const el = ctx.locator(sel).first();
+    if ((await el.count()) > 0) {
+      await el.fill('').catch(() => {});
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Force la salle Deciplus (select idz) selon la commande boutique.
  * Sans ça, Deciplus garde la zone de la session (souvent Balma).
@@ -1049,8 +1063,8 @@ async function fillMemberForm(page, customer, gymConfig, order) {
   await fillFirst(ctx, 'form[name="db1_form"] input[name="email"]:not(#i_email)', customer.email);
   await fillFirst(ctx, sel.date_naissance || 'input[name="date_naissance"]', formatBirthdate(customer.birthdate));
   await fillFirst(ctx, sel.sexe || 'select[name="sexe"]', genderToDeciplus(customer.gender));
-  await fillFirst(ctx, sel.telsms || 'input[name="telsms"]', phone);
   await fillFirst(ctx, sel.tel || 'input[name="tel"]', phone);
+  await clearFirst(ctx, sel.telsms || 'input[name="telsms"]');
   await fillFirst(ctx, sel.adr1 || 'input[name="adr1"]', customer.address);
   const adr2 = customer.address2 || customer.adr2;
   if (adr2) await fillFirst(ctx, sel.adr2 || 'input[name="adr2"]', adr2);
