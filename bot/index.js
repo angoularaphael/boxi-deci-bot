@@ -52,6 +52,8 @@ const { fetchDeciplusCatalog, resolveProductConfig, resolveBadgeProductConfig } 
 const {
   applyBillingPlanToProductConfig,
   isPayplug4xPrelevementOrder,
+  isScalapayOrder,
+  resolveScalapayDeciplus,
   orderNeedsAutoBadge,
 } = require('../lib/billing-plan');
 const { isCartePrestationConfig } = require('../lib/catalog-sale');
@@ -269,6 +271,7 @@ async function processCancelJob(page, order) {
     const result = await cancelSale(page, memberId, {
       cancelDate: order.cancel_date || order.effective_date || null,
       cancelReason: order.cancel_reason || null,
+      neverVoid: true,
     });
     if (result?.refused && result.reason === 'comptant_refused') {
       await pushCancelStatus('error', {
@@ -288,10 +291,12 @@ async function processCancelJob(page, order) {
     }
     await pushCancelStatus('done', { cancelledCount: result?.cancelled_count ?? null, memberId });
     try {
-      const { reconcileActiveBadges } = require('./sale');
+      const saleMod = require('./sale');
       const { resolveSaleGymConfig } = require('../lib/gym-slugs');
       const gymConfig = resolveSaleGymConfig(getGymConfig(order.gym || 'minimes'));
-      await reconcileActiveBadges(page, memberId, gymConfig, { keepOne: true });
+      if (typeof saleMod.reconcileActiveBadges === 'function') {
+        await saleMod.reconcileActiveBadges(page, memberId, gymConfig, { keepOne: true });
+      }
     } catch (err) {
       logWarn('Badges orphelins non alignés après résiliation', {
         member_id: memberId,
@@ -432,15 +437,37 @@ async function processSaleJob(page, order, jobMeta = {}) {
   if (isPayplug4xPrelevementOrder(order)) {
     productConfig.auto_badge = false;
     productConfig.paiement_comptant = false;
+    productConfig.requires_iban = true;
+    productConfig.skip_rib_prompt = false;
+    productConfig.payplug_4x_prelevement = true;
   }
 
   const { isAnnualPromoProduct } = require('../lib/sale-contract-match');
   if (isAnnualPromoProduct(productConfig) || isAnnualPromoProduct(order)) {
     productConfig.auto_badge = false;
-    if (!isPayplug4xPrelevementOrder(order)) {
+    if (isPayplug4xPrelevementOrder(order)) {
+      productConfig.paiement_comptant = false;
+      productConfig.requires_iban = true;
+      productConfig.skip_rib_prompt = false;
+      productConfig.payplug_4x_prelevement = true;
+    } else {
       productConfig.paiement_comptant = true;
       productConfig.requires_iban = false;
       productConfig.skip_rib_prompt = true;
+    }
+  }
+
+  if (isScalapayOrder(order)) {
+    productConfig.auto_badge = false;
+    productConfig.paiement_comptant = true;
+    productConfig.requires_iban = false;
+    productConfig.skip_rib_prompt = true;
+    const scalapayDeciplus = resolveScalapayDeciplus(productConfig, order);
+    if (scalapayDeciplus) {
+      productConfig.label = scalapayDeciplus.deciplus_product_name;
+      productConfig.deciplus_product_name = scalapayDeciplus.deciplus_product_name;
+      productConfig.deciplus_product_search = scalapayDeciplus.deciplus_product_search;
+      if (scalapayDeciplus.amount) productConfig.amount = scalapayDeciplus.amount;
     }
   }
 
@@ -487,7 +514,13 @@ async function processSaleJob(page, order, jobMeta = {}) {
     }
     // Toujours rechercher une fiche strictement concordante avant création.
     // Un crash entre la création Deciplus et le checkpoint ne doit jamais créer un second membre.
-    if (order.force_new_member !== true) order.force_new_member = false;
+    /* Canonicaliser l'option sans rétablir l'ancien défaut dangereux :
+       seule la valeur explicite true autorise une création forcée. */
+    if (order.force_new_member === true) {
+      order.force_new_member = order.force_new_member !== false;
+    } else {
+      order.force_new_member = false;
+    }
     memberResult = await findOrCreateMember(page, order, gymConfig);
     mark('member');
 

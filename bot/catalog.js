@@ -208,6 +208,18 @@ function findProductInCatalog(catalog, order) {
         else score -= 20;
       }
       const title = product.title || '';
+      const scalapay =
+        String(order.payment?.payment_plan || order.payment_plan || '').toLowerCase() === 'scalapay' ||
+        String(order.payment?.method || '').toLowerCase() === 'scalapay';
+      const wantComptant259 =
+        scalapay ||
+        order.paiement_comptant === true ||
+        Number(order.payment?.amount) === 259;
+      if (wantComptant259) {
+        if (/4\s*[x×]|prelevement|pr[eé]l[eè]vement|4 fois/i.test(title)) score -= 90;
+        if (/offre promo 12/i.test(title) && !/4\s*[x×]|prelevement/i.test(title)) score += 55;
+        if (Number(order.payment?.amount) === 259 && /comptant\s*12/i.test(title)) score -= 70;
+      }
       if (wantStudent) {
         if (/etudiant/i.test(title)) score += 40;
         else score -= 25;
