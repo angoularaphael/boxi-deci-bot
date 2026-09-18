@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Accès ponctuel coach — vendeur Deciplus RAPHAEL.
+ * Accès ponctuel coach — vendeur Deciplus JUNIOR.
  * grant : retrouve/crée la fiche + note fenêtre T−5 → fin de créneau.
  * revoke : annote la révocation (porte coupée côté note + callback app).
  */
