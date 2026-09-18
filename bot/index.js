@@ -92,6 +92,8 @@ async function getCachedCatalog(page) {
 }
 
 async function maybePushCatalog() {
+  const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
+  if (role === 'coach-access' || role === 'coach_access') return;
   if (String(process.env.BOT_CATALOG_PUSH_ENABLED || 'true').toLowerCase() === 'false') return;
   if (listPending().length > 0) {
     logWarn('Sync catalogue reportée — jobs en cours (une seule session Deciplus)');
@@ -1014,7 +1016,7 @@ async function processMemberPhotoJob(page, order) {
 async function maybeTriggerInscriptionNudges() {
   // Vercel Hobby n'autorise qu'un cron/jour : le bot ops appelle l'endpoint à la place.
   const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
-  if (role === 'sales') return;
+  if (role === 'sales' || role === 'coach-access' || role === 'coach_access') return;
   const storeBase = (
     process.env.BOXPLUS_STORE_URL ||
     process.env.STORE_URL ||
@@ -1038,7 +1040,7 @@ async function maybeTriggerInscriptionNudges() {
 
 async function maybeTriggerEssaiFollowup() {
   const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
-  if (role === 'sales') return;
+  if (role === 'sales' || role === 'coach-access' || role === 'coach_access') return;
   const storeBase = (
     process.env.BOXPLUS_STORE_URL ||
     process.env.STORE_URL ||
@@ -1061,6 +1063,8 @@ async function maybeTriggerEssaiFollowup() {
 }
 
 async function maybeTriggerDeciplusSaleReconcile() {
+  const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
+  if (role === 'coach-access' || role === 'coach_access') return;
   // Vercel Hobby n’exécute pas le cron */15 — le bot ventes relance les fiches absentes.
   const storeBase = (
     process.env.BOXPLUS_STORE_URL ||
@@ -1194,6 +1198,16 @@ async function processJob(page, job) {
 
   const role = String(process.env.BOT_ROLE || 'all').toLowerCase();
   const action = String(order.action || 'sale').toLowerCase();
+  const { isCoachAccessAction, processCoachAccessJob } = require('./coach-access');
+  if (isCoachAccessAction(action)) {
+    if (role === 'sales' || role === 'ops') {
+      throw new Error(`Bot ${role} refuse « ${action} » — utiliser le bot créneau prem-eu4`);
+    }
+    return processCoachAccessJob(page, order);
+  }
+  if (role === 'coach-access' || role === 'coach_access') {
+    throw new Error(`Bot créneau refuse « ${action} » — jobs grant/revoke seulement`);
+  }
   const isChangeSale =
     action === 'sale' &&
     (order.notify_change_complete || String(order.source || '').includes('change'));
