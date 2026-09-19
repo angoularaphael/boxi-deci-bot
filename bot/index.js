@@ -61,7 +61,7 @@ const { logInfo, logError, logWarn, sendAlert, logJobEvent } = require('../lib/l
 const { getBotId, wrongSalesBotReject } = require('../lib/sales-bot');
 const { sleep } = require('../lib/utils');
 const idempotency = require('../lib/persistent-idempotency');
-const { STATES } = require('../lib/job-lifecycle');
+const { STATES, lifecycleFromBotOutcome } = require('../lib/job-lifecycle');
 const { classifyError, backoffMs } = require('../lib/retry-policy');
 const {
   failoverAfterAttempts,
@@ -1650,7 +1650,7 @@ async function processOneJob(job) {
     if (requiresDistributedLease) {
       await idempotency.checkpoint(order.order_id, action, {
         status: outcome.status === STATUS.SUCCESS ? 'completed' : 'manual_review',
-        lifecycle_state: outcome.deciplus_sale_id ? STATES.VERIFIED : STATES.MANUAL_REVIEW,
+        lifecycle_state: lifecycleFromBotOutcome(outcome),
         attempt: Number(lease?.attempt || priorAttempts + 1),
         member_id: outcome.deciplus_member_id || null,
         sale_id: outcome.deciplus_sale_id || null,
