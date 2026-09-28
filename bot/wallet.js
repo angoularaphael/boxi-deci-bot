@@ -139,6 +139,38 @@ async function ribMandateAddressReady(ctx) {
     .catch(() => false);
 }
 
+async function pinFrenchCoordinates(ctx) {
+  await ctx
+    .evaluate(() => {
+      const pays = document.querySelector('[name="pays"], [name="adr_country"]');
+      if (pays) {
+        if (pays.tagName === 'SELECT') {
+          const opt = [...pays.options].find(
+            (o) => /france/i.test(o.text || '') || /^(fr|fra|france)$/i.test(o.value || '')
+          );
+          if (opt) pays.value = opt.value;
+        } else if (!/france/i.test(pays.value || '')) {
+          pays.value = 'France';
+        }
+        pays.dispatchEvent(new Event('input', { bubbles: true }));
+        pays.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+      const lat = document.querySelector('[name="latitude"]');
+      const lng = document.querySelector('[name="longitude"]');
+      if (!lat || !lng) return;
+      const latN = Number(String(lat.value || '').replace(',', '.'));
+      const lngN = Number(String(lng.value || '').replace(',', '.'));
+      const inFrance = latN >= 41 && latN <= 51.5 && lngN >= -5.5 && lngN <= 10;
+      if (!inFrance) {
+        lat.value = '43.6045';
+        lng.value = '1.4442';
+        lat.dispatchEvent(new Event('change', { bubbles: true }));
+        lng.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    })
+    .catch(() => {});
+}
+
 async function unlockRibFormForSubmit(ctx) {
   await ctx
     .evaluate(() => {
@@ -457,6 +489,8 @@ async function saveMemberAddressViaUi(page, memberId, addr) {
     return false;
   }
 
+  await pinFrenchCoordinates(ctx);
+
   await ctx.evaluate(() => {
     const form = document.querySelector('form[name="db1_form"]');
     if (!form) return;
@@ -619,7 +653,7 @@ async function openRibForm(page, memberId, { forceFresh = false } = {}) {
 }
 
 async function clickReplaceMandate(ctx) {
-  return clickFirst(
+  const clicked = await clickFirst(
     ctx,
     [
       'a:has-text("Remplacer le mandat")',
@@ -632,6 +666,55 @@ async function clickReplaceMandate(ctx) {
       'input[value*="nouveau mandat" i]',
     ].join(', ')
   );
+  if (clicked) return true;
+  return ctx
+    .evaluate(() => {
+      const nodes = [...document.querySelectorAll('a, button, input')];
+      const el = nodes.find((n) =>
+        /remplacer le mandat|nouveau mandat|r[eé]g[eé]n[eé]rer le mandat/i.test(
+          `${n.textContent || ''} ${n.value || ''}`
+        )
+      );
+      if (!el) return false;
+      el.click();
+      return true;
+    })
+    .catch(() => false);
+}
+
+async function postCurrentRibForm(ctx) {
+  return ctx
+    .evaluate(async () => {
+      const form = document.querySelector('form');
+      if (!form) return { ok: false, error: 'formulaire absent' };
+      form.querySelectorAll('input, select, textarea, button').forEach((el) => {
+        el.disabled = false;
+        if ('readOnly' in el) el.readOnly = false;
+      });
+      const submit = form.querySelector('input[name="alde_submit"]');
+      if (submit) submit.value = 'valider';
+      const cb = form.querySelector('input[type="checkbox"]');
+      if (cb) cb.checked = true;
+      const body = new URLSearchParams();
+      form.querySelectorAll('input, select, textarea').forEach((el) => {
+        if (!el.name) return;
+        if ((el.type === 'checkbox' || el.type === 'radio') && !el.checked) return;
+        body.append(el.name, el.value);
+      });
+      if (!body.has('alde_submit')) body.append('alde_submit', 'valider');
+      const action = form.action || location.href;
+      const res = await fetch(action, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString(),
+        credentials: 'include',
+      });
+      const text = await res.text();
+      const flat = text.replace(/\s+/g, ' ').slice(0, 240);
+      const rejected = /adresse postale est obligatoire|iban invalide/i.test(text);
+      return { ok: res.ok && !rejected, status: res.status, snippet: flat };
+    })
+    .catch((err) => ({ ok: false, error: err.message }));
 }
 
 async function fillRibForm(ctx, iban, customer, gymConfig) {
@@ -662,6 +745,22 @@ async function fillRibForm(ctx, iban, customer, gymConfig) {
   await fillFormField(ctx, 'input[name="adr_postcode"]', addr.postal_code);
   await fillFirst(ctx, sel('rib_form.country'), addr.country);
   await fillFormField(ctx, 'input[name="adr_country"]', addr.country || 'France');
+  await pinFrenchCoordinates(ctx);
+
+  const ibanEl = ctx.locator('input[name="iban"]').first();
+  if ((await ibanEl.count()) > 0) {
+    await ibanEl
+      .evaluate((el, v) => {
+        el.disabled = false;
+        el.readOnly = false;
+        el.value = v;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }, value)
+      .catch(() => {});
+    await randomDelay(400, 800);
+  }
 }
 
 async function prepareRibSubmit(ctx) {
@@ -818,6 +917,22 @@ async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}
     }
 
     logWarn('IBAN non confirmé après soumission mandat', { member_id: memberId, attempt });
+    const ribAgain = await openRibForm(page, memberId, { forceFresh: true });
+    await fillRibForm(ribAgain, value, customer, gymConfig);
+    const posted = await postCurrentRibForm(ribAgain);
+    await closeGreyboxIfOpen(page);
+    const savedAfterPost = await verifyIbanOnMandate(page, memberId, value);
+    await closeGreyboxIfOpen(page);
+    if (savedAfterPost) {
+      logInfo('RIB saisi sur fiche membre (POST mandat)', { member_id: memberId, attempt });
+      return true;
+    }
+    logWarn('POST mandat SEPA non confirmé', {
+      member_id: memberId,
+      attempt,
+      status: posted?.status || null,
+      error: posted?.error || null,
+    });
     await ensureMemberPostalAddress(page, memberId, addr);
   }
 

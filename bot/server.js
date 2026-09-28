@@ -53,6 +53,7 @@ function createBotServer() {
       version: packageJson.version,
       git_sha: process.env.VERCEL_GIT_COMMIT_SHA || process.env.GIT_SHA || null,
       build_id: process.env.VERCEL_DEPLOYMENT_ID || process.env.BUILD_ID || null,
+      crash_recovery: true,
       bot_id: getBotId() || null,
       bot_role: String(process.env.BOT_ROLE || 'all').toLowerCase(),
       persistent_idempotency: registry,

@@ -13,6 +13,7 @@ const {
   clearAuthCooldown,
   saveSession,
   wipeBrowserAuth,
+  isPageCrashedError,
 } = require('./auth');
 const { runWithSession, closeBrowser } = require('./browser-pool');
 const { listPending } = require('../lib/queue');
@@ -90,6 +91,9 @@ async function maybeKeepSessionAlive() {
     lastKeepAliveSuccessAt = Date.now();
   } catch (err) {
     logWarn('Keepalive session échoué', { error: err.message });
+    if (isPageCrashedError(err.message)) {
+      await closeBrowser().catch(() => {});
+    }
   } finally {
     inFlight = false;
   }

@@ -337,6 +337,10 @@ async function launchBrowser() {
 
   const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
+  page.on('crash', () => {
+    page.__deciplusCrashed = true;
+    logWarn('Renderer Chromium crashé — la page sera relancée');
+  });
   return { browser, context, page, loadedStorageMtimeMs: getStorageMtimeMs() };
 }
 
@@ -465,6 +469,21 @@ function isSessionRecoverableError(message = '') {
   );
 }
 
+function isPageCrashedError(message = '') {
+  return /page crashed|page deciplus crash|target crashed|renderer crash/i.test(String(message || ''));
+}
+
+function markPageCrashed(page, err) {
+  try {
+    page.__deciplusCrashed = true;
+  } catch {
+    /* page déjà morte */
+  }
+  const crash = new Error(`Page Deciplus crashée — ${err?.message || 'renderer'}`);
+  crash.code = 'PAGE_CRASH';
+  return crash;
+}
+
 async function isLoggedIn(page) {
   if (await isVerificationScreen(page)) return false;
 
@@ -526,14 +545,28 @@ async function gotoDeciplus(page, pathPart = '', options = {}) {
   const timeout = Number(process.env.DECIPLUS_NAV_TIMEOUT || 90000);
   const target = pathPart ? new URL(pathPart, base).href : base;
 
+  const navigate = async (waitUntil, ms) => {
+    if (!page || page.isClosed() || page.__deciplusCrashed) {
+      throw markPageCrashed(page, new Error('page fermée avant navigation'));
+    }
+    await page.goto(target, { waitUntil, timeout: ms });
+  };
+
   try {
-    await page.goto(target, {
-      waitUntil: options.waitUntil || 'domcontentloaded',
-      timeout,
-    });
+    await navigate(options.waitUntil || 'domcontentloaded', timeout);
   } catch (err) {
+    if (isPageCrashedError(err.message) || page?.isClosed?.() || page?.__deciplusCrashed) {
+      throw markPageCrashed(page, err);
+    }
     logWarn('Navigation Deciplus lente, retry commit', { url: target, error: err.message });
-    await page.goto(target, { waitUntil: 'commit', timeout: Math.min(timeout, 45000) });
+    try {
+      await navigate('commit', Math.min(timeout, 45000));
+    } catch (err2) {
+      if (isPageCrashedError(err2.message) || page?.isClosed?.() || page?.__deciplusCrashed) {
+        throw markPageCrashed(page, err2);
+      }
+      throw err2;
+    }
   }
   await page.waitForTimeout(Number(process.env.DECIPLUS_NAV_SETTLE_MS || 400));
 }
@@ -749,6 +782,7 @@ module.exports = {
   isLegacySessionAlive,
   isMfaAuthError,
   isSessionRecoverableError,
+  isPageCrashedError,
   getStorageMtimeMs,
   readStoredAuthToken,
   bootstrapAuthTokenFromStorage,

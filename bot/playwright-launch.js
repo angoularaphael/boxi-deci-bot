@@ -33,6 +33,8 @@ function getChromiumLaunchOptions() {
         '--disable-extensions',
         '--disable-background-networking',
         '--mute-audio',
+        '--disable-features=IsolateOrigins,site-per-process,TranslateUI,BackForwardCache',
+        '--renderer-process-limit=2',
       ]
     : [];
 

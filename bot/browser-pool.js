@@ -31,14 +31,34 @@ function sessionFileChanged() {
   return disk > 0 && disk > loadedStorageMtimeMs + 50;
 }
 
+function sessionPageDead() {
+  const page = session?.page;
+  if (!page) return true;
+  if (page.__deciplusCrashed) return true;
+  try {
+    return page.isClosed();
+  } catch {
+    return true;
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function ensureBrowser() {
-  if (session?.browser && session.browser.isConnected()) {
+  const browserAlive = Boolean(session?.browser && session.browser.isConnected());
+  if (browserAlive && !sessionPageDead()) {
     if (sessionFileChanged()) {
       logWarn('Nouveau storage-state détecté — rechargement navigateur (session changée)');
       await closeBrowser();
     } else {
       return session;
     }
+  } else if (session?.browser) {
+    logWarn('Page ou navigateur Deciplus mort — relance Chromium');
+    await closeBrowser();
+    await delay(1500);
   }
 
   if (session?.browser) {

@@ -18,7 +18,7 @@ if (process.env.DECIPLUS_FAST == null || process.env.DECIPLUS_FAST === '') {
   process.env.DECIPLUS_FAST = '1';
 }
 
-const { login, isMfaAuthError, isSessionRecoverableError, isAuthBlocked } = require('./auth');
+const { login, isMfaAuthError, isSessionRecoverableError, isPageCrashedError, isAuthBlocked } = require('./auth');
 const {
   runWithSession,
   closeBrowser,
@@ -1689,18 +1689,28 @@ async function processOneJob(job) {
     // Les erreurs de données/conflit sont immédiatement placées en revue manuelle.
     const attempts = priorAttempts + 1;
     const sessionErr = isSessionRecoverableError(err.message);
-    const browserGone = /browser has been closed|Target page, context or browser/i.test(err.message);
+    const pageCrashed = isPageCrashedError(err.message) || err.code === 'PAGE_CRASH';
+    const browserGone =
+      pageCrashed || /browser has been closed|Target page, context or browser/i.test(err.message);
     const mfaErr = isMfaAuthError(err.message);
+    // Un crash Chromium est local : on relance le navigateur ici, sans passer le job à l'autre bot.
     const fastFailover =
+      !pageCrashed &&
       attempts >= failoverAfterAttempts() &&
       shouldFailoverSale(order, policy, {
         action,
         deciplus_sale_id: job.checkpoint?.deciplus_sale_id || null,
       });
 
-    // Erreur liée session → refresh immédiat (sans attendre le ping 1h30) puis retry job
+    // Crash renderer : fermer Chromium. Le prochain essai ouvre une page neuve (session disque conservée).
     let sessionRecovered = false;
-    if ((sessionErr || browserGone) && !fastFailover) {
+    if (pageCrashed && !fastFailover) {
+      logWarn('Page Chromium crashée — fermeture navigateur avant nouvel essai', {
+        job_id: jobId,
+        error: err.message,
+      });
+      await closeBrowser().catch(() => {});
+    } else if ((sessionErr || browserGone) && !fastFailover) {
       logWarn('Erreur liée session — refresh immédiat puis reprise du job', {
         job_id: jobId,
         error: err.message,
