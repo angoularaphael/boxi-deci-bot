@@ -16,6 +16,10 @@ function isAuthBlocked() {
   return Date.now() < authBlockedUntil;
 }
 
+function getAuthBlockedUntil() {
+  return authBlockedUntil;
+}
+
 function getAuthBlockedMessage() {
   const minutes = Math.ceil((authBlockedUntil - Date.now()) / 60000);
   return `Connexion Deciplus en cooldown (${minutes} min) — évite les demandes de code email en rafale`;
@@ -777,6 +781,7 @@ module.exports = {
   isSessionExpiredUrl,
   login,
   isAuthBlocked,
+  getAuthBlockedUntil,
   clearAuthCooldown,
   wipeBrowserAuth,
   isLegacySessionAlive,

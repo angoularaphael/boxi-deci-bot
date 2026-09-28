@@ -18,7 +18,7 @@ if (process.env.DECIPLUS_FAST == null || process.env.DECIPLUS_FAST === '') {
   process.env.DECIPLUS_FAST = '1';
 }
 
-const { login, isMfaAuthError, isSessionRecoverableError, isPageCrashedError, isAuthBlocked } = require('./auth');
+const { login, isMfaAuthError, isSessionRecoverableError, isPageCrashedError, isAuthBlocked, getAuthBlockedUntil } = require('./auth');
 const {
   runWithSession,
   closeBrowser,
@@ -1686,6 +1686,40 @@ async function processOneJob(job) {
     }
 
     const policy = classifyError(err);
+    const authCooldown = /cooldown/i.test(err.message) || (isAuthBlocked() && isMfaAuthError(err.message));
+    if (authCooldown) {
+      const until = Math.max(Number(getAuthBlockedUntil() || 0), Date.now() + 60_000);
+      const nextAttemptAt = new Date(until + 15_000).toISOString();
+      updateJob(filePath, {
+        status: STATUS.ERROR,
+        last_error: err.message,
+        attempts: priorAttempts,
+        error_classification: policy.classification,
+        human_action: 'Attendre la fin du cooldown Deciplus, le job reprend seul.',
+        next_attempt_at: nextAttemptAt,
+      });
+      if (requiresDistributedLease) {
+        await idempotency.checkpoint(order.order_id, action, {
+          status: 'failed',
+          lifecycle_state: STATES.FAILED,
+          attempt: Number(lease?.attempt || priorAttempts || 1),
+          member_id: job.checkpoint?.deciplus_member_id || null,
+          sale_id: job.checkpoint?.deciplus_sale_id || null,
+          error_classification: policy.classification,
+          error_message: err.message,
+          human_action: 'Attendre la fin du cooldown Deciplus, le job reprend seul.',
+        }).catch((checkpointErr) => {
+          logError('Échec checkpoint cooldown', { order_id: order.order_id, error: checkpointErr.message });
+        });
+      }
+      logWarn('Job en attente de la fin du cooldown Deciplus', {
+        job_id: jobId,
+        order_id: order.order_id,
+        next_attempt_at: nextAttemptAt,
+      });
+      return { ok: false, error: err.message, waiting_auth: true };
+    }
+
     // Les erreurs de données/conflit sont immédiatement placées en revue manuelle.
     const attempts = priorAttempts + 1;
     const sessionErr = isSessionRecoverableError(err.message);
