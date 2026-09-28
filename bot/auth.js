@@ -782,6 +782,7 @@ module.exports = {
   login,
   isAuthBlocked,
   getAuthBlockedUntil,
+  getAuthBlockedMessage,
   clearAuthCooldown,
   wipeBrowserAuth,
   isLegacySessionAlive,

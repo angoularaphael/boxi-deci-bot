@@ -18,7 +18,7 @@ if (process.env.DECIPLUS_FAST == null || process.env.DECIPLUS_FAST === '') {
   process.env.DECIPLUS_FAST = '1';
 }
 
-const { login, isMfaAuthError, isSessionRecoverableError, isPageCrashedError, isAuthBlocked, getAuthBlockedUntil } = require('./auth');
+const { login, isMfaAuthError, isSessionRecoverableError, isPageCrashedError, isAuthBlocked, getAuthBlockedUntil, getAuthBlockedMessage } = require('./auth');
 const {
   runWithSession,
   closeBrowser,
@@ -1531,6 +1531,23 @@ async function processOneJob(job) {
   }
 
   const action = String(order.action || job.action || 'sale').toLowerCase();
+  if (isAuthBlocked()) {
+    const until = Math.max(Number(getAuthBlockedUntil() || 0), Date.now() + 60_000);
+    const nextAttemptAt = new Date(until + 15_000).toISOString();
+    updateJob(filePath, {
+      status: STATUS.ERROR,
+      last_error: getAuthBlockedMessage(),
+      attempts: priorAttempts,
+      next_attempt_at: nextAttemptAt,
+      human_action: 'Attendre la fin du cooldown Deciplus, le job reprend seul.',
+    });
+    logWarn('Job en attente de la fin du cooldown Deciplus', {
+      job_id: jobId,
+      order_id: order.order_id,
+      next_attempt_at: nextAttemptAt,
+    });
+    return { ok: false, error: getAuthBlockedMessage(), waiting_auth: true };
+  }
   const requiresDistributedLease = action === 'sale' || action === 'balma_switch';
   let lease = null;
   if (requiresDistributedLease) {
