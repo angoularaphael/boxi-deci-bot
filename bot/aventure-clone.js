@@ -199,10 +199,11 @@ async function createChosenOfferSale(page, memberId, gymConfig, order) {
     productConfig.paiement_comptant = !payplug4x;
     productConfig.requires_iban = payplug4x;
     productConfig.auto_badge = false;
+    if (payplug4x) productConfig.payplug_4x_prelevement = true;
   } else {
     productConfig.auto_badge = orderNeedsAutoBadge(order, productConfig);
   }
-  productConfig.skip_rib_prompt = true;
+  productConfig.skip_rib_prompt = payplug4x ? false : true;
 
   let badgeProductConfig = null;
   if (productConfig.auto_badge) {
