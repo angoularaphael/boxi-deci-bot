@@ -21,7 +21,9 @@ describe('enregistrement RIB a la vente', () => {
     assert.match(wallet, /RIB visible mais mandat non enregistré/);
     assert.match(wallet, /existingMeta\.rum && ibanAlready && !needsSave/);
     assert.match(wallet, /if \(await ribMandateNeedsSave\(ribCtx\)\) return false/);
-    assert.match(wallet, /posted\?\.ok/);
+    assert.match(wallet, /memberAsksToRegisterRib/);
+    assert.match(wallet, /after\.rum && ibanSaved && !stillAsks/);
+    assert.doesNotMatch(wallet, /!afterNeed \|\| posted\?\.ok/);
   });
 
   it('la carte nextgen se facture sans jeter Cloturer la note', () => {

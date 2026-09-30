@@ -133,6 +133,19 @@ async function ribValiderDisabled(ctx) {
     .catch(() => false);
 }
 
+async function memberAsksToRegisterRib(page) {
+  const parts = [];
+  for (const ctx of [page, ...(page.frames?.() || [])]) {
+    try {
+      const t = await ctx.locator('body').innerText({ timeout: 2000 });
+      if (t) parts.push(t);
+    } catch {
+      /* frame */
+    }
+  }
+  return /enregistrer le rib/i.test(parts.join('\n'));
+}
+
 /** IBAN visible != mandat enregistré : bandeau rouge ou Valider grisé = RIB pas appliqué. */
 async function ribMandateNeedsSave(ctx) {
   const blocked = await hasPostalAddressBlocker(ctx);
@@ -890,23 +903,34 @@ async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}
       existingIban === value ||
       (existingIban && value && existingIban.startsWith(value.slice(0, 20)));
     const needsSave = await ribMandateNeedsSave(ribCtx);
+    let ficheAsks = false;
     if (existingMeta.rum && ibanAlready && !needsSave) {
-      logInfo('IBAN déjà enregistré sur le mandat Deciplus', {
+      await closeGreyboxIfOpen(page);
+      await openMemberCheck(page, memberId, gymConfig).catch(() => {});
+      ficheAsks = await memberAsksToRegisterRib(page);
+      if (!ficheAsks) {
+        logInfo('IBAN déjà enregistré sur le mandat Deciplus', {
+          member_id: memberId,
+          rum: existingMeta.rum || null,
+        });
+        return true;
+      }
+      logWarn('Fiche demande encore d enregistrer le RIB — validation SEPA relancée', {
         member_id: memberId,
         rum: existingMeta.rum || null,
+        attempt,
       });
-      await closeGreyboxIfOpen(page);
-      return true;
     }
-    if (ibanAlready && needsSave) {
+    if (ibanAlready && (needsSave || ficheAsks)) {
       logWarn('RIB visible mais mandat non enregistré — adresse + Valider', {
         member_id: memberId,
         rum: existingMeta.rum || null,
         attempt,
       });
-      await fillRibForm(ribCtx, value, customer, gymConfig);
-      const posted = await postCurrentRibForm(ribCtx);
-      if (!posted?.ok) await submitRibForm(ribCtx, page);
+      const formCtx = ficheAsks ? await openRibForm(page, memberId, { forceFresh: true }) : ribCtx;
+      await fillRibForm(formCtx, value, customer, gymConfig);
+      const posted = await postCurrentRibForm(formCtx);
+      if (!posted?.ok) await submitRibForm(formCtx, page);
       await closeGreyboxIfOpen(page);
       const ribCheck = await openRibForm(page, memberId, { forceFresh: true });
       const afterNeed = await ribMandateNeedsSave(ribCheck);
@@ -915,7 +939,10 @@ async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}
       const ibanSaved =
         normalizeIban(after.iban) === value ||
         (after.iban && normalizeIban(after.iban).startsWith(value.slice(0, 20)));
-      if (after.rum && ibanSaved && (!afterNeed || posted?.ok)) {
+      await closeGreyboxIfOpen(page);
+      await openMemberCheck(page, memberId, gymConfig).catch(() => {});
+      const stillAsks = await memberAsksToRegisterRib(page);
+      if (after.rum && ibanSaved && !stillAsks) {
         logInfo('RIB validé sur le mandat Deciplus', {
           member_id: memberId,
           rum: after.rum,
