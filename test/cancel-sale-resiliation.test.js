@@ -8,7 +8,7 @@ const path = require('path');
 test('toute résiliation → neverVoid (jamais Annuler la vente)', () => {
   const src = fs.readFileSync(path.join(__dirname, '../bot/cancel-sale.js'), 'utf8');
   assert.match(src, /function resolveCancelNeverVoid\([\s\S]*?\{\s*return true;\s*\}/);
-  assert.match(src, /async function voidPendingSaleIfPossible\(\) \{\s*logWarn\('Annuler la vente interdit — Résilier uniquement'\);\s*return false;\s*\}/);
+  assert.doesNotMatch(src, /voidPendingSaleIfPossible|confirmAnnulationModal|clickAnnulationRefundMode|shouldVoidSale/);
 });
 
 test('cancel-sale.js ne clique plus Annuler la vente', () => {
@@ -18,8 +18,8 @@ test('cancel-sale.js ne clique plus Annuler la vente', () => {
   assert.doesNotMatch(src, /vente annulée/);
   assert.match(src, /Clic Annuler la vente interdit — Résilier uniquement/);
   assert.match(src, /if \(\/annuler la vente\/i\.test\(t\)\) continue/);
-  assert.match(src, /forceVoid:\s*false/);
-  assert.doesNotMatch(src, /forceVoid:\s*true/);
+  assert.doesNotMatch(src, /forceVoid/);
+  assert.doesNotMatch(src, /voidPendingSaleIfPossible|confirmAnnulationModal|clickAnnulationRefundMode|shouldVoidSale/);
   assert.match(src, /clickActionTile\(page, \[\/\^Résilier\$\/i/);
 });
 

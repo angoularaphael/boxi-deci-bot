@@ -802,30 +802,6 @@ async function clickAppliquerEtQuitter(page) {
   return Boolean(forced);
 }
 
-async function confirmAnnulationModal(page) {
-  const start = Date.now();
-  while (Date.now() - start < 12000) {
-    for (const ctx of getScopes(page)) {
-      try {
-        const dialog = ctx.getByText(/Etes-vous certain de vouloir annuler le contrat/i).first();
-        const confirm = ctx.locator('button').filter({ hasText: /^Confirmer$/i }).last();
-        if ((await confirm.count()) > 0 && (await confirm.isVisible().catch(() => false))) {
-          await confirm.click({ force: true });
-          logInfo('Annulation — modale Confirmer');
-          await randomDelay(700, 1100);
-          return true;
-        }
-        void dialog;
-      } catch {
-        /* frame */
-      }
-    }
-    await page.waitForTimeout(300);
-  }
-  logWarn('Modale Confirmer d’annulation introuvable');
-  return false;
-}
-
 async function ensureResiliationEmailChecked(page) {
   for (const ctx of getScopes(page)) {
     try {
@@ -1043,43 +1019,6 @@ async function fillLabeledDate(page, labelRe, dateStr) {
   return false;
 }
 
-async function clickAnnulationRefundMode(page) {
-  for (const ctx of getScopes(page)) {
-    try {
-      const named = ctx.locator('.payment-mode-name').filter({ hasText: /^Virement$/i }).last();
-      if ((await named.count()) > 0 && (await named.isVisible().catch(() => false))) {
-        await named.click({ force: true });
-        return 'Virement';
-      }
-    } catch {
-      /* frame */
-    }
-    try {
-      const hit = await ctx.evaluate(() => {
-        const row = [...document.querySelectorAll('div, tr, section, form')].find(
-          (n) => /-259/.test(String(n.innerText || '')) && /Mode de paiement/i.test(String(n.innerText || ''))
-        );
-        const root = row || document.body;
-        const modes = [...root.querySelectorAll('div, span, button, li, a')].filter((n) => {
-          const t = String(n.innerText || '').replace(/\s+/g, ' ').trim();
-          return /^(Espèces|Carte Bancaire|Ch[eè]que|Virement)$/i.test(t);
-        });
-        const pick =
-          modes.find((n) => /^Virement$/i.test(String(n.innerText || '').trim())) ||
-          modes.find((n) => /Carte Bancaire/i.test(String(n.innerText || ''))) ||
-          modes[0];
-        if (!pick) return { ok: false, count: modes.length };
-        pick.click();
-        return { ok: true, mode: String(pick.innerText || '').trim() };
-      });
-      if (hit?.ok) return hit.mode;
-    } catch {
-      /* frame */
-    }
-  }
-  return null;
-}
-
 async function waitAppliquerEnabled(page, timeoutMs = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -1118,20 +1057,9 @@ async function waitAppliquerEnabled(page, timeoutMs = 12000) {
   return false;
 }
 
-function shouldVoidSale(contract, { allowStarted = false } = {}) {
-  if (allowStarted) return true;
-  if (isPendingOrFutureContract(contract?.label)) return true;
-  return isSameDayStartContract(contract?.label);
-}
-
 /** Toujours Résilier. Aucun chemin n’annule une vente. */
 function resolveCancelNeverVoid(_options = {}, _cancelReason = '') {
   return true;
-}
-
-async function voidPendingSaleIfPossible() {
-  logWarn('Annuler la vente interdit — Résilier uniquement');
-  return false;
 }
 
 async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
@@ -1277,7 +1205,7 @@ async function reopenMemberAfterCancel(page, memberId) {
   await randomDelay(600, 1000);
 }
 
-async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate = null, filter = null, forceVoid = false } = {}) {
+async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate = null, filter = null } = {}) {
   let total = 0;
   const details = [];
   const doneIds = new Set();
@@ -1429,7 +1357,6 @@ async function cancelSale(page, memberId, options = {}) {
   const outcome = await cancelAllMemberSales(page, memberId, {
     maxSales: 15,
     cancelDate,
-    forceVoid: false,
     filter: extraFilter,
   });
   if (outcome.cancelled_count === 0) {
@@ -1490,7 +1417,6 @@ module.exports = {
   isPendingOrFutureContract,
   isSameDayStartContract,
   resolveCancelNeverVoid,
-  voidPendingSaleIfPossible,
   isAppliquerQuitterLabel,
   parseFrDatesFromLabel,
   contractStartDate,

@@ -93,8 +93,7 @@
     "appliquer_quitter": "button.ari-button-filled:has-text(\"Appliquer et Quitter\"), button:has-text(\"Appliquer et Quitter\"), text=Appliquer et Quitter",
     "envoyer_mail_resiliation": "text=Envoyer un mail de résiliation, label:has-text(\"Envoyer un mail de résiliation\")",
     "confirmer_resiliation": "button:has-text(\"Confirmer\"), button.ari-button:has-text(\"Confirmer\"), text=Confirmer",
-    "resilier_envoyer_mail": "button:has-text(\"Résilier le contrat et envoyer le mail\"), text=Résilier le contrat et envoyer le mail",
-    "annuler_vente": "text=Annuler la vente, [aria-label=\"Annuler la vente\"]"
+    "resilier_envoyer_mail": "button:has-text(\"Résilier le contrat et envoyer le mail\"), text=Résilier le contrat et envoyer le mail"
   },
   "member_migrate": {
     "icon": "div.bouton_change_zone, [title=\"Migrer ce membre\"], [onclick*=\"sendToZone\"]",
