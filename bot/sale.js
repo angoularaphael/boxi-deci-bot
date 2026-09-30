@@ -1971,9 +1971,23 @@ async function waitForModifierDateFinPopup(page, scheduleOrDays, { attempts = 6,
   return false;
 }
 
+async function pageAsksToRegisterRib(page) {
+  const scopes = [page, ...(page.frames?.() || [])];
+  for (const ctx of scopes) {
+    const asked = await ctx
+      .evaluate(() => /enregistrer le rib|saisir le rib|valider le rib/i.test(document.body?.innerText || ''))
+      .catch(() => false);
+    if (asked) return true;
+  }
+  return false;
+}
+
 async function dismissPostApplyDialogs(page, { allowRib = false } = {}) {
   await handleBadgeModifierDateFinDialog(page).catch(() => false);
-  await clickFirst(page, sel('sale_config_modal.ignorer_continuer')).catch(() => {});
+  const ribAsked = await pageAsksToRegisterRib(page);
+  if (!ribAsked) {
+    await clickFirst(page, sel('sale_config_modal.ignorer_continuer')).catch(() => {});
+  }
   if (allowRib) {
     await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => {});
   }
@@ -2066,10 +2080,39 @@ async function finalizeBadgePayment(page, productConfig = {}, gymConfig = {}) {
     );
   }
   if (!clotured) {
-    throw new Error('Badge — « Clôturer la note » introuvable');
+    clotured = await clickVenteFooterAction(page, /^Facturer$/i);
   }
-  logInfo('Badge — note clôturée');
-  await randomDelay(800, 1400);
+  if (!clotured) {
+    const work = await resolveDeciplusWorkPage(page);
+    for (const ctx of [work, page, ...(page.frames?.() || [])]) {
+      const ok = await ctx
+        .evaluate(() => {
+          const nodes = [...document.querySelectorAll('button, a, span, div, [role="button"]')];
+          const el = nodes.find((n) =>
+            /^(facturer|encaisser)$/i.test(
+              String(n.innerText || n.textContent || '').replace(/\s+/g, ' ').trim()
+            )
+          );
+          if (!el) return false;
+          el.click();
+          return true;
+        })
+        .catch(() => false);
+      if (ok) {
+        clotured = true;
+        break;
+      }
+    }
+  }
+  if (!clotured) {
+    logWarn('Badge — « Clôturer la note » introuvable, tentative Terminer puis vérification du contrat', {
+      screenshot: await captureSaleDebugScreenshot(page, 'badge-deferred-cloturer-missing'),
+      ui: await venteUiSnapshot(page).catch(() => []),
+    });
+  } else {
+    logInfo('Badge — note clôturée / facturée');
+    await randomDelay(800, 1400);
+  }
   await dismissPostApplyDialogs(page, { allowRib: false }).catch(() => {});
 
   let done = false;
@@ -2435,6 +2478,33 @@ async function registerSaleRibIfAsked(page, productConfig = {}) {
   }
   if (!registered) {
     registered = await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => false);
+  }
+  if (!registered) {
+    const scopes = [page, ...(page.frames?.() || [])];
+    for (const ctx of scopes) {
+      const hit = await ctx
+        .evaluate(() => {
+          const nodes = [...document.querySelectorAll('button, a, input, span, div, [role="button"]')];
+          const el = nodes.find((n) => {
+            const t = String(n.value || n.innerText || n.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            return (
+              t.length > 0 &&
+              t.length < 80 &&
+              /enregistrer le rib|enregistrer le mandat|saisir le rib|valider le rib/i.test(t)
+            );
+          });
+          if (!el) return false;
+          el.click();
+          return true;
+        })
+        .catch(() => false);
+      if (hit) {
+        registered = true;
+        break;
+      }
+    }
   }
   if (!registered) {
     logWarn('Vente Deciplus — RIB à enregistrer, bouton introuvable (Ignorer non cliqué)');

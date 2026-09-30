@@ -21,5 +21,17 @@ describe('enregistrement RIB a la vente', () => {
     assert.match(wallet, /RIB visible mais mandat non enregistré/);
     assert.match(wallet, /existingMeta\.rum && ibanAlready && !needsSave/);
     assert.match(wallet, /if \(await ribMandateNeedsSave\(ribCtx\)\) return false/);
+    assert.match(wallet, /posted\?\.ok/);
+  });
+
+  it('la carte nextgen se facture sans jeter Cloturer la note', () => {
+    assert.doesNotMatch(sale, /throw new Error\('Badge — « Clôturer la note » introuvable'\)/);
+    assert.match(sale, /Facturer/);
+    assert.match(sale, /Clôturer la note » introuvable, tentative Terminer/);
+  });
+
+  it('n ignore pas un dialogue qui demande d enregistrer le RIB', () => {
+    assert.match(sale, /async function pageAsksToRegisterRib/);
+    assert.match(sale, /if \(!ribAsked\)/);
   });
 });

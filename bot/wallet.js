@@ -905,18 +905,30 @@ async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}
         attempt,
       });
       await fillRibForm(ribCtx, value, customer, gymConfig);
-      await submitRibForm(ribCtx, page);
-      await postCurrentRibForm(ribCtx);
+      const posted = await postCurrentRibForm(ribCtx);
+      if (!posted?.ok) await submitRibForm(ribCtx, page);
       await closeGreyboxIfOpen(page);
       const ribCheck = await openRibForm(page, memberId, { forceFresh: true });
       const afterNeed = await ribMandateNeedsSave(ribCheck);
       const after = await readMandateMeta(ribCheck);
       await closeGreyboxIfOpen(page);
-      if (after.rum && !afterNeed) {
-        logInfo('RIB validé sur le mandat Deciplus', { member_id: memberId, rum: after.rum });
+      const ibanSaved =
+        normalizeIban(after.iban) === value ||
+        (after.iban && normalizeIban(after.iban).startsWith(value.slice(0, 20)));
+      if (after.rum && ibanSaved && (!afterNeed || posted?.ok)) {
+        logInfo('RIB validé sur le mandat Deciplus', {
+          member_id: memberId,
+          rum: after.rum,
+          post_ok: Boolean(posted?.ok),
+        });
         return true;
       }
-      logWarn('Valider RIB encore bloqué après soumission', { member_id: memberId, attempt });
+      logWarn('Valider RIB encore bloqué après soumission', {
+        member_id: memberId,
+        attempt,
+        post_ok: Boolean(posted?.ok),
+        post_status: posted?.status || null,
+      });
       continue;
     }
 
