@@ -230,6 +230,29 @@ function createBotServer() {
     }
   });
 
+  app.post('/api/git-sync', (req, res) => {
+    if (!isAuthorized(req)) {
+      return res.status(401).json({ ok: false, error: 'unauthorized' });
+    }
+    try {
+      const { execSync } = require('child_process');
+      const cwd = require('path').join(__dirname, '..');
+      const out = execSync('git fetch origin && git reset --hard origin/main', {
+        cwd,
+        encoding: 'utf8',
+        timeout: 60000,
+        shell: true,
+      });
+      const restart = req.body?.restart !== false;
+      res.json({ ok: true, out: String(out).slice(0, 500), restart });
+      if (restart) {
+        setTimeout(() => process.exit(0), 400);
+      }
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
   app.post('/api/queue/requeue-stale', (req, res) => {
     if (!isAuthorized(req)) {
       return res.status(401).json({ ok: false, error: 'unauthorized' });
