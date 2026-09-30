@@ -122,6 +122,27 @@ async function hasPostalAddressBlocker(ctx) {
   return (await msg.count()) > 0 && (await msg.isVisible().catch(() => false));
 }
 
+async function ribValiderDisabled(ctx) {
+  return ctx
+    .evaluate(() => {
+      const btn = [...document.querySelectorAll('input[type="submit"], button')].find((el) =>
+        /^valider$/i.test(String(el.value || el.textContent || '').trim())
+      );
+      return Boolean(btn && btn.disabled);
+    })
+    .catch(() => false);
+}
+
+/** IBAN visible != mandat enregistré : bandeau rouge ou Valider grisé = RIB pas appliqué. */
+async function ribMandateNeedsSave(ctx) {
+  const blocked = await hasPostalAddressBlocker(ctx);
+  const addrOk = await ribMandateAddressReady(ctx);
+  const validerOff = await ribValiderDisabled(ctx);
+  if (blocked) return true;
+  if (validerOff) return true;
+  return !addrOk && validerOff;
+}
+
 /**
  * Deciplus affiche parfois le bandeau alors que adr_line1/CP/ville sont déjà remplis.
  * Dans ce cas le submit UI est disabled, mais le serveur accepte quand même le mandat
@@ -738,7 +759,9 @@ async function fillRibForm(ctx, iban, customer, gymConfig) {
 
   await fillFirst(ctx, sel('rib_form.address'), addr.address);
   await fillFormField(ctx, 'input[name="adr_line1"]', addr.address);
-  await fillFirst(ctx, sel('rib_form.address2'), '');
+  const line2 = String(customer.address2 || customer.adresse2 || '').trim();
+  await fillFirst(ctx, sel('rib_form.address2'), line2);
+  await fillFormField(ctx, 'input[name="adr_line2"]', line2);
   await fillFirst(ctx, sel('rib_form.city'), addr.city.toUpperCase());
   await fillFormField(ctx, 'input[name="adr_town"]', addr.city.toUpperCase());
   await fillFirst(ctx, sel('rib_form.zip'), addr.postal_code);
@@ -799,10 +822,10 @@ async function readMandateMeta(ctx) {
 
 async function verifyIbanOnMandate(page, memberId, expectedIban) {
   const ribCtx = await openRibForm(page, memberId, { forceFresh: true });
+  if (await ribMandateNeedsSave(ribCtx)) return false;
   const saved = await readIbanFromRib(ribCtx);
-  if (saved === expectedIban) return true;
-  // Mandat créé (RUM) même si l'IBAN affiché est tronqué / reformaté
   const meta = await readMandateMeta(ribCtx);
+  if (saved === expectedIban && meta.rum) return true;
   if (meta.rum && normalizeIban(meta.iban).startsWith(expectedIban.slice(0, 20))) {
     logWarn('IBAN mandat partiellement affiché — RUM présent, considéré OK', {
       member_id: memberId,
@@ -863,13 +886,38 @@ async function setMemberIban(page, memberId, iban, customer = {}, gymConfig = {}
     const ribCtx = await openRibForm(page, memberId, { forceFresh: true });
     const existingMeta = await readMandateMeta(ribCtx);
     const existingIban = normalizeIban(existingMeta.iban);
-    if (existingIban === value || (existingMeta.rum && existingIban && existingIban.startsWith(value.slice(0, 20)))) {
+    const ibanAlready =
+      existingIban === value ||
+      (existingIban && value && existingIban.startsWith(value.slice(0, 20)));
+    const needsSave = await ribMandateNeedsSave(ribCtx);
+    if (existingMeta.rum && ibanAlready && !needsSave) {
       logInfo('IBAN déjà enregistré sur le mandat Deciplus', {
         member_id: memberId,
         rum: existingMeta.rum || null,
       });
       await closeGreyboxIfOpen(page);
       return true;
+    }
+    if (ibanAlready && needsSave) {
+      logWarn('RIB visible mais mandat non enregistré — adresse + Valider', {
+        member_id: memberId,
+        rum: existingMeta.rum || null,
+        attempt,
+      });
+      await fillRibForm(ribCtx, value, customer, gymConfig);
+      await submitRibForm(ribCtx, page);
+      await postCurrentRibForm(ribCtx);
+      await closeGreyboxIfOpen(page);
+      const ribCheck = await openRibForm(page, memberId, { forceFresh: true });
+      const afterNeed = await ribMandateNeedsSave(ribCheck);
+      const after = await readMandateMeta(ribCheck);
+      await closeGreyboxIfOpen(page);
+      if (after.rum && !afterNeed) {
+        logInfo('RIB validé sur le mandat Deciplus', { member_id: memberId, rum: after.rum });
+        return true;
+      }
+      logWarn('Valider RIB encore bloqué après soumission', { member_id: memberId, attempt });
+      continue;
     }
 
     // Ancien mandat (souvent 0 échéance / IBAN différent) : Deciplus refuse l’édition.
@@ -944,6 +992,10 @@ module.exports = {
   openMemberCheck,
   setMemberIban,
   openRibForm,
+  fillRibForm,
+  submitRibForm,
+  hasPostalAddressBlocker,
+  ribMandateNeedsSave,
   getRibFrame,
   ribAddressFields,
   ensureMemberPostalAddress,

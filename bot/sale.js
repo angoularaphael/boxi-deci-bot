@@ -2401,6 +2401,82 @@ async function openSaleFlow(page, productConfig, gymConfig, saleKind) {
   await selectProductInCatalog(page, productConfig);
 }
 
+async function registerSaleRibIfAsked(page, productConfig = {}) {
+  const needsRib =
+    productConfig.requires_iban === true &&
+    productConfig.paiement_comptant !== true &&
+    productConfig.skip_rib_prompt !== true;
+
+  const work = await resolveDeciplusWorkPage(page);
+  if (!needsRib) {
+    let ignored = await clickFirst(work, sel('sale_config_modal.ignorer_continuer'), {
+      force: true,
+    }).catch(() => false);
+    if (!ignored) {
+      ignored = await clickVenteFooterAction(page, /Ignorer et continuer/i, {
+        exact: true,
+      }).catch(() => false);
+    }
+    if (ignored) {
+      logInfo('Vente Deciplus — étape impayés ignorée');
+      await randomDelayStable(600, 1000);
+    }
+    return;
+  }
+
+  let registered = await clickFirst(work, sel('sale_config_modal.enregistrer_rib'), {
+    force: true,
+  }).catch(() => false);
+  if (!registered) {
+    registered = await clickVenteFooterAction(
+      page,
+      /Enregistrer le RIB|Enregistrer le mandat|Saisir le RIB|Valider le RIB/i
+    ).catch(() => false);
+  }
+  if (!registered) {
+    registered = await clickFirst(page, sel('sale_config_modal.saisir_rib')).catch(() => false);
+  }
+  if (!registered) {
+    logWarn('Vente Deciplus — RIB à enregistrer, bouton introuvable (Ignorer non cliqué)');
+    return;
+  }
+
+  logInfo('Vente Deciplus — enregistrement du RIB');
+  await randomDelayStable(500, 900);
+
+  const iban = String(productConfig.member_iban || '').replace(/\s+/g, '');
+  const ribWork = await resolveDeciplusWorkPage(page);
+  const { fillRibForm, submitRibForm, ribMandateNeedsSave } = require('./wallet');
+  const ibanField = ribWork.locator('input[name="iban"]').first();
+  const fieldVisible =
+    (await ibanField.count().catch(() => 0)) > 0 &&
+    (await ibanField.isVisible().catch(() => false));
+  if (fieldVisible && iban) {
+    const current = String(await ibanField.inputValue().catch(() => '') || '').replace(/\s+/g, '');
+    if (current.length < 10) {
+      await fillRibForm(
+        ribWork,
+        iban,
+        productConfig.member_customer || {},
+        productConfig.gymConfig || {}
+      );
+    }
+    await submitRibForm(ribWork, page);
+    const stillOpen = await ribMandateNeedsSave(ribWork).catch(() => false);
+    if (stillOpen) {
+      logWarn('Vente Deciplus — Valider RIB encore demandé après soumission');
+    } else {
+      logInfo('Vente Deciplus — formulaire RIB validé');
+    }
+    return;
+  }
+
+  const saved = await clickFirst(ribWork, sel('rib_form.save'), { force: true }).catch(() => false);
+  if (!saved) {
+    await clickVenteFooterAction(page, /^\s*Valider\s*$/i).catch(() => false);
+  }
+}
+
 async function applyConfigModal(page, productConfig, memberId = null) {
   logInfo('Vente Deciplus — configuration', {
     sale_type: productConfig.sale_type,
@@ -2484,18 +2560,7 @@ async function applyConfigModal(page, productConfig, memberId = null) {
   }
   logInfo('Vente Deciplus — configuration appliquée');
   await randomDelayStable(600, 1000);
-  let ignored = await clickFirst(work, sel('sale_config_modal.ignorer_continuer'), {
-    force: true,
-  }).catch(() => false);
-  if (!ignored) {
-    ignored = await clickVenteFooterAction(page, /Ignorer et continuer/i, {
-      exact: true,
-    }).catch(() => false);
-  }
-  if (ignored) {
-    logInfo('Vente Deciplus — étape RIB ignorée');
-    await randomDelayStable(600, 1000);
-  }
+  await registerSaleRibIfAsked(page, productConfig);
 }
 
 async function nf525HeadingScope(page) {
@@ -3007,6 +3072,10 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
   const { assertNotBalmaSale, resolveSaleGymConfig } = require('../lib/gym-slugs');
   gymConfig = resolveSaleGymConfig(gymConfig, order);
   assertNotBalmaSale(gymConfig, order);
+  productConfig.member_iban =
+    order.payment?.iban || order.customer?.iban || order.customer_full?.iban || null;
+  productConfig.member_customer = order.customer || order.customer_full || {};
+  productConfig.gymConfig = gymConfig;
   if (productConfig.create_sale === false || productConfig.sale_type === 'none') {
     logInfo('Essai — fiche membre seulement', { order_id: order.order_id });
     if (memberId) {
