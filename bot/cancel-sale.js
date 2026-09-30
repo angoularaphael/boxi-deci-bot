@@ -58,7 +58,7 @@ function isPendingOrFutureContract(label) {
   return startOfDay(start).getTime() > startOfDay(new Date()).getTime();
 }
 
-/** Vendu / début aujourd’hui : Deciplus bloque souvent Résilier — il faut Annuler la vente. */
+/** Vendu / début aujourd’hui. On résilie quand même : Annuler la vente est interdit. */
 function isSameDayStartContract(label, now = new Date()) {
   const start = contractStartDate(label);
   if (!start) return false;
@@ -407,7 +407,16 @@ async function waitActionPanel(page, timeoutMs = 12000) {
 }
 
 async function clickActionTile(page, names) {
-  const labels = (Array.isArray(names) ? names : [names]).map((name) =>
+  const raw = (Array.isArray(names) ? names : [names]).filter(Boolean);
+  const allowed = raw.filter(
+    (name) => !/annuler la vente/i.test(name instanceof RegExp ? name.source : String(name))
+  );
+  if (allowed.length !== raw.length) {
+    logWarn('Clic Annuler la vente interdit — Résilier uniquement');
+  }
+  if (!allowed.length) return null;
+
+  const labels = allowed.map((name) =>
     name instanceof RegExp ? name.source.replace(/^\^|\$$/g, '') : String(name)
   );
 
@@ -421,6 +430,7 @@ async function clickActionTile(page, names) {
           let bestArea = Infinity;
           for (const el of nodes) {
             const t = String(el.innerText || '').replace(/\s+/g, ' ').trim();
+            if (/annuler la vente/i.test(t)) continue;
             if (!re.test(t)) continue;
             const r = el.getBoundingClientRect();
             if (r.width < 6 || r.height < 6) continue;
@@ -1114,57 +1124,17 @@ function shouldVoidSale(contract, { allowStarted = false } = {}) {
   return isSameDayStartContract(contract?.label);
 }
 
-async function voidPendingSaleIfPossible(page, contract, { allowStarted = false } = {}) {
-  if (!shouldVoidSale(contract, { allowStarted })) return false;
-  const mode = await clickActionTile(page, [/^Annuler la vente$/i]);
-  if (!mode) {
-    logWarn('Tuile Annuler la vente introuvable', { idc: contract?.idc || null });
-    return false;
-  }
-  logInfo('Clic Annuler la vente', { idc: contract?.idc || null });
-  await randomDelay(900, 1400);
+/** Toujours Résilier. Aucun chemin n’annule une vente. */
+function resolveCancelNeverVoid(_options = {}, _cancelReason = '') {
+  return true;
+}
 
-  const dateStr = formatFrDate(new Date());
-  const dateOk = await fillLabeledDate(page, /Date d['’]?annulation/i, dateStr);
-  if (!dateOk) {
-    logWarn('Date d’annulation introuvable', { idc: contract?.idc || null });
-  }
-  const refundMode = await clickAnnulationRefundMode(page);
-  logInfo('Annulation contrat — date et mode', {
-    idc: contract?.idc || null,
-    date: dateOk,
-    refund_mode: refundMode,
-  });
-  const applyReady = await waitAppliquerEnabled(page);
-  if (!applyReady) {
-    logWarn('Annuler la vente — Appliquer reste désactivé', {
-      idc: contract?.idc || null,
-      refund_mode: refundMode,
-    });
-    return false;
-  }
-  await randomDelay(400, 700);
-
-  const stillModify = page.getByText(/Modification manuelle/i).first();
-  const modifyVisible =
-    (await stillModify.count()) > 0 && (await stillModify.isVisible().catch(() => false));
-  if (!modifyVisible) {
-    const applied = await clickAppliquerEtQuitter(page).catch(() => false);
-    if (applied) {
-      const confirmed = await confirmAnnulationModal(page);
-      logInfo('Contrat en attente — vente annulée (Appliquer et Quitter)', {
-        idc: contract?.idc || null,
-        confirmed,
-      });
-      await randomDelay(800, 1200);
-      return confirmed;
-    }
-  }
-  logWarn('Annuler la vente cliqué mais pas de confirmation', { idc: contract?.idc || null });
+async function voidPendingSaleIfPossible() {
+  logWarn('Annuler la vente interdit — Résilier uniquement');
   return false;
 }
 
-async function cancelOneContract(page, contract, { cancelDate = null, forceVoid = false } = {}) {
+async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
   const dateStr = formatFrDate(parseCancelDate(cancelDate));
   const opened = await openContractPage(page, contract);
   if (!opened) {
@@ -1177,23 +1147,7 @@ async function cancelOneContract(page, contract, { cancelDate = null, forceVoid 
     return { cancelled: false, reason: 'action_panel_missing', idc: contract.idc };
   }
 
-  const sameDayStart = isSameDayStartContract(contract.label);
-  if (forceVoid || contract.isBadge || isPendingOrFutureContract(contract.label) || sameDayStart) {
-    const voided = await voidPendingSaleIfPossible(page, contract, {
-      allowStarted: forceVoid || Boolean(contract.isBadge) || sameDayStart,
-    });
-    if (voided) {
-      return {
-        cancelled: true,
-        reason: contract.isBadge ? 'badge_voided' : 'pending_voided',
-        idc: contract.idc,
-      };
-    }
-    await openContractPage(page, contract).catch(() => {});
-    await waitActionPanel(page);
-  }
-
-  // IMPORTANT : Résilier — jamais « Annuler la vente » sur un abo déjà commencé
+  // IMPORTANT : Résilier — jamais « Annuler la vente »
   const mode = await clickActionTile(page, [/^Résilier$/i, /^Résiliation$/i]);
   if (!mode) {
     logWarn('Tuile Résilier introuvable', { idc: contract.idc, url: page.url() });
@@ -1205,8 +1159,6 @@ async function cancelOneContract(page, contract, { cancelDate = null, forceVoid 
     await clickActionTile(page, [/^Résilier$/i]).catch(() => {});
     await page.waitForTimeout(1500);
     if (!(await waitResilierForm(page, 8000))) {
-      const voided = await voidPendingSaleIfPossible(page, contract);
-      if (voided) return { cancelled: true, reason: 'pending_voided', idc: contract.idc };
       logWarn('Formulaire Résilier le contrat introuvable', {
         idc: contract.idc,
         url: page.url(),
@@ -1217,8 +1169,6 @@ async function cancelOneContract(page, contract, { cancelDate = null, forceVoid 
 
   const dateOk = await setResiliationDate(page, dateStr);
   if (!dateOk) {
-    const voided = await voidPendingSaleIfPossible(page, contract);
-    if (voided) return { cancelled: true, reason: 'pending_voided', idc: contract.idc };
     return { cancelled: false, reason: 'resiliation_date_missing', idc: contract.idc };
   }
 
@@ -1246,10 +1196,6 @@ async function cancelOneContract(page, contract, { cancelDate = null, forceVoid 
 
   const applied = await clickAppliquerEtQuitter(page);
   if (!applied) {
-    await openContractPage(page, contract).catch(() => {});
-    await waitActionPanel(page);
-    const voided = await voidPendingSaleIfPossible(page, contract, { allowStarted: true });
-    if (voided) return { cancelled: true, reason: 'pending_voided', idc: contract.idc };
     return { cancelled: false, reason: 'appliquer_quitter_missing', idc: contract.idc };
   }
   await randomDelay(1200, 2000);
@@ -1379,7 +1325,7 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
 
     const target = contracts[0];
     const idcKey = String(target.idc);
-    const result = await cancelOneContract(page, target, { cancelDate, forceVoid });
+    const result = await cancelOneContract(page, target, { cancelDate });
     details.push(result);
 
     if (result.cancelled) {
@@ -1483,7 +1429,7 @@ async function cancelSale(page, memberId, options = {}) {
   const outcome = await cancelAllMemberSales(page, memberId, {
     maxSales: 15,
     cancelDate,
-    forceVoid: options.forceVoid === true,
+    forceVoid: false,
     filter: extraFilter,
   });
   if (outcome.cancelled_count === 0) {
@@ -1543,6 +1489,8 @@ module.exports = {
   formatFrDate,
   isPendingOrFutureContract,
   isSameDayStartContract,
+  resolveCancelNeverVoid,
+  voidPendingSaleIfPossible,
   isAppliquerQuitterLabel,
   parseFrDatesFromLabel,
   contractStartDate,

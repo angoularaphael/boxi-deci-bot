@@ -2959,16 +2959,16 @@ async function reconcileActiveBadges(page, memberId, gymConfig, { keepOne = fals
   }
   if (!toCancel.length) return { keeper, cancelled: 0, kept_existing: Boolean(keeper) };
 
-  logWarn('Badges en trop à annuler — le badge payé conservé n’est pas recréé', {
+  logWarn('Badges en trop à résilier — aucune vente annulée', {
     member_id: memberId,
     keep: keeper?.idc || null,
-    void: toCancel.map((c) => c.idc),
+    resilier: toCancel.map((c) => c.idc),
   });
 
   const ids = new Set(toCancel.map((c) => String(c.idc)));
   await cancelSale(page, memberId, {
     cancelReason: 'change_badge_policy',
-    forceVoid: true,
+    neverVoid: true,
     filter: (c) => c?.isBadge && ids.has(String(c.idc)),
   });
 
@@ -3315,6 +3315,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
       });
       const cancelOutcome = await cancelSale(page, memberId, {
         cancelReason: 'change_replace_existing',
+        neverVoid: true,
         filter: (c) => c && !c.isBadge && cancelIds.has(String(c.idc)),
       });
       const ghostIds = new Set(
@@ -3353,6 +3354,7 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
         const leftoverIds = new Set(leftover.map((c) => String(c.idc)));
         await cancelSale(page, memberId, {
           cancelReason: 'change_replace_existing',
+          neverVoid: true,
           filter: (c) => c && !c.isBadge && leftoverIds.has(String(c.idc)),
         }).catch((err) => {
           logWarn('Second essai résiliation échoué', { error: err.message });
