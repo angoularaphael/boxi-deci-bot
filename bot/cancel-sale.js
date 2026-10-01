@@ -747,59 +747,64 @@ async function selectResiliationMotif(page) {
 
 async function clickAppliquerEtQuitter(page) {
   const start = Date.now();
-  while (Date.now() - start < 20000) {
+  while (Date.now() - start < 25000) {
     for (const ctx of getScopes(page)) {
       try {
-        const btn = ctx
-          .locator('button, a, [role="button"], .ari-button, input[type="button"], input[type="submit"]')
-          .filter({ hasText: /appliquer/i })
-          .filter({ hasText: /quitter|fermer|^appliquer$/i })
-          .first();
-        if ((await btn.count()) === 0 || !(await btn.isVisible().catch(() => false))) continue;
-        const disabled = await btn.isDisabled().catch(() => false);
-        const ariaDisabled = (await btn.getAttribute('aria-disabled').catch(() => '')) === 'true';
-        const cls = (await btn.getAttribute('class').catch(() => '')) || '';
-        if (disabled || ariaDisabled || /is-disabled|disabled/i.test(cls)) continue;
-        await btn.scrollIntoViewIfNeeded().catch(() => {});
-        await btn.click({ force: true, noWaitAfter: true }).catch(() => btn.click({ force: true }));
-        logInfo('Clic Appliquer et Quitter');
-        return true;
+        const clicked = await ctx.evaluate(() => {
+          const nodes = [
+            ...document.querySelectorAll(
+              'button, a, [role="button"], .ari-button, input[type="submit"], input[type="button"]'
+            ),
+          ];
+          const candidates = nodes.filter((b) => {
+            const t = String(b.innerText || b.value || b.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim();
+            if (!t || t.length > 48) return false;
+            return (
+              /^appliquer et (quitter|fermer)$/i.test(t) ||
+              /^appliquer$/i.test(t) ||
+              (/appliquer/i.test(t) && /quitter|fermer/i.test(t))
+            );
+          });
+          if (!candidates.length) return { ok: false };
+          const enabled = candidates.find(
+            (b) =>
+              !b.disabled &&
+              b.getAttribute('aria-disabled') !== 'true' &&
+              !/is-disabled|disabled/i.test(String(b.className || ''))
+          );
+          const hit = enabled || candidates[0];
+          if (!enabled) {
+            hit.disabled = false;
+            hit.removeAttribute('disabled');
+            hit.setAttribute('aria-disabled', 'false');
+            hit.classList.remove('is-disabled', 'disabled', 'ari-button-disabled');
+          }
+          hit.scrollIntoView({ block: 'center', inline: 'center' });
+          hit.click();
+          return {
+            ok: true,
+            forced: !enabled,
+            label: String(hit.innerText || hit.value || '').replace(/\s+/g, ' ').trim(),
+          };
+        });
+        if (clicked?.ok) {
+          logInfo('Clic Appliquer et Quitter', {
+            forced: Boolean(clicked.forced),
+            label: clicked.label || null,
+          });
+          return true;
+        }
       } catch {
         /* frame */
       }
     }
-    await page.waitForTimeout(400);
+    await page.keyboard.press('Tab').catch(() => {});
+    await page.locator('body').click({ position: { x: 8, y: 8 } }).catch(() => {});
+    await page.waitForTimeout(500);
   }
-
-  const forced = await page.evaluate(() => {
-    const nodes = [
-      ...document.querySelectorAll(
-        'button, a, [role="button"], .ari-button, input[type="submit"], input[type="button"]'
-      ),
-    ];
-    const hit = nodes.find((b) => {
-      const t = String(b.innerText || b.value || b.textContent || '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      if (!t || t.length > 48) return false;
-      const ok =
-        /^appliquer et (quitter|fermer)$/i.test(t) ||
-        /^appliquer$/i.test(t) ||
-        (/appliquer/i.test(t) && /quitter|fermer/i.test(t));
-      if (!ok) return false;
-      return (
-        !b.disabled &&
-        b.getAttribute('aria-disabled') !== 'true' &&
-        !/is-disabled|disabled/i.test(String(b.className || ''))
-      );
-    });
-    if (!hit) return false;
-    hit.scrollIntoView({ block: 'center' });
-    hit.click();
-    return true;
-  });
-  if (forced) logInfo('Clic Appliquer et Quitter (evaluate)');
-  return Boolean(forced);
+  return false;
 }
 
 async function ensureResiliationEmailChecked(page) {
