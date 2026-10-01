@@ -29,7 +29,7 @@ const {
 const { findOrCreateMember, detectMemberGymConfig, resetMemberSearchContext, uploadMemberPhoto, findMemberByIdentity, defaultSeancePhotoPath } = require('./member');
 const { createGymConfig, isEtatsUnisDeciplusSite } = require('../lib/deciplus-sites');
 const { recordSale } = require('./sale');
-const { setMemberIban, openMemberCheck } = require('./wallet');
+const { setMemberIban, openMemberCheck, ficheRibCleared, closeGreyboxIfOpen } = require('./wallet');
 const { isValidFrenchIban } = require('../lib/iban');
 const {
   listPending,
@@ -777,6 +777,32 @@ async function processSaleJob(page, order, jobMeta = {}) {
 
   if (paid && needsSale && !saleResult.sale_id && !saleResult.manual_review && !ibanError) {
     throw new Error('Vente Deciplus non confirmée (sale_id manquant)');
+  }
+
+  // Garde-fou final : check.php + joueurs.php — RUM sans disparition du bandeau = échec.
+  if (needsIban && memberId && !ibanError) {
+    try {
+      await closeGreyboxIfOpen(page);
+      if (!(await ficheRibCleared(page, memberId, gymConfig))) {
+        if (iban && isValidFrenchIban(iban)) {
+          logWarn('Alerte RIB encore visible après vente — nouvel essai setMemberIban', {
+            order_id: order.order_id,
+            member_id: memberId,
+          });
+          try {
+            await setMemberIban(page, memberId, iban, order.customer, gymConfig);
+          } catch (err) {
+            ibanError = err.message;
+          }
+        }
+        if (!ibanError && !(await ficheRibCleared(page, memberId, gymConfig))) {
+          ibanError =
+            'RIB Deciplus: la fiche demande encore d enregistrer le RIB (alerte paiement)';
+        }
+      }
+    } catch (err) {
+      if (!ibanError) ibanError = err.message;
+    }
   }
 
   const finalStatus =
