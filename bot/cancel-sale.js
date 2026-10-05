@@ -100,11 +100,12 @@ function isResilierTileLabel(text) {
   return false;
 }
 
-/** « Choisir » ou vide = le select Element UI n’a pas pris le motif. */
+/** « Choisir », vide ou une date = le motif n’est pas choisi. */
 function motifValueChosen(value) {
   const t = normalizeUiText(value);
   if (!t) return false;
   if (/^choisir$/i.test(t)) return false;
+  if (/^\d{1,2}\D+\d{1,2}\D+\d{2,4}$/.test(t)) return false;
   if (/sélectionnez|selectionnez|obligatoire|motif de résiliation/i.test(t)) return false;
   return t.length >= 3;
 }
@@ -715,27 +716,20 @@ async function readMotifDisplayed(page) {
   for (const ctx of getScopes(page)) {
     try {
       const value = await ctx.evaluate(() => {
-        const nodes = [...document.querySelectorAll('.el-form-item, .ari-form-item, label, div, p')];
-        for (const el of nodes) {
-          const own = String(el.innerText || '')
-            .replace(/\s+/g, ' ')
-            .trim();
-          if (!/Motif de résiliation/i.test(own) || own.length > 180) continue;
-          const root =
-            el.closest?.('.el-form-item, .ari-form-item') ||
-            (el.classList &&
-            (el.classList.contains('el-form-item') || el.classList.contains('ari-form-item'))
-              ? el
-              : el.parentElement);
-          if (!root) continue;
-          const input = root.querySelector('input, select');
-          const selected = root.querySelector(
-            '.el-select__selected-item, .el-select .el-input__inner, .el-input__inner'
+        const clean = (v) => String(v || '').replace(/\s+/g, ' ').trim();
+        const prime = document.querySelector('.reason-container .p-select-label');
+        if (prime) return clean(prime.innerText || prime.textContent);
+        const items = [...document.querySelectorAll('.el-form-item, .ari-form-item, .reason-container')];
+        for (const el of items) {
+          const own = clean(el.innerText);
+          if (!/Motif de résiliation/i.test(own) || own.length > 220) continue;
+          const selected = el.querySelector(
+            '.p-select-label, .el-select__selected-item, .el-input__inner, select, input'
           );
-          const fromSelect = input && input.tagName === 'SELECT' ? input.selectedOptions?.[0]?.text || '' : '';
-          return String(input?.value || fromSelect || selected?.value || selected?.textContent || '')
-            .replace(/\s+/g, ' ')
-            .trim();
+          if (!selected) continue;
+          const fromSelect =
+            selected.tagName === 'SELECT' ? selected.selectedOptions?.[0]?.text || '' : '';
+          return clean(fromSelect || selected.value || selected.textContent);
         }
         return '';
       });
@@ -765,6 +759,7 @@ async function selectResiliationMotif(page) {
 
   // Ouvrir le select du champ motif — pas le premier select de la page
   const openers = [
+    page.locator('.reason-container .p-select').first(),
     page
       .locator(
         'xpath=//*[contains(normalize-space(.),"Motif de résiliation")]/following::*[contains(@class,"el-select") or self::select or contains(@class,"ari-select")][1]'
@@ -792,7 +787,7 @@ async function selectResiliationMotif(page) {
   }
 
   const optionSelector =
-    '.el-select-dropdown__item, li.el-select-dropdown__item, [role="option"], .el-option';
+    '.p-select-option, .el-select-dropdown__item, li.el-select-dropdown__item, [role="option"], .el-option';
 
   for (const re of motifs) {
     for (const ctx of getScopes(page)) {
@@ -816,7 +811,7 @@ async function selectResiliationMotif(page) {
   // Repli : clic souris sur l’option du menu (Element UI ignore parfois un click JS nu)
   const picked = await page.evaluate(() => {
     const items = [...document.querySelectorAll(
-      '.el-select-dropdown__item, li.el-select-dropdown__item, [role="option"], .el-option, select option'
+      '.p-select-option, .el-select-dropdown__item, li.el-select-dropdown__item, [role="option"], .el-option, select option'
     )].filter((el) => {
       const t = String(el.textContent || '').replace(/\s+/g, ' ').trim();
       if (!t || /^choisir$/i.test(t)) return false;

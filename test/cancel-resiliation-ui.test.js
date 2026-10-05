@@ -133,6 +133,40 @@ test('Appliquer désactivé n’est pas cliqué, et OK hors modale n’est pas u
   });
 });
 
+test('le menu PrimeVue Motif choisit Ne souhaite pas reconduire, pas la date du contrat', async () => {
+  const html = `<!doctype html><body>
+    <label>Date de résiliation effective :<input id="date" value="22/08/2027" /></label>
+    <div class="reason-container">
+      <span>Motif de résiliation :</span>
+      <div class="p-select" id="psel">
+        <span class="p-select-label p-placeholder" id="label">Choisir</span>
+      </div>
+      <p class="reason-warning">Le motif de résiliation est obligatoire</p>
+    </div>
+    <ul id="menu" hidden>
+      <li class="p-select-option" id="opt">Ne souhaite pas reconduire</li>
+      <li class="p-select-option">Autres raisons</li>
+    </ul>
+    <script>
+      document.getElementById('psel').addEventListener('click', () => {
+        document.getElementById('menu').hidden = false;
+      });
+      document.getElementById('opt').addEventListener('click', () => {
+        document.getElementById('label').textContent = 'Ne souhaite pas reconduire';
+        document.getElementById('menu').hidden = true;
+      });
+    </script>
+  </body>`;
+  await withPage(html, async (page) => {
+    assert.equal(await selectResiliationMotif(page), true);
+    assert.equal(
+      await page.locator('#label').innerText(),
+      'Ne souhaite pas reconduire'
+    );
+    assert.equal(await page.locator('#date').inputValue(), '22/08/2027');
+  });
+});
+
 test('un select Action souhaitée choisit Résilier, pas Annuler la vente', async () => {
   const html = `<!doctype html><body>
     <label>Action souhaitée</label>

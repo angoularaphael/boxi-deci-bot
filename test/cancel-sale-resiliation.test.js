@@ -44,9 +44,10 @@ test('tuile Résilier : libellé contrat accepté, mail et annulation refusés',
   assert.equal(isResilierTileLabel('Envoyer un e-mail'), false);
 });
 
-test('motif « Choisir » ne compte pas comme sélectionné', () => {
+test('motif « Choisir » ou une date ne compte pas comme sélectionné', () => {
   assert.equal(motifValueChosen(''), false);
   assert.equal(motifValueChosen('Choisir'), false);
+  assert.equal(motifValueChosen('22/08/2027'), false);
   assert.equal(motifValueChosen('Ne souhaite pas reconduire'), true);
 });
 
