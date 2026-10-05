@@ -58,7 +58,7 @@ function isPendingOrFutureContract(label) {
   return startOfDay(start).getTime() > startOfDay(new Date()).getTime();
 }
 
-/** Vendu / début aujourd’hui. On résilie quand même : Annuler la vente est interdit. */
+/** Vendu / début aujourd’hui. On résilie : Annuler la vente n’existe plus dans ce flux. */
 function isSameDayStartContract(label, now = new Date()) {
   const start = contractStartDate(label);
   if (!start) return false;
@@ -73,6 +73,49 @@ function isAppliquerQuitterLabel(text) {
   if (/^appliquer et (quitter|fermer)$/i.test(t)) return true;
   if (/^appliquer$/i.test(t)) return true;
   return /appliquer/i.test(t) && /quitter|fermer/i.test(t);
+}
+
+function normalizeUiText(text) {
+  return String(text || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Tuile d’action « Résilier », pas le bouton mail ni « Annuler la vente ». Autonome (injectée dans la page). */
+function isResilierTileLabel(text) {
+  const raw = String(text || '').replace(/\u00a0/g, ' ');
+  const flat = raw.replace(/\s+/g, ' ').trim();
+  if (!flat || flat.length > 48) return false;
+  if (/annuler la vente/i.test(flat)) return false;
+  if (/mail|e-?mail|envoyer/i.test(flat)) return false;
+  if (/^r[ée]silier$/i.test(flat) || /^r[ée]siliation$/i.test(flat)) return true;
+  const first = raw
+    .split(/\n/)
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .find(Boolean);
+  if (first && (/^r[ée]silier$/i.test(first) || /^r[ée]siliation$/i.test(first))) return true;
+  if (/^r[ée]silier le contrat$/i.test(flat)) return true;
+  if (/^r[ée]silier l['’]abonnement$/i.test(flat)) return true;
+  return false;
+}
+
+/** « Choisir » ou vide = le select Element UI n’a pas pris le motif. */
+function motifValueChosen(value) {
+  const t = normalizeUiText(value);
+  if (!t) return false;
+  if (/^choisir$/i.test(t)) return false;
+  if (/sélectionnez|selectionnez|obligatoire|motif de résiliation/i.test(t)) return false;
+  return t.length >= 3;
+}
+
+/**
+ * Mail absent = succès seulement si Appliquer était actif et la modale
+ * « Êtes-vous certain » a été confirmée. Un clic forcé sur un bouton
+ * désactivé ne résilie pas.
+ */
+function resiliationCountsAsDone({ applyEnabled = false, confirmSeen = false } = {}) {
+  return Boolean(applyEnabled && confirmSeen);
 }
 
 function parseCancelDate(raw) {
@@ -422,16 +465,19 @@ async function clickActionTile(page, names) {
 
   for (const ctx of getScopes(page)) {
     try {
-      const hit = await ctx.evaluate((needles) => {
-        const nodes = [...document.querySelectorAll('div, span, button, a, li, p')];
-        for (const needle of needles) {
-          const re = new RegExp(`^${needle}$`, 'i');
+      const hit = await ctx.evaluate(
+        ({ needles, tileFn }) => {
+          const isResilierTileLabel = eval(`(${tileFn})`);
+          const nodes = [...document.querySelectorAll('div, span, button, a, li, p')];
           let best = null;
           let bestArea = Infinity;
+          let bestLabel = null;
           for (const el of nodes) {
-            const t = String(el.innerText || '').replace(/\s+/g, ' ').trim();
+            const raw = String(el.innerText || '');
+            const t = raw.replace(/\s+/g, ' ').trim();
             if (/annuler la vente/i.test(t)) continue;
-            if (!re.test(t)) continue;
+            const exact = needles.some((needle) => new RegExp(`^${needle}$`, 'i').test(t));
+            if (!exact && !isResilierTileLabel(raw)) continue;
             const r = el.getBoundingClientRect();
             if (r.width < 6 || r.height < 6) continue;
             const style = window.getComputedStyle(el);
@@ -440,16 +486,16 @@ async function clickActionTile(page, names) {
             if (area < bestArea) {
               best = el;
               bestArea = area;
+              bestLabel = t.slice(0, 48);
             }
           }
-          if (best) {
-            best.scrollIntoView({ block: 'center', inline: 'center' });
-            best.click();
-            return needle;
-          }
-        }
-        return null;
-      }, labels);
+          if (!best) return null;
+          best.scrollIntoView({ block: 'center', inline: 'center' });
+          best.click();
+          return bestLabel || 'Résilier';
+        },
+        { needles: labels, tileFn: isResilierTileLabel.toString() }
+      );
       if (hit) return hit;
     } catch {
       /* frame détachée */
@@ -645,6 +691,42 @@ async function setResiliationDate(page, dateStr) {
   return ok;
 }
 
+async function readMotifDisplayed(page) {
+  for (const ctx of getScopes(page)) {
+    try {
+      const value = await ctx.evaluate(() => {
+        const nodes = [...document.querySelectorAll('.el-form-item, .ari-form-item, label, div, p')];
+        for (const el of nodes) {
+          const own = String(el.innerText || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!/Motif de résiliation/i.test(own) || own.length > 180) continue;
+          const root =
+            el.closest?.('.el-form-item, .ari-form-item') ||
+            (el.classList &&
+            (el.classList.contains('el-form-item') || el.classList.contains('ari-form-item'))
+              ? el
+              : el.parentElement);
+          if (!root) continue;
+          const input = root.querySelector('input, select');
+          const selected = root.querySelector(
+            '.el-select__selected-item, .el-select .el-input__inner, .el-input__inner'
+          );
+          const fromSelect = input && input.tagName === 'SELECT' ? input.selectedOptions?.[0]?.text || '' : '';
+          return String(input?.value || fromSelect || selected?.value || selected?.textContent || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        }
+        return '';
+      });
+      if (value) return value;
+    } catch {
+      /* frame */
+    }
+  }
+  return '';
+}
+
 async function selectResiliationMotif(page) {
   const motifs = [
     /Ne souhaite pas reconduire/i,
@@ -655,7 +737,13 @@ async function selectResiliationMotif(page) {
     /autre/i,
   ];
 
-  // Ouvrir le select — plusieurs variantes Deciplus / Element UI
+  const chosenAlready = motifValueChosen(await readMotifDisplayed(page));
+  if (chosenAlready) {
+    logInfo('Motif de résiliation déjà renseigné', { motif: await readMotifDisplayed(page) });
+    return true;
+  }
+
+  // Ouvrir le select du champ motif — pas le premier select de la page
   const openers = [
     page
       .locator(
@@ -663,8 +751,7 @@ async function selectResiliationMotif(page) {
       )
       .first(),
     page.getByText(/Motif de résiliation/i).locator('xpath=following::input[1]').first(),
-    page.getByText(/^Choisir$/i).first(),
-    page.locator('.el-select .el-input__inner, .el-select .el-input').first(),
+    page.locator('.el-form-item:has-text("Motif de résiliation") .el-select, .el-form-item:has-text("Motif de résiliation") select').first(),
   ];
   for (const opener of openers) {
     if ((await opener.count()) > 0 && (await opener.isVisible().catch(() => false))) {
@@ -672,7 +759,7 @@ async function selectResiliationMotif(page) {
       break;
     }
   }
-  await randomDelay(500, 900);
+  await randomDelay(300, 500);
 
   // Attendre le dropdown
   for (let i = 0; i < 10; i += 1) {
@@ -684,70 +771,74 @@ async function selectResiliationMotif(page) {
     await page.waitForTimeout(250);
   }
 
+  const optionSelector =
+    '.el-select-dropdown__item, li.el-select-dropdown__item, [role="option"], .el-option';
+
   for (const re of motifs) {
     for (const ctx of getScopes(page)) {
       try {
-        const opt = ctx
-          .locator(
-            '.el-select-dropdown__item, li.el-select-dropdown__item, li, .el-option, div[role="option"]'
-          )
-          .filter({ hasText: re })
-          .first();
+        const opt = ctx.locator(optionSelector).filter({ hasText: re }).first();
         if ((await opt.count()) > 0 && (await opt.isVisible().catch(() => false))) {
           await opt.click({ force: true });
-          logInfo('Motif de résiliation sélectionné', { motif: String(re) });
-          await randomDelay(400, 700);
-          return true;
+          await randomDelay(200, 400);
+          const shown = await readMotifDisplayed(page);
+          if (motifValueChosen(shown)) {
+            logInfo('Motif de résiliation sélectionné', { motif: shown });
+            return true;
+          }
         }
       } catch {
         /* ignore */
       }
     }
-    const byText = page.getByText(re).first();
-    if ((await byText.count()) > 0 && (await byText.isVisible().catch(() => false))) {
-      await byText.click({ force: true });
-      logInfo('Motif de résiliation sélectionné', { motif: String(re) });
-      await randomDelay(400, 700);
-      return true;
-    }
   }
 
-  // Repli JS : préférer « ne souhaite… », sinon 1ère option non vide
+  // Repli : clic souris sur l’option du menu (Element UI ignore parfois un click JS nu)
   const picked = await page.evaluate(() => {
-    const items = [
-      ...document.querySelectorAll(
-        '.el-select-dropdown__item, li.el-select-dropdown__item, li[role="option"], [role="option"], .el-option'
-      ),
-    ].filter((el) => {
+    const items = [...document.querySelectorAll(
+      '.el-select-dropdown__item, li.el-select-dropdown__item, [role="option"], .el-option, select option'
+    )].filter((el) => {
       const t = String(el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!t || /^choisir$/i.test(t)) return false;
+      if (el.tagName === 'OPTION') return true;
       const style = window.getComputedStyle(el);
-      return t && style.display !== 'none' && style.visibility !== 'hidden';
+      return style.display !== 'none' && style.visibility !== 'hidden';
     });
     const preferred = items.find((el) =>
-      /ne souhaite|pas reconduire|changement|autre/i.test(String(el.textContent || ''))
+      /ne souhaite|pas reconduire|changement|^autre$/i.test(String(el.textContent || ''))
     );
-    const hit = preferred || items[0];
+    const hit = preferred || items.find((el) => el.tagName !== 'OPTION') || null;
     if (!hit) {
       return { ok: false, options: items.map((el) => String(el.textContent || '').trim()).slice(0, 12) };
     }
-    hit.click();
+    if (hit.tagName === 'OPTION' && hit.parentElement) {
+      hit.parentElement.value = hit.value;
+      hit.parentElement.dispatchEvent(new Event('input', { bubbles: true }));
+      hit.parentElement.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      hit.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      hit.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      hit.click();
+    }
     return { ok: true, motif: String(hit.textContent || '').replace(/\s+/g, ' ').trim() };
   });
-  if (picked?.ok) {
-    logInfo('Motif de résiliation sélectionné', { motif: picked.motif, via: 'evaluate' });
-    await randomDelay(400, 700);
+  await randomDelay(200, 400);
+  const shown = await readMotifDisplayed(page);
+  if (motifValueChosen(shown)) {
+    logInfo('Motif de résiliation sélectionné', { motif: shown, via: 'evaluate' });
     return true;
   }
 
   logWarn('Motif « Ne souhaite pas reconduire » introuvable', {
     options: picked?.options || [],
+    shown: shown || null,
   });
   return false;
 }
 
-async function clickAppliquerEtQuitter(page) {
+async function clickAppliquerEtQuitter(page, { timeoutMs = 25000 } = {}) {
   const start = Date.now();
-  while (Date.now() - start < 25000) {
+  while (Date.now() - start < timeoutMs) {
     for (const ctx of getScopes(page)) {
       try {
         const clicked = await ctx.evaluate(() => {
@@ -774,24 +865,17 @@ async function clickAppliquerEtQuitter(page) {
               b.getAttribute('aria-disabled') !== 'true' &&
               !/is-disabled|disabled/i.test(String(b.className || ''))
           );
-          const hit = enabled || candidates[0];
-          if (!enabled) {
-            hit.disabled = false;
-            hit.removeAttribute('disabled');
-            hit.setAttribute('aria-disabled', 'false');
-            hit.classList.remove('is-disabled', 'disabled', 'ari-button-disabled');
-          }
-          hit.scrollIntoView({ block: 'center', inline: 'center' });
-          hit.click();
+          if (!enabled) return { ok: false, reason: 'disabled' };
+          enabled.scrollIntoView({ block: 'center', inline: 'center' });
+          enabled.click();
           return {
             ok: true,
-            forced: !enabled,
-            label: String(hit.innerText || hit.value || '').replace(/\s+/g, ' ').trim(),
+            forced: false,
+            label: String(enabled.innerText || enabled.value || '').replace(/\s+/g, ' ').trim(),
           };
         });
         if (clicked?.ok) {
           logInfo('Clic Appliquer et Quitter', {
-            forced: Boolean(clicked.forced),
             label: clicked.label || null,
           });
           return true;
@@ -851,56 +935,38 @@ async function ensureResiliationEmailChecked(page) {
   return false;
 }
 
-async function confirmResiliationModal(page) {
-  // Attendre l’apparition de la modale (parfois lente après « Appliquer »)
-  const deadline = Date.now() + 12000;
+async function confirmResiliationModal(page, { timeoutMs = 12000 } = {}) {
+  const certainty = /Êtes-vous certain|Etes-vous certain|confirmer la résiliation/i;
+  const deadline = Date.now() + timeoutMs;
+  let prompt = null;
   while (Date.now() < deadline) {
-    const visible = await page
-      .getByText(/Etes-vous certain|Êtes-vous certain|confirmer la résiliation|Envoyer un mail de résiliation/i)
-      .first()
-      .isVisible()
-      .catch(() => false);
-    if (visible) break;
-    await page.waitForTimeout(350);
+    for (const ctx of getScopes(page)) {
+      const candidate = ctx.getByText(certainty).first();
+      if ((await candidate.count().catch(() => 0)) > 0 && (await candidate.isVisible().catch(() => false))) {
+        prompt = candidate;
+        break;
+      }
+    }
+    if (prompt) break;
+    await page.waitForTimeout(250);
   }
+  if (!prompt) return false;
 
   await ensureResiliationEmailChecked(page);
-  await randomDelay(200, 400);
+  await randomDelay(150, 300);
 
-  const clickConfirm = async (ctx) => {
-    const candidates = [
-      ctx.getByRole('button', { name: /^(Confirmer|Valider|OK)$/i }).first(),
-      ctx.locator('button:has-text("Confirmer")').first(),
-      ctx.locator('button:has-text("Valider")').first(),
-      ctx.locator('.el-button--primary:has-text("Confirmer")').first(),
-      ctx.locator('button.el-button--primary').filter({ hasText: /Confirmer|Valider/i }).first(),
-    ];
-    for (const btn of candidates) {
-      if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
-        await btn.click({ force: true, noWaitAfter: true }).catch(() => btn.click({ force: true }));
-        return true;
-      }
-    }
-    return false;
-  };
-
-  for (let attempt = 0; attempt < 6; attempt += 1) {
-    for (const ctx of getScopes(page)) {
-      try {
-        if (await clickConfirm(ctx)) return true;
-      } catch {
-        /* ignore */
-      }
-    }
-    const ok = await page.evaluate(() => {
-      const buttons = [...document.querySelectorAll('button, .el-button, a')];
-      const b = buttons.find((el) => /^(Confirmer|Valider|OK)$/i.test(String(el.textContent || '').trim()));
-      if (!b) return false;
-      b.click();
+  const dialog = prompt.locator(
+    'xpath=ancestor::*[self::div or self::section or self::form][.//button][1]'
+  );
+  const buttons = [
+    dialog.getByRole('button', { name: /^(Confirmer|Valider)$/i }).first(),
+    dialog.locator('button').filter({ hasText: /^(Confirmer|Valider)$/i }).first(),
+  ];
+  for (const btn of buttons) {
+    if ((await btn.count()) > 0 && (await btn.isVisible().catch(() => false))) {
+      await btn.click({ force: true }).catch(() => {});
       return true;
-    });
-    if (ok) return true;
-    await page.waitForTimeout(400);
+    }
   }
   return false;
 }
@@ -1080,8 +1146,14 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
     return { cancelled: false, reason: 'action_panel_missing', idc: contract.idc };
   }
 
-  // IMPORTANT : Résilier — jamais « Annuler la vente »
-  const mode = await clickActionTile(page, [/^Résilier$/i, /^Résiliation$/i]);
+  // IMPORTANT : Résilier — jamais « Annuler la vente ».
+  // Le titre « Action souhaitée » arrive souvent avant les tuiles.
+  let mode = null;
+  const tileDeadline = Date.now() + 8000;
+  while (!mode && Date.now() < tileDeadline) {
+    mode = await clickActionTile(page, [/^Résilier$/i, /^Résiliation$/i]);
+    if (!mode) await page.waitForTimeout(400);
+  }
   if (!mode) {
     logWarn('Tuile Résilier introuvable', { idc: contract.idc, url: page.url() });
     return { cancelled: false, reason: 'resilier_missing', idc: contract.idc };
@@ -1121,46 +1193,39 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
   // Le select motif laisse souvent « Appliquer et Quitter » disabled tant qu’on n’a pas blur.
   await page.keyboard.press('Tab').catch(() => {});
   await page.locator('body').click({ position: { x: 8, y: 8 } }).catch(() => {});
-  await randomDelay(400, 700);
-  const applyReady = await waitAppliquerEnabled(page, 15000);
+  await randomDelay(300, 500);
+  let applyReady = await waitAppliquerEnabled(page, 8000);
+  if (!applyReady) {
+    await selectResiliationMotif(page);
+    await page.keyboard.press('Tab').catch(() => {});
+    applyReady = await waitAppliquerEnabled(page, 5000);
+  }
   if (!applyReady) {
     logWarn('Appliquer et Quitter encore désactivé après motif', { idc: contract.idc });
+    return { cancelled: false, reason: 'appliquer_disabled', idc: contract.idc };
   }
 
   const applied = await clickAppliquerEtQuitter(page);
   if (!applied) {
     return { cancelled: false, reason: 'appliquer_quitter_missing', idc: contract.idc };
   }
-  await randomDelay(1200, 2000);
+  await randomDelay(800, 1200);
 
-  // Modale : email + Confirmer (plusieurs libellés Deciplus)
   let confirmed = await confirmResiliationModal(page);
   if (!confirmed) {
-    // Parfois 1er clic Appliquer n’a rien fait — retry
-    await clickAppliquerEtQuitter(page).catch(() => {});
-    await page.waitForTimeout(1500);
-    confirmed = await confirmResiliationModal(page);
+    await clickAppliquerEtQuitter(page, { timeoutMs: 4000 }).catch(() => {});
+    confirmed = await confirmResiliationModal(page, { timeoutMs: 6000 });
   }
-  if (!confirmed) {
-    // Bouton Confirmer parfois hors modale texte attendue
-    const anyConfirm = await page
-      .locator('button:has-text("Confirmer"), .el-button--primary:has-text("Confirmer"), .swal2-confirm')
-      .first()
-      .click({ force: true, noWaitAfter: true })
-      .then(() => true)
-      .catch(() => false);
-    confirmed = anyConfirm;
-  }
-  if (!confirmed) {
+  if (!confirmed || !resiliationCountsAsDone({ applyEnabled: true, confirmSeen: confirmed })) {
     logWarn('Modale Confirmer résiliation introuvable', { idc: contract.idc, url: page.url() });
     return { cancelled: false, reason: 'confirm_missing', idc: contract.idc };
   }
-  await randomDelay(500, 900);
+  await randomDelay(400, 700);
 
-  // Aperçu email Deciplus — parfois absent (contrat déjà clos après Confirmer).
+  // Aperçu email Deciplus — parfois absent une fois la modale « certain » confirmée.
   const mailed = await clickResilierEtEnvoyerMail(page);
   if (!mailed) {
-    logWarn('Modale mail de résiliation absente — contrat déjà confirmé, on continue', {
+    logWarn('Modale mail de résiliation absente — confirmation déjà faite, on continue', {
       idc: contract.idc,
     });
     return {
@@ -1274,6 +1339,7 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
       'resiliation_date_missing',
       'resilier_form_missing',
       'appliquer_quitter_missing',
+      'appliquer_disabled',
       'confirm_missing',
       'resiliation_motif_missing',
     ].includes(result.reason);
@@ -1423,6 +1489,17 @@ module.exports = {
   isSameDayStartContract,
   resolveCancelNeverVoid,
   isAppliquerQuitterLabel,
+  isResilierTileLabel,
+  motifValueChosen,
+  resiliationCountsAsDone,
+  clickActionTile,
+  selectResiliationMotif,
+  clickAppliquerEtQuitter,
+  waitAppliquerEnabled,
+  confirmResiliationModal,
+  clickResilierEtEnvoyerMail,
   parseFrDatesFromLabel,
   contractStartDate,
+  openContractPage,
+  waitActionPanel,
 };
