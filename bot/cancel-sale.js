@@ -377,9 +377,13 @@ async function findActiveContracts(page, options = {}) {
         const idc = String(row.idc || '').trim();
         const label = String(row.label || '').trim();
         if (!idc || seen.has(idc) || !label) continue;
-        if (/r[ée]sili[ée]|annul[ée]e?|termin[ée]|inactif|cl[ôo]tur|archiv/i.test(label) && !/en attente/i.test(label)) {
-          continue;
-        }
+        const { isStaleOrInactiveAbo } = require('../lib/replace-existing-abo');
+        const expiredPrestation =
+          options.includeExpiredPrestation &&
+          /essai|coaching/i.test(label) &&
+          /expir/i.test(label) &&
+          !/r[eéÉ]sili|annul/i.test(label);
+        if (!expiredPrestation && isStaleOrInactiveAbo(label)) continue;
         seen.add(idc);
         found.push({
           ctx,
@@ -464,6 +468,20 @@ async function clickActionTile(page, names) {
   );
 
   for (const ctx of getScopes(page)) {
+    const selects = ctx.locator('select');
+    const selectCount = await selects.count().catch(() => 0);
+    for (let i = 0; i < selectCount; i += 1) {
+      const sel = selects.nth(i);
+      if (!(await sel.isVisible().catch(() => false))) continue;
+      const options = await sel.locator('option').allTextContents().catch(() => []);
+      const idx = options.findIndex((option) => isResilierTileLabel(option));
+      if (idx < 0) continue;
+      const picked = await sel.selectOption({ index: idx }).then(() => true).catch(() => false);
+      if (picked) return normalizeUiText(options[idx]);
+    }
+  }
+
+  for (const ctx of getScopes(page)) {
     try {
       const hit = await ctx.evaluate(
         ({ needles, tileFn }) => {
@@ -474,10 +492,11 @@ async function clickActionTile(page, names) {
           let bestLabel = null;
           for (const el of nodes) {
             const raw = String(el.innerText || '');
-            const t = raw.replace(/\s+/g, ' ').trim();
-            if (/annuler la vente/i.test(t)) continue;
+            const aria = String(el.getAttribute('aria-label') || el.getAttribute('title') || '');
+            const t = (raw || aria).replace(/\s+/g, ' ').trim();
+            if (/annuler la vente/i.test(t) || /annuler la vente/i.test(aria)) continue;
             const exact = needles.some((needle) => new RegExp(`^${needle}$`, 'i').test(t));
-            if (!exact && !isResilierTileLabel(raw)) continue;
+            if (!exact && !isResilierTileLabel(raw) && !isResilierTileLabel(aria)) continue;
             const r = el.getBoundingClientRect();
             if (r.width < 6 || r.height < 6) continue;
             const style = window.getComputedStyle(el);
@@ -490,8 +509,9 @@ async function clickActionTile(page, names) {
             }
           }
           if (!best) return null;
-          best.scrollIntoView({ block: 'center', inline: 'center' });
-          best.click();
+          const clickable = best.closest('button, a, [role="button"]') || best;
+          clickable.scrollIntoView({ block: 'center', inline: 'center' });
+          clickable.click();
           return bestLabel || 'Résilier';
         },
         { needles: labels, tileFn: isResilierTileLabel.toString() }
@@ -1036,60 +1056,6 @@ async function clickResilierEtEnvoyerMail(page, { timeoutMs = 15000 } = {}) {
   return false;
 }
 
-async function fillLabeledDate(page, labelRe, dateStr) {
-  for (const ctx of getScopes(page)) {
-    try {
-      if (/annulation/i.test(labelRe.source)) {
-        const labeled = ctx
-          .locator(
-            'xpath=//*[contains(normalize-space(.),"Date d") and contains(.,"annulation")]/following::input[1]'
-          )
-          .first();
-        if ((await labeled.count()) > 0 && (await labeled.isVisible().catch(() => false))) {
-          await labeled.click({ force: true }).catch(() => {});
-          await labeled.fill('').catch(() => {});
-          await labeled.type(dateStr, { delay: 25 });
-          await labeled.press('Enter').catch(() => {});
-          return true;
-        }
-      }
-      const ok = await ctx.evaluate(
-        ({ labelSrc, value }) => {
-          const re = new RegExp(labelSrc, 'i');
-          const inputs = [
-            ...document.querySelectorAll(
-              '.el-date-editor input, input.el-input__inner, input[placeholder*="date" i], input[type="text"]'
-            ),
-          ];
-          let target = null;
-          for (const el of inputs) {
-            const block = el.closest('.el-form-item, form, .el-dialog, div');
-            const text = String(block?.textContent || '');
-            if (re.test(text)) {
-              target = el;
-              break;
-            }
-          }
-          if (!target) return false;
-          const proto = Object.getPrototypeOf(target);
-          const desc = Object.getOwnPropertyDescriptor(proto, 'value');
-          if (desc?.set) desc.set.call(target, value);
-          else target.value = value;
-          target.dispatchEvent(new Event('input', { bubbles: true }));
-          target.dispatchEvent(new Event('change', { bubbles: true }));
-          target.dispatchEvent(new Event('blur', { bubbles: true }));
-          return true;
-        },
-        { labelSrc: labelRe.source, value: dateStr }
-      );
-      if (ok) return true;
-    } catch {
-      /* frame */
-    }
-  }
-  return false;
-}
-
 async function waitAppliquerEnabled(page, timeoutMs = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -1155,7 +1121,37 @@ async function cancelOneContract(page, contract, { cancelDate = null } = {}) {
     if (!mode) await page.waitForTimeout(400);
   }
   if (!mode) {
-    logWarn('Tuile Résilier introuvable', { idc: contract.idc, url: page.url() });
+    const seen = await page
+      .evaluate(() =>
+        [...document.querySelectorAll('button, a, [role="button"], select option, [aria-label]')]
+          .map((el) =>
+            String(el.innerText || el.getAttribute('aria-label') || el.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+          )
+          .filter((t) => t && t.length < 60 && /résili|resili|annul|action/i.test(t))
+          .slice(0, 12)
+      )
+      .catch(() => []);
+    const expiredOnly = await page
+      .evaluate(() => {
+        const labels = [...document.querySelectorAll('.contract-action-tabs__label')].map((el) =>
+          String(el.innerText || '').replace(/\s+/g, ' ').trim()
+        );
+        const hasResilier = labels.some((t) => /^r[eé]sili/i.test(t));
+        const body = String(document.body?.innerText || '');
+        return !hasResilier && /expir/i.test(body);
+      })
+      .catch(() => false);
+    logWarn('Tuile Résilier introuvable', {
+      idc: contract.idc,
+      url: page.url(),
+      labels: seen,
+      expired_only: expiredOnly,
+    });
+    if (expiredOnly) {
+      return { cancelled: false, reason: 'expired_not_resiliable', idc: contract.idc, already: true };
+    }
     return { cancelled: false, reason: 'resilier_missing', idc: contract.idc };
   }
   await randomDelay(1000, 1600);
@@ -1332,6 +1328,11 @@ async function cancelAllMemberSales(page, memberId, { maxSales = 15, cancelDate 
       continue;
     }
 
+    if (result.reason === 'expired_not_resiliable') {
+      doneIds.add(idcKey);
+      continue;
+    }
+
     const skippable = [
       'action_panel_missing',
       'resilier_missing',
@@ -1432,16 +1433,19 @@ async function cancelSale(page, memberId, options = {}) {
   });
   if (outcome.cancelled_count === 0) {
     const reason = outcome.details[0]?.reason || 'inconnu';
-    if (reason === 'no_active_sale') {
+    const closedReasons = new Set(['no_active_sale', 'expired_not_resiliable']);
+    const onlyClosed = (outcome.details || []).every((d) => !d.reason || closedReasons.has(d.reason));
+    if (onlyClosed && closedReasons.has(reason)) {
       logInfo('Aucun contrat actif à résilier — déjà clos', {
         member_id: memberId,
+        reason,
       });
       return {
         action: 'sale_cancelled',
         sale_type: 'cancel',
         cancelled_count: 0,
         already: true,
-        reason: 'no_active_sale',
+        reason,
         details: outcome.details,
       };
     }

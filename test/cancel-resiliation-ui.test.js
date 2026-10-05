@@ -133,6 +133,41 @@ test('Appliquer désactivé n’est pas cliqué, et OK hors modale n’est pas u
   });
 });
 
+test('un select Action souhaitée choisit Résilier, pas Annuler la vente', async () => {
+  const html = `<!doctype html><body>
+    <label>Action souhaitée</label>
+    <select id="action">
+      <option>Choisir</option>
+      <option>Annuler la vente</option>
+      <option>Résilier le contrat</option>
+    </select>
+  </body>`;
+  await withPage(html, async (page) => {
+    const hit = await clickActionTile(page, [/^Résilier$/i, /^Résiliation$/i]);
+    assert.equal(hit, 'Résilier le contrat');
+    assert.equal(await page.locator('#action').inputValue(), 'Résilier le contrat');
+  });
+});
+
+test('un onglet Résilier est cliqué, pas Annuler la vente', async () => {
+  const html = `<!doctype html><body>
+    <div class="p-tabs">Encaisser / Décaisser Annuler la vente Résilier
+      <button type="button" class="p-tab" id="void" onclick="this.dataset.clicked='1'">
+        <span class="contract-action-tabs__label">Annuler la vente</span>
+      </button>
+      <button type="button" class="p-tab" id="resil" onclick="this.dataset.clicked='1'">
+        <span class="contract-action-tabs__label">Résilier</span>
+      </button>
+    </div>
+  </body>`;
+  await withPage(html, async (page) => {
+    const hit = await clickActionTile(page, [/^Résilier$/i, /^Résiliation$/i]);
+    assert.equal(hit, 'Résilier');
+    assert.equal(await page.locator('#resil').getAttribute('data-clicked'), '1');
+    assert.equal(await page.locator('#void').getAttribute('data-clicked'), null);
+  });
+});
+
 test('la tuile « Résilier le contrat » est cliquée, pas « Annuler la vente »', async () => {
   await withPage(tilesHtml(), async (page) => {
     const hit = await clickActionTile(page, [/^Résilier$/i, /^Résiliation$/i]);

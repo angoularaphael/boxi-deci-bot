@@ -29,7 +29,7 @@ test('cancel-sale.js ne clique plus Annuler la vente', () => {
   assert.doesNotMatch(src, /logInfo\('Clic Annuler la vente'/);
   assert.doesNotMatch(src, /vente annulée/);
   assert.match(src, /Clic Annuler la vente interdit — Résilier uniquement/);
-  assert.match(src, /if \(\/annuler la vente\/i\.test\(t\)\) continue/);
+  assert.match(src, /if \(\/annuler la vente\/i\.test\(t\) \|\| \/annuler la vente\/i\.test\(aria\)\) continue/);
   assert.doesNotMatch(src, /forceVoid/);
   assert.doesNotMatch(src, /voidPendingSaleIfPossible|confirmAnnulationModal|clickAnnulationRefundMode|shouldVoidSale/);
   assert.match(src, /clickActionTile\(page, \[\/\^Résilier\$\/i/);
