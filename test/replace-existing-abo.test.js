@@ -49,6 +49,18 @@ test('vente du jour du même produit : on ne résilie pas', () => {
   assert.equal(pickKeepSaleId(c, null), '43892');
 });
 
+test('séance d’essai du jour (mêmes dates) n’est pas un abo annulé', () => {
+  const [y, m, d] = parisDay().split('-');
+  const sold = `${d}/${m}/${y}`;
+  const essai = {
+    idc: '45000',
+    isBadge: false,
+    label: `SEANCE D'ESSAI CONTRAT N°C2026-045000 vendu le ${sold} ${sold}`,
+  };
+  assert.equal(isStaleOrInactiveAbo(essai.label), false);
+  assert.equal(leftoverBlocksNewSale(essai), true);
+});
+
 test('le bot ventes garde la vente du jour', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../bot/sale.js'), 'utf8');
   assert.match(src, /pickKeepSaleId/);

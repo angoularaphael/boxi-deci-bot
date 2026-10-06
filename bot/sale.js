@@ -3100,20 +3100,26 @@ async function annotateMember(page, order, productConfig, memberId = null) {
 async function verifyCreatedContract(
   page,
   memberId,
-  { badge = false, label = '', productConfig = null, existingIds = [] } = {}
+  { badge = false, label = '', productConfig = null, existingIds = [], gymConfig = {} } = {}
 ) {
   const { findActiveContracts } = require('./cancel-sale');
   const prior = new Set((existingIds || []).map((id) => String(id)));
-  const maxAttempts = badge ? 4 : 5;
+  const maxAttempts = badge ? 4 : 6;
+  let lastSeen = [];
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     await closeGreyboxIfOpen(page).catch(() => {});
-    await openMemberCheck(page, memberId).catch(() => {});
+    await openMemberCheck(page, memberId, gymConfig).catch(() => {});
     await randomDelay(badge ? 500 : 700, badge ? 800 : 1100);
     const contracts = await findActiveContracts(page, {
       includeExpiredPrestation: true,
     }).catch(() => []);
+    lastSeen = contracts.map((item) => ({
+      idc: item.idc,
+      badge: Boolean(item.isBadge),
+      label: String(item.label || '').slice(0, 140),
+    }));
     const needle = String(label || '').toLowerCase();
-    const contract = contracts.find((item) => {
+    let contract = contracts.find((item) => {
       if (prior.has(String(item.idc))) return false;
       const itemLabel = String(item.label || '');
       if (badge) return Boolean(item.isBadge);
@@ -3122,6 +3128,9 @@ async function verifyCreatedContract(
       if (productConfig) return saleContractMatches(itemLabel, productConfig);
       return Boolean(item.isBadge) === false;
     });
+    if (!contract && /essai|coaching/i.test(needle)) {
+      contract = contracts.find((item) => !prior.has(String(item.idc)) && !item.isBadge) || null;
+    }
     if (contract) {
       logInfo('Contrat Deciplus vérifié après vente', {
         member_id: memberId,
@@ -3131,9 +3140,14 @@ async function verifyCreatedContract(
       });
       return contract;
     }
-    await page.waitForTimeout(badge ? 500 : 800);
+    await page.waitForTimeout(badge ? 500 : 900);
   }
   const expected = label || (badge ? 'Badge' : 'prestation');
+  logWarn('Contrat attendu introuvable après vente', {
+    member_id: memberId,
+    expected,
+    seen: lastSeen,
+  });
   throw new Error(
     `Vente Deciplus non confirmée : contrat ${expected} absent de la fiche membre ${memberId}`
   );
@@ -3218,15 +3232,18 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
 
     let badgesBefore = 0;
     let existingTrial = null;
+    let contractsBefore = [];
     if (isCartePrestationConfig(productConfig)) {
       const { findActiveContracts } = require('./cancel-sale');
-      const before = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
-      badgesBefore = before.filter((item) => item.isBadge).length;
+      const { isStaleOrInactiveAbo } = require('../lib/replace-existing-abo');
+      contractsBefore = await findActiveContracts(page, { includeExpiredPrestation: true }).catch(() => []);
+      badgesBefore = contractsBefore.filter((item) => item.isBadge).length;
       if (isTrialPrestationConfig(productConfig)) {
         existingTrial =
-          before.find(
+          contractsBefore.find(
             (item) =>
               !item.isBadge &&
+              !isStaleOrInactiveAbo(item.label) &&
               /s[eé]ance d['’]?\s*essai|\bessai\b/i.test(String(item.label || ''))
           ) || null;
       }
@@ -3275,6 +3292,9 @@ async function recordSale(page, order, productConfig, memberId, gymConfig = {}, 
             productConfig.deciplus_product_name ||
             productConfig.name ||
             order.product_name,
+          productConfig,
+          existingIds: contractsBefore.map((c) => c.idc),
+          gymConfig,
         }));
       result.sale_id = carteContract.idc;
       if (isCartePrestationConfig(productConfig)) {

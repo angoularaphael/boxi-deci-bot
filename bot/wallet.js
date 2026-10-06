@@ -490,6 +490,14 @@ async function updateMemberAddressViaApi(page, memberId, addr) {
           updated = true;
           break;
         }
+        if (res.status() === 404) {
+          logInfo('API adresse membre absente (404) — fiche UI suffisante', {
+            member_id: memberId,
+            method,
+            client: headers['Deciplus-Client-Type'],
+          });
+          continue;
+        }
         logWarn('API adresse membre refusée', {
           member_id: memberId,
           method,
