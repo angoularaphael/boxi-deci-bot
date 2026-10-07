@@ -264,10 +264,19 @@ async function fetchDeciplusEmailCode(opts = {}) {
       }
       await client.logout().catch(() => {});
     } catch (err) {
+      const detail = String(err.responseText || err.message || 'erreur IMAP');
       logWarn('IMAP code Deciplus — tentative échouée', {
         attempt,
-        error: err.message,
+        error: detail,
+        status: err.responseStatus || null,
+        host: cfg.host,
       });
+      if (/invalid credentials|authenticationfailed|auth/i.test(detail)) {
+        logWarn(
+          'IMAP Gmail refuse le mot de passe. Il faut un mot de passe d application Google dans DECIPLUS_IMAP_PASS, puis redémarrer le bot.'
+        );
+        return null;
+      }
       try {
         await client.logout();
       } catch {
