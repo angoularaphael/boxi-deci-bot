@@ -88,8 +88,8 @@ if (fs.existsSync(ROOT_ENV)) {
 
 console.log('[BOXPLUS] npm install (app)…');
 run('npm install --omit=dev --ignore-scripts', APP_DIR);
-// Force explicite — évite node_modules partiel sans IMAP
-run('npm install imapflow mailparser --omit=dev --no-fund --no-audit', APP_DIR);
+// Playwright est requis par le bot. --omit=dev le sautait quand il etait en devDependency.
+run('npm install playwright imapflow mailparser --no-save --ignore-scripts --no-fund --no-audit', APP_DIR);
 
 process.chdir(APP_DIR);
 require(path.join(APP_DIR, 'start.js'));

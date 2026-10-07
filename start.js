@@ -41,7 +41,12 @@ function ensureRequiredDeps() {
     run('npm install --omit=dev --ignore-scripts');
   }
 
-  const stillMissing = required.filter((name) => !moduleResolvable(name));
+  let stillMissing = required.filter((name) => !moduleResolvable(name));
+  if (stillMissing.length) {
+    console.log(`[BOXPLUS] Installation directe: ${stillMissing.join(', ')}`);
+    run(`npm install ${stillMissing.join(' ')} --no-save --ignore-scripts --no-fund --no-audit`);
+    stillMissing = required.filter((name) => !moduleResolvable(name));
+  }
   if (stillMissing.length) {
     console.error(
       `[BOXPLUS] Impossible d’installer: ${stillMissing.join(', ')}. Vérifier package.json / réseau.`
