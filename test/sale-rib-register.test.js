@@ -19,10 +19,11 @@ describe('enregistrement RIB a la vente', () => {
   it('ne considere pas un IBAN seulement affiche comme un mandat enregistre', () => {
     assert.match(wallet, /async function ribMandateNeedsSave/);
     assert.match(wallet, /RIB visible mais mandat non enregistré/);
-    assert.match(wallet, /existingMeta\.rum && ibanAlready && !needsSave/);
-    assert.match(wallet, /if \(await ribMandateNeedsSave\(ribCtx\)\) return false/);
+    assert.match(wallet, /existingMeta\.rum && ibanAlready && isLikelyBic\(existingMeta\.bic\) && !needsSave/);
+    assert.match(wallet, /hasIban && !hasBic\) return true/);
+    assert.match(wallet, /Mandat sans BIC — RIB considéré incomplet/);
     assert.match(wallet, /memberAsksToRegisterRib/);
-    assert.match(wallet, /after\.rum && ibanSaved && !stillAsks/);
+    assert.match(wallet, /BIC mandat introuvable après saisie IBAN/);
     assert.doesNotMatch(wallet, /!afterNeed \|\| posted\?\.ok/);
   });
 

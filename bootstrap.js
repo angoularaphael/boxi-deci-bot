@@ -43,15 +43,32 @@ function run(cmd, cwd = ROOT) {
 
 loadRootEnv();
 
+const WANTED_REPO = 'https://github.com/angoularaphael/box-plus.git';
+const configuredRepo = process.env.BOT_REPO_URL || process.env.BOT_GITHUB_REPO || '';
 const repo =
-  process.env.BOT_REPO_URL ||
-  process.env.BOT_GITHUB_REPO ||
-  'https://github.com/angoularaphael/boxi-deci-bot.git';
+  !configuredRepo || /boxi-deci-bot\.git/i.test(configuredRepo) ? WANTED_REPO : configuredRepo;
+if (configuredRepo && repo !== configuredRepo) {
+  console.log('[BOXPLUS] BOT_REPO_URL ignore — chargement de box-plus (RIB/BIC)');
+}
 const branch = process.env.BOT_REPO_BRANCH || 'main';
 const appName = process.env.BOT_APP_DIR || 'boxi-deci-bot-app';
 const APP_DIR = path.join(ROOT, appName);
 
 console.log('[BOXPLUS] Bootstrap BotHosting', { repo, branch, app: appName });
+
+function originUrl(dir) {
+  try {
+    return execSync('git remote get-url origin', { cwd: dir, encoding: 'utf8' }).trim();
+  } catch {
+    return '';
+  }
+}
+
+const origin = fs.existsSync(APP_DIR) ? originUrl(APP_DIR) : '';
+if (fs.existsSync(APP_DIR) && origin && !/box-plus\.git/i.test(origin)) {
+  console.log('[BOXPLUS] Ancien depot retire', origin);
+  fs.rmSync(APP_DIR, { recursive: true, force: true });
+}
 
 if (!fs.existsSync(APP_DIR)) {
   run(`git clone --branch ${branch} ${repo} ${appName}`);
