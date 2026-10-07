@@ -499,21 +499,26 @@ async function processSaleJob(page, order, jobMeta = {}) {
     action: memberId ? (checkpoint.deciplus_member_id ? 'checkpoint_resume' : 'order_member_id') : null,
   };
 
-  if (!memberId) {
+  const isChangeSale =
+    order.notify_change_complete || String(order.source || '').includes('change');
+  if (!isChangeSale) {
     const { boutiqueSaleDispatchAllowed } = require('../lib/sale-dispatch-policy');
     if (!boutiqueSaleDispatchAllowed(order)) {
       const err =
-        'Dispatch refusé — signature ou ready_for_dispatch requis avant création membre Deciplus';
-      logWarn('Création membre bloquée (commande non signée)', {
+        'Dispatch refusé — inscription non finalisée, fiche Deciplus non créée';
+      logWarn('Création membre bloquée (inscription non finalisée)', {
         order_id: order.order_id,
+        step: order.step || null,
         signed_at: order.signature?.signed_at || null,
-        ready_for_dispatch: Boolean(order.ready_for_dispatch),
       });
       return {
         status: STATUS.REJECTED,
         error: err,
       };
     }
+  }
+
+  if (!memberId) {
     // Toujours rechercher une fiche strictement concordante avant création.
     // Un crash entre la création Deciplus et le checkpoint ne doit jamais créer un second membre.
     /* Canonicaliser l'option sans rétablir l'ancien défaut dangereux :
